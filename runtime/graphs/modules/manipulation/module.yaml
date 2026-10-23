@@ -1,0 +1,76 @@
+module:
+  orchestration_contract:
+    version: orchestration_contract.v1
+    admission:
+      authority: existing_owner_and_runtime_validation
+      description: Descriptive only; absent evidence is unknown, not ready.
+    result:
+      required: []
+    acceptance:
+      authority: policies/validation_policy.py and existing owner validators
+      description: existing owner-specific manipulation checks remain authoritative
+  id: manipulation
+  label: Manipulation Agent Module
+  handler: agent.manipulation_agent
+  llm_role: manipulation_plan
+  editable: true
+  safety:
+    live_requires_validation: true
+    dry_run_supported: true
+    execution_boundary: lerobot_bridge_only
+    guardian_stop_authority: true
+  tools:
+  - lerobot.replay.start
+  - lerobot.replay.status
+  - lerobot.replay.stop
+  - lerobot.rollout.start
+  - lerobot.rollout.stop
+  - lerobot.rollout.status
+  - robot.pick_place
+  runtime_contract:
+    policy_executor: pi05_or_lerobot_policy
+    supervisor: manipulation_agent
+    live_bridge_boundary: LeRobotBridge
+    direct_shell_generation_allowed: false
+    requires_camera_return_to_vla: true
+  supported_tasks:
+  - id: transfer_to_utm
+    label: Printed specimen to UTM fixture
+    source_location: 3dp_output_area
+    target_location: utm_fixture
+    terminal_pose: standby_clear_of_utm
+    verification_signal: specimen_on_utm_platen
+    verified_next_agent: lab_equipment_agent
+  - id: clear_utm_to_disposal
+    label: Tested specimen to discard bin
+    source_location: utm_fixture
+    target_location: discard_bin
+    terminal_pose: standby_clear_of_utm
+    verification_signal: utm_fixture_clear_verified
+    verified_next_agent: analysis_agent
+  execution_graph:
+    schema: ax4lab.execution_graph.v1
+    entry: task
+    nodes:
+    - {id: task, handler: manipulation.task, label: Composite bounded manipulation task, area: middle, llm: true}
+    - {id: deliver, handler: manipulation.deliver, label: Deliver owner result, area: middle}
+    edges:
+    - {source: task, target: deliver, 'on': next, kind: evidence}
+    terminals: [deliver]
+  io_contract:
+    input:
+    - OrchestratorState with specimen_result, latest Vision observation, and manipulation profile
+    - transfer_readiness.camera_returned_to_vla
+    output:
+    - manipulation
+    - manipulation_report.v1
+    - robot_task_result.v1
+    - handoff_packet
+    - decisions
+    - metrics
+  notes: >-
+    GUI/module editor may edit this module config, but execution remains bound to
+    allowlisted Python handlers. Manipulation supervises short Pi0.5/LeRobot
+    skills; Pi0.5 is not a planner and direct shell command generation is not
+    allowed. Post-place Vision verification is represented as a handoff gate
+    until the graph includes an explicit second Vision node after Manipulation.

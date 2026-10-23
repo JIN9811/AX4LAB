@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# File purpose:
+# - Stable repository-local launcher for Bambu Studio CLI calls.
+# - Keeps configs/devices.yaml portable while allowing operators to install
+#   Bambu Studio through PATH, ~/.local/bin, /opt, AppImage, or Flatpak.
+#
+# This wrapper does not install Bambu Studio. It resolves an existing executable
+# and runs CLI slicing under Xvfb when no desktop display is available. Bambu
+# Studio's CLI still initializes GLFW, so pure headless execution can segfault.
+
+set -euo pipefail
+
+candidates=()
+
+should_use_xvfb() {
+  if [[ "${ATR_BAMBU_DISABLE_XVFB:-0}" == "1" ]]; then
+    return 1
+  fi
+  if ! command -v xvfb-run >/dev/null 2>&1; then
+    return 1
+  fi
+  if [[ "${ATR_BAMBU_USE_EXISTING_DISPLAY:-0}" == "1" ]]; then
+    return 1
+  fi
+  for arg in "$@"; do
+    case "${arg}" in
+      --slice|--export-3mf|--export-slicedata|--export-png)
+        return 0
+        ;;
+    esac
+  done
+  [[ -z "${DISPLAY:-}" ]]
+}
+
+exec_bambu() {
+  local candidate="$1"
+  shift
+  if should_use_xvfb "$@"; then
+    export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-xcb}"
+    export GDK_BACKEND="${GDK_BACKEND:-x11}"
+    export XDG_SESSION_TYPE="${XDG_SESSION_TYPE:-x11}"
+    export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-x11}"
+    export GLFW_PLATFORM="${GLFW_PLATFORM:-x11}"
+    unset WAYLAND_DISPLAY
+    exec xvfb-run -a -s "-screen 0 1920x1080x24" "${candidate}" "$@"
+  fi
+  exec "${candidate}" "$@"
+}
+
+if [[ -n "${BAMBU_STUDIO_EXECUTABLE:-}" ]]; then
+  candidates+=("${BAMBU_STUDIO_EXECUTABLE}")
+fi
+
+for name in bambu-studio BambuStudio bambu-studio.AppImage BambuStudio.AppImage; do
+  if found="$(command -v "${name}" 2>/dev/null)"; then
+    candidates+=("${found}")
+  fi
+done
+
+candidates+=(
+  "${HOME}/.local/bin/bambu-studio"
+  "${HOME}/.local/bin/BambuStudio"
+  "${HOME}/Applications/BambuStudio.AppImage"
+  "/usr/local/bin/bambu-studio"
+  "/usr/bin/bambu-studio"
+  "/opt/bambu-studio/bin/bambu-studio"
+  "/opt/BambuStudio/bin/bambu-studio"
+  "/opt/BambuStudio/BambuStudio.AppImage"
+)
+
+for candidate in "${candidates[@]}"; do
+  if [[ -n "${candidate}" && -x "${candidate}" ]]; then
+    exec_bambu "${candidate}" "$@"
+  fi
+done
+
+if command -v flatpak >/dev/null 2>&1 && flatpak info com.bambulab.BambuStudio >/dev/null 2>&1; then
+  if should_use_xvfb "$@"; then
+    export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-xcb}"
+    export GDK_BACKEND="${GDK_BACKEND:-x11}"
+    export XDG_SESSION_TYPE="${XDG_SESSION_TYPE:-x11}"
+    export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-x11}"
+    export GLFW_PLATFORM="${GLFW_PLATFORM:-x11}"
+    unset WAYLAND_DISPLAY
+    exec xvfb-run -a -s "-screen 0 1920x1080x24" flatpak run com.bambulab.BambuStudio "$@"
+  fi
+  exec flatpak run com.bambulab.BambuStudio "$@"
+fi
+
+cat >&2 <<'ERR'
+Bambu Studio executable was not found.
+
+Install Bambu Studio or set one of these before running the 3DP slicer path:
+  export BAMBU_STUDIO_EXECUTABLE=/absolute/path/to/bambu-studio
+
+The wrapper checked PATH, ~/.local/bin, ~/Applications, /usr/local/bin, /usr/bin,
+/opt, and Flatpak app id com.bambulab.BambuStudio.
+ERR
+exit 127

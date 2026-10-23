@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<!--
+File purpose:
+- Live-mode Runtime IDE surface opened from the main dashboard before hardware execution.
+
+Key classes/functions:
+- Three-zone Live GUI consumed by web/static/planning.js
+
+Inputs/outputs:
+- Input: query string goal and runtime API state
+- Output: persistent runtime chat, agent binder, report/backend/artifact views, timeline, and safety controls
+
+Dependencies:
+- /static/styles.css
+- /static/planning.js
+
+Modification guide:
+- Safe places to edit: layout panels and labels that preserve consumed element IDs
+- Risky places to edit: API paths and IDs consumed by planning.js
+- Related files: app/main.py, web/static/app.js
+-->
+<html lang="ko">
+  <head>
+    <link rel="preload" as="image" href="/static/ax4lab-logo-transparent.png" fetchpriority="high" />
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{{ title }}</title>
+    {% if replay %}
+    <script src="/static/run_review_artifacts.js?v=1"></script>
+    <script src="/static/run_review.js?v=5"></script>
+    {% endif %}
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+    <!-- Compatibility markers for the imported Live GUI package contract:
+      /static/styles.css?v=20260527-live-focus
+      /static/planning.js?v=20260613-clean-stl-render-1
+      /static/styles.css?v=20260622-utm-rqt-flow-1
+      /static/planning.js?v=20260622-utm-rqt-flow-1
+      /static/styles.css?v=20260709-spc-live-thermal-donut-1
+      /static/planning.js?v=20260709-spc-live-thermal-donut-1
+      /static/styles.css?v=20260709-chat-spc-pending-1
+      /static/planning.js?v=20260710-manip-cards-1
+      /static/styles.css?v=20260710-estop-fill-2
+      /static/styles.css?v=20260713-activecam-card-1
+      /static/planning.js?v=20260713-activecam-card-1
+      /static/styles.css?v=20260713-activecam-details-bottom-1
+      /static/planning.js?v=20260713-activecam-details-bottom-1
+      /static/styles.css?v=20260713-vision-pose-hidden-1
+      /static/planning.js?v=20260713-vision-pose-hidden-1
+      /static/planning.js?v=20260714-motion-stability-1
+      /static/styles.css?v=20260903-passive-vision-1
+      /static/planning.js?v=20260903-passive-vision-1
+      /static/planning.js?v=20260904-bo-lhs-1
+    -->
+    <link rel="stylesheet" href="/static/styles.css?v=20260919-generated-evidence-1" />
+    <link rel="stylesheet" href="/static/experimental_setup.css?v=20260916-grouped-1" />
+    <link rel="stylesheet" href="/static/live_runtime_dock.css?v=20260914-6" />
+    <link rel="stylesheet" href="/static/artifact_explorer.css?v=20260914-3" />
+    <link rel="stylesheet" href="/static/knowledge_panels.css?v=20260914-8" />
+    {% if replay %}<link rel="stylesheet" href="/static/run_review.css?v=3" />{% endif %}
+  </head>
+  <body class="planning-live-body{% if replay %} run-replay-mode{% endif %}">
+    <div id="live-boot-cover" role="status" aria-label="Loading AX4LAB">
+      <img src="/static/ax4lab-logo-transparent.png" alt="AX4LAB" width="240" height="240" fetchpriority="high" loading="eager" decoding="sync" />
+      <strong class="live-boot-title">{{ 'REPLAY' if replay else 'LIVE GUI' }}</strong>
+    </div>
+    <script src="/static/live_boot.js?v=3"></script>
+    {% if not replay %}<script src="/static/live_fullscreen.js?v=1" defer></script>{% endif %}
+    <noscript><style>#live-boot-cover { display:none; }</style></noscript>
+    <main class="planning-runtime-shell" aria-label="AX4LAB Live Runtime GUI">
+      <header class="live-runtime-header panel">
+        <div class="live-runtime-title">
+          <p class="eyebrow" title="AX4LAB Runtime / Live Orchestrator">AX4LAB Runtime</p>
+          <h1 title="{{ 'Read-only recorded runtime' if replay else 'Live Runtime' }}"{% if replay %} class="replay-brand"{% endif %}>{{ 'REPLAY' if replay else 'LIVE' }}</h1>
+        </div>
+        <div class="live-runtime-metrics mission-status-bar" aria-label="runtime summary">
+          <section class="mission-status-cell mission-status-primary" data-label="Contract" title="Current experiment contract and cycle">
+            {% if replay %}<select id="replay-point-select" aria-label="Replay point"><option>Not recorded</option></select>{% endif %}
+            <span id="planning-state-dot" class="status-dot idle"></span>
+            <span class="planning-mission-marquee-window" aria-label="Current experiment contract">
+              <span id="planning-stage-label" title="Current experiment contract">Contract loading</span>
+            </span>
+            <span id="planning-cycle-label" class="runtime-chip" title="Current closed-loop cycle">Cycle -</span>
+          </section>
+          <section class="mission-status-cell mission-status-run" data-label="Run" title="Run mode and activity state">
+            {% if replay %}<select id="replay-run-select" aria-label="Archived run"><option>Loading…</option></select>{% endif %}
+            <span id="planning-run-detail" title="Current run mode and state">No active run</span>
+            <span id="live-runtime-clock" class="runtime-chip" title="Elapsed since experiment execution approval">--:--</span>
+          </section>
+          <section class="mission-status-cell mission-status-agent" data-label="Agent" title="Active agent and chat state">
+            <span id="live-active-agent-chip" class="badge idle" title="Active agent">Orchestrator</span>
+            <span id="planning-chat-status" class="badge idle">Ready</span>
+          </section>
+          <section class="mission-status-cell mission-status-link" data-label="Sync" title="Runtime stream and synchronization state">
+            <span id="live-stream-chip" class="runtime-chip warning" title="Runtime event stream is connecting">SSE ...</span>
+            <span id="live-sync-chip" class="runtime-chip idle" title="No state sync completed yet">Sync -</span>
+            <span id="live-fault-chip" class="runtime-chip idle" title="No runtime faults detected">All clear</span>
+          </section>
+          <section class="mission-status-cell mission-status-resource" data-label="Resource" title="Runtime compute and token usage">
+            <span id="live-resource-chip" class="runtime-chip" title="GPU and memory usage">Compute waiting</span>
+            <span id="live-token-chip" class="runtime-chip" title="LLM token usage for this Live GUI session">Tokens -</span>
+          </section>
+          <section class="mission-status-cell mission-status-stop" data-label="CONTROL" title="Emergency runtime control">
+            <button id="btn-live-safe-stop" class="btn danger" title="Emergency Stop: force terminate the active runtime" aria-label="Emergency Stop">E-STOP</button>
+            <div id="live-emergency-recovery" class="live-emergency-recovery" hidden aria-label="Emergency stop recovery controls">
+              <button id="btn-live-emergency-resume" class="btn live-emergency-resume" hidden disabled title="Resume from E-STOP latch">Resume</button>
+              <button id="btn-live-emergency-reset" class="btn live-emergency-reset" hidden disabled title="Reset runtime state to fresh-server defaults">Reset</button>
+              <div id="live-plc-emergency-guidance" class="live-plc-emergency-guidance" role="status" aria-live="polite" hidden>
+                <span>PB1 short: Resume</span>
+                <span>PB1 long: Reset</span>
+              </div>
+            </div>
+          </section>
+        </div>
+      </header>
+
+      <aside class="live-agent-binder panel" aria-label="agent binder">
+        <div id="live-agent-binder-list" class="binder-list"></div>
+      </aside>
+
+      <section class="live-center-panel panel" aria-label="agent report and trace panel">
+        <div class="panel-title-row live-panel-title-row">
+          <div>
+            <p class="eyebrow" title="Center runtime context panel">View</p>
+            <h2 id="live-center-title">Report</h2>
+          </div>
+          <div class="live-view-tabs" aria-label="center panel modes">
+            <button class="btn live-view-tab active" data-live-view="report" title="Report view (Alt+Shift+R)" aria-label="Report view" aria-keyshortcuts="Alt+Shift+R"><span class="live-tab-icon" aria-hidden="true">R</span><span class="live-tab-label">Report</span></button>
+            <button class="btn live-view-tab" data-live-view="backend" title="Backend view (Alt+Shift+B)" aria-label="Backend view" aria-keyshortcuts="Alt+Shift+B"><span class="live-tab-icon" aria-hidden="true">{}</span><span class="live-tab-label">Backend</span></button>
+            <button class="btn live-view-tab" data-live-view="graph" title="Graph view (Alt+Shift+G)" aria-label="Graph view" aria-keyshortcuts="Alt+Shift+G"><span class="live-tab-icon" aria-hidden="true">G</span><span class="live-tab-label">Graph</span></button>
+            <button class="btn live-view-tab" data-live-view="artifacts" title="Artifacts view (Alt+Shift+A)" aria-label="Artifacts view" aria-keyshortcuts="Alt+Shift+A"><span class="live-tab-icon" aria-hidden="true">A</span><span class="live-tab-label">Artifacts</span></button>
+            <button class="btn live-view-tab" data-live-view="timeline" title="Timeline view (Alt+Shift+T)" aria-label="Timeline view" aria-keyshortcuts="Alt+Shift+T"><span class="live-tab-icon" aria-hidden="true">T</span><span class="live-tab-label">Timeline</span></button>
+          </div>
+          <div id="live-report-toolbar" class="live-report-toolbar" aria-label="report actions"></div>
+        </div>
+        <div id="live-focus-strip" class="live-focus-strip" title="Selected runtime focus" aria-label="selected runtime focus">Focus -</div>
+        <div id="live-approval-panel" class="live-approval-panel" aria-label="runtime approvals" aria-hidden="true" hidden></div>
+        <div id="live-report-panel" class="live-center-view active"></div>
+        <div id="live-backend-panel" class="live-center-view"></div>
+        <div id="live-graph-panel" class="live-center-view"></div>
+        <div id="live-artifact-panel" class="live-center-view"></div>
+        <div id="live-timeline-detail-panel" class="live-center-view"></div>
+      </section>
+
+      <section class="panel planning-chat-shell live-chat-panel" aria-label="persistent runtime chat">
+        <header class="planning-chat-header live-chat-header">
+          <div>
+            <p class="eyebrow" title="Persistent Runtime Chat">Runtime</p>
+            <h2>Chat</h2>
+          </div>
+          <div class="live-chat-context-controls">
+            <label>
+              <span title="Chat target agent">T</span>
+              <select id="live-chat-target" class="text-input compact-input"></select>
+            </label>
+            <label>
+              <span title="Chat mode">M</span>
+              <select id="live-chat-mode" class="text-input compact-input">
+                <option value="ask">Ask</option>
+                <option value="command">Command</option>
+                <option value="approval">Approval</option>
+                <option value="edit_report">Edit Report</option>
+              </select>
+            </label>
+          </div>
+          <button id="btn-live-chat-collapse" class="btn live-chat-collapse" type="button" title="Collapse chat panel" aria-label="Collapse chat panel" aria-expanded="true">Hide</button>
+        </header>
+
+        <div id="live-experiment-setup-panel" class="live-experiment-setup-panel" role="region" aria-label="Experimental Setup blocks" tabindex="0"></div>
+
+        <div id="live-chat-context-strip" class="live-chat-context-strip" title="Runtime chat context" aria-label="runtime chat context">CTX -</div>
+
+        <div id="live-quick-actions" class="live-quick-actions" aria-label="runtime chat quick actions">
+          <button class="btn live-quick-action" data-quick-action="approve_next_step" title="Approve next step" aria-label="Approve next step"><span class="live-quick-icon" aria-hidden="true">OK</span><span class="live-quick-label">Approve</span></button>
+          <button class="btn live-quick-action" data-quick-action="revise" title="Revise current approval or report" aria-label="Revise"><span class="live-quick-icon" aria-hidden="true">RV</span><span class="live-quick-label">Revise</span></button>
+          <button class="btn live-quick-action" data-quick-action="reject_next_step" title="Reject next step" aria-label="Reject next step"><span class="live-quick-icon" aria-hidden="true">NO</span><span class="live-quick-label">Reject</span></button>
+          <button class="btn warning live-quick-action" data-quick-action="pause_run" title="Pause Run (Alt+Shift+P)" aria-label="Pause Run" aria-keyshortcuts="Alt+Shift+P"><span class="live-quick-icon" aria-hidden="true">PA</span><span class="live-quick-label">Pause</span></button>
+          <button class="btn live-quick-action" data-quick-action="resume_run" title="Resume Run (Alt+Shift+O)" aria-label="Resume Run" aria-keyshortcuts="Alt+Shift+O"><span class="live-quick-icon" aria-hidden="true">GO</span><span class="live-quick-label">Resume</span></button>
+          <button class="btn danger live-quick-action" data-quick-action="safe_stop" title="Safe stop (Alt+Shift+X)" aria-label="Safe stop" aria-keyshortcuts="Alt+Shift+X"><span class="live-quick-icon" aria-hidden="true">ST</span><span class="live-quick-label">Stop</span></button>
+          <button class="btn live-quick-action" data-quick-action="dry_run" title="Dry Run current graph (Alt+Shift+D)" aria-label="Dry Run" aria-keyshortcuts="Alt+Shift+D"><span class="live-quick-icon" aria-hidden="true">DR</span><span class="live-quick-label">Dry Run</span></button>
+        </div>
+
+        <div id="planning-chat-log" class="planning-chat-log planning-chat-window" role="log" aria-live="polite" aria-relevant="additions text" aria-label="Runtime Chat conversation stream"></div>
+
+        <footer class="planning-composer">
+          <input id="planning-goal-input" type="hidden" />
+          <label class="planning-message-label" for="planning-message-input" title="Runtime chat message input">
+            <span class="planning-message-label-text">Message</span>
+            <textarea
+              id="planning-message-input"
+              rows="2"
+              placeholder="Message runtime..."
+            ></textarea>
+          </label>
+          <div class="button-row planning-composer-actions">
+            <button id="btn-planning-refresh" class="btn" title="Refresh runtime state (Alt+Shift+U)" aria-label="Refresh runtime state" aria-keyshortcuts="Alt+Shift+U">RF</button>
+            <button id="btn-planning-generate" class="btn" title="Draft Plan" aria-label="Draft Plan">Draft</button>
+            <button id="btn-planning-send" class="btn primary" title="Send message" aria-label="Send message" aria-keyshortcuts="Control+Enter">Send</button>
+          </div>
+          <p class="hint planning-trigger-hint" title="Send a runtime command or approval note.">
+            Send a runtime command or approval note.
+          </p>
+        </footer>
+      </section>
+
+      <button id="btn-live-chat-restore" class="btn live-chat-restore" type="button" title="Show runtime chat" aria-label="Show runtime chat" aria-expanded="false" hidden>CHAT</button>
+
+      <footer class="live-runtime-bottom panel runtime-dock" aria-label="runtime timeline and device state">
+        <div id="live-mission-progress-slim" class="live-mission-progress-slim" aria-label="mission progress summary">Mission progress loading</div>
+        <button id="btn-live-bottom-collapse" class="btn live-bottom-collapse" type="button" title="Collapse Events and Device Bridges" aria-label="Collapse Events and Device Bridges" aria-expanded="true">Hide Dock</button>
+        <nav class="live-dock-tabs" role="tablist" aria-label="Runtime dock">
+          <button id="live-dock-events-tab" class="btn active" type="button" role="tab" data-dock-tab="events" aria-controls="live-dock-events" aria-selected="true">Events <span id="live-event-count">0/0</span></button>
+          <button id="live-dock-devices-tab" class="btn" type="button" role="tab" data-dock-tab="devices" aria-controls="live-dock-devices" aria-selected="false" tabindex="-1">Device Bridges</button>
+        </nav>
+        <section id="live-dock-events" data-dock-panel="events" role="tabpanel" aria-labelledby="live-dock-events-tab">
+          <div class="panel-title-row live-timeline-title-row">
+            <div class="live-timeline-filters" aria-label="timeline filters">
+              <button class="btn live-timeline-filter active" data-timeline-filter="all" title="All runtime events" aria-label="All runtime events"><span class="live-filter-icon" aria-hidden="true">A</span><span class="live-timeline-filter-label">All</span></button>
+              <button class="btn live-timeline-filter" data-timeline-filter="info" title="Info events" aria-label="Info events"><span class="live-filter-icon" aria-hidden="true">i</span><span class="live-timeline-filter-label">Info</span></button>
+              <button class="btn live-timeline-filter" data-timeline-filter="warning" title="Warning and approval events" aria-label="Warning and approval events"><span class="live-filter-icon" aria-hidden="true">!</span><span class="live-timeline-filter-label">Warning</span></button>
+              <button class="btn live-timeline-filter" data-timeline-filter="error" title="Error events" aria-label="Error events"><span class="live-filter-icon" aria-hidden="true">×</span><span class="live-timeline-filter-label">Error</span></button>
+              <button class="btn live-timeline-filter" data-timeline-filter="tool" title="Tool-call events" aria-label="Tool-call events"><span class="live-filter-icon" aria-hidden="true">T</span><span class="live-timeline-filter-label">Tool</span></button>
+              <button class="btn live-timeline-filter" data-timeline-filter="artifact" title="Artifact events" aria-label="Artifact events"><span class="live-filter-icon" aria-hidden="true">F</span><span class="live-timeline-filter-label">Artifact</span></button>
+              <button class="btn live-timeline-filter" data-timeline-filter="handoff" title="Handoff events" aria-label="Handoff events"><span class="live-filter-icon" aria-hidden="true">H</span><span class="live-timeline-filter-label">Handoff</span></button>
+            </div>
+          </div>
+          <div id="live-timeline-strip" class="live-timeline-strip"></div>
+        </section>
+        <section id="live-dock-devices" data-dock-panel="devices" role="tabpanel" aria-labelledby="live-dock-devices-tab" hidden>
+          <div id="live-device-strip" class="live-device-strip"></div>
+        </section>
+      </footer>
+
+      <div id="planning-spec-summary" hidden></div>
+      <div id="live-hover-tooltip" class="live-hover-tooltip" role="tooltip" hidden></div>
+      <div id="live-binder-context-menu" class="live-binder-context-menu" role="menu" hidden></div>
+      <div id="live-shortcut-overlay" class="live-shortcut-overlay" role="dialog" aria-modal="false" aria-label="Live GUI shortcuts" hidden>
+        <div class="live-shortcut-card">
+          <div class="live-shortcut-head">
+            <strong>Shortcuts</strong>
+            <button id="btn-live-shortcuts-close" class="btn" type="button" title="Close shortcuts" aria-label="Close shortcuts">×</button>
+          </div>
+          <dl>
+            <div><dt>?</dt><dd>Show/hide shortcuts</dd></div>
+            <div><dt>Esc</dt><dd>Close tooltip/menu</dd></div>
+            <div><dt>Alt+Shift+R/B/G/A/T</dt><dd>Report / Backend / Graph / Artifacts / Timeline</dd></div>
+            <div><dt>Alt+Shift+U</dt><dd>Refresh state</dd></div>
+            <div><dt>Alt+Shift+D/N</dt><dd>Dry run / Node test</dd></div>
+            <div><dt>Alt+Shift+P/O</dt><dd>Pause / Resume</dd></div>
+            <div><dt>Alt+Shift+X</dt><dd>Safe Stop</dd></div>
+            <div><dt>Ctrl+Enter</dt><dd>Send chat</dd></div>
+            <div><dt>Enter</dt><dd>New line</dd></div>
+          </dl>
+        </div>
+      </div>
+    </main>
+
+    <script src="/static/runtime_graph_geometry.js?v=atr-ui-20260812-graph-layout-4"></script>
+    <script src="/static/runtime_cycle.js?v=20260919-cycle-identity-1"></script>
+    <script src="/static/printer_video_visibility.js?v=20260923-reconnect-1"></script>
+    <script src="/static/vendor/echarts.min.js?v=5.6.0"></script>
+    {% if not replay %}<script src="/static/omx_telemetry_viewer.bundle.js?v=20260924-contact-hold-1" defer></script>{% endif %}
+    <script src="/static/lhs_design_visualization.js?v=20260917-design-progress-1"></script>
+    <link rel="stylesheet" href="/static/bo_posterior_surface.css?v=20260917-1">
+    <script src="/static/bo_posterior_surface.js?v=20260919-history-2"></script>
+    <script src="/static/bo_visualization.js?v=20260917-surface-1"></script>
+    <script src="/static/equipment_agentic_task_model.js?v=20260903-passive-vision-1"></script>
+    <script src="/static/experimental_setup.js?v=20260916-initial-2" defer></script>
+    <script src="/static/knowledge_workspace.js?v=20260913-wiki-memory-1" defer></script>
+    <script src="/static/knowledge_live.js?v=20260913-wiki-memory-1" defer></script>
+    <script src="/static/knowledge_panels.js?v=20260914-7" defer></script>
+    <script src="/static/agent_module_host.js?v=20260914-loading-1" data-asset-revision="20260919-anl-history-bo-equation-3" defer></script>
+    <script src="/static/artifact_explorer.js?v=20260918-replay-1" defer></script>
+    <script src="/static/loop_chat_history.js?v=20260919-loop-history-1" defer></script>
+    <script src="/static/planning.js?v=20260923-print-contract-stage-1" defer></script>
+  </body>
+</html>

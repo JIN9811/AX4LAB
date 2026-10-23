@@ -1,0 +1,47 @@
+module:
+  orchestration_contract:
+    version: orchestration_contract.v1
+    admission:
+      authority: existing_owner_and_runtime_validation
+      description: Descriptive only; absent evidence is unknown, not ready.
+    result:
+      required: []
+    acceptance:
+      authority: policies/validation_policy.py and existing owner validators
+      description: no generic required output keys
+  id: bo
+  label: BO Agent Module
+  handler: agent.bo_agent
+  llm_role: bo_policy
+  editable: true
+  safety:
+    live_requires_validation: true
+    dry_run_supported: true
+  tools:
+  - experiment.benchmark
+  execution_graph:
+    schema: ax4lab.execution_graph.v1
+    entry: task
+    nodes:
+    - id: task
+      handler: bo.task
+      label: Composite BO strategy, evidence and numerical task
+      area: middle
+      llm: true
+    - id: deliver
+      handler: bo.deliver
+      label: Deliver owner result
+      area: middle
+    edges:
+    - {source: task, target: deliver, 'on': next, kind: evidence}
+    terminals: [deliver]
+  io_contract:
+    input: OrchestratorState
+    output: AgentResult.data merged into OrchestratorState
+  notes: >-
+    The executable graph wraps the existing archived owner body once. Actual
+    local LLM strategy/result review and Middle numerical relationships are
+    source-backed implementation details, not additional executable workflow
+    stages. LHS and BoTorch keep coordinate, acquisition, budget and seed
+    ownership. BO has no physical Low boundary or Device Bridge. Existing
+    Guardian/Orchestrator and downstream device ownership are unchanged.

@@ -1,0 +1,384 @@
+# File purpose:
+# - Device bridge mode selection and safe multi-printer/Bambu X2D workflow config.
+#
+# Key classes/functions:
+# - Parsed by app.bootstrap and mcp_tools.printer_tools.
+#
+# Inputs/outputs:
+# - Input: bridge mode, virtual PrusaLink defaults, live action gates
+# - Output: selected device bridge strategy
+#
+# Dependencies:
+# - app/bootstrap.py
+# - device_bridges/bambu_bridge.py
+# - device_bridges/prusa_bridge.py
+#
+# Modification guide:
+# - Safe places to edit: host env names, action gates, virtual test defaults
+# - Risky places to edit: live upload/start/ejection gates
+# - Related files:
+#   - 개선안/13_bambulab_x2d_spc_device_bridge_research.md
+#   - docs/hardware/printer_agent_prusabridge_phase1_runtime_guideline.txt
+
+devices:
+  printer:
+    mode: test                # test | live
+    # Default is Bambu Lab X2D. Prusa remains selectable as an explicit profile,
+    # not as an automatic fallback, so specimen digital threads stay traceable.
+    default_profile_id: bambulab_x2d_lab_01
+    allow_automatic_fallback: false
+    connection_memory_path: memory/printer_fleet.json
+    profiles:
+      bambulab_x2d_lab_01:
+        provider: bambulab_x2d
+        label: Bambu Lab X2D - Lab 01
+        enabled: true
+        priority: 10
+        capabilities:
+          slicer: bambu_studio_cli
+          transfer:
+            - ftps
+            - bambu_connect
+          telemetry: mqtt
+          live_view: lan_video_stream
+          nozzle_modes:
+            - main
+            - auxiliary
+            - dual
+          build_volume_main_mm: [256, 256, 260]
+          build_volume_dual_mm: [235.5, 256, 256]
+      prusa_mk4s_lab_01:
+        provider: prusa_mk4s
+        label: Prusa MK4S - Lab 01
+        enabled: true
+        priority: 5
+        connection_memory_path: memory/prusa_connection.json
+        capabilities:
+          slicer: prusa_slicer
+          transfer: prusalink_http
+          telemetry: prusalink_rest
+          live_view: none
+    virtual_prusalink_dry_run: true
+
+    bambu:
+      mqtt:
+        port: 8883
+        timeout_sec: 15
+        publish_timeout_sec: 180
+        username: bblp
+        report_topic_template: device/{serial}/report
+        request_topic_template: device/{serial}/request
+      video:
+        enabled: true
+        rtsps_port: 322
+        jpeg_stream_port: 6000
+        timeout_sec: 3
+      slicer:
+        enabled: true
+        executable_env: BAMBU_STUDIO_EXECUTABLE
+        timeout_sec: 900
+
+    autoejection:
+      enabled: false
+      provider: bambu_gcode_patch
+      verified_routine_id: ""
+      pre_eject_vision_profile: ""
+      post_eject_vision_profile: ""
+      require_verified_routine: true
+      require_pre_eject_vision: true
+      require_post_eject_vision: true
+      recovery_to_robot_pickoff: false
+
+    simulator:
+      enabled: true
+      create_dummy_gcode: true
+      default_location_after_prepare: printer_bed
+      default_location_after_ejection: basket
+
+    virtual_prusalink:
+      enabled: true
+      simulate_status: true
+      simulate_storage: true
+      simulate_job: true
+      simulate_transfer: true
+      validate_upload_payload: true
+      validate_start_payload: true
+      validate_ejection_payload: true
+      virtual_state: IDLE
+      virtual_storage: usb
+
+    test_printer_live_promotion:
+      enabled: true
+      # Default remains virtual so automated test mode never touches a real printer.
+      # Set transport=real and allow_real_network_in_test=true only for deliberate bench checks.
+      transport: virtual      # virtual | real
+      allow_real_network_in_test: false
+
+    live:
+      host_env: PRUSA_HOST
+      port: 80
+      scheme: http
+      storage: usb
+      poll_interval_sec: 5
+      timeouts:
+        connect_sec: 5
+        request_sec: 60
+        # Real MK4S uploads over PrusaLink can be slow for dense TPMS G-code
+        # files. Keep this above the observed 11 MiB / ~95 s transfer case.
+        upload_sec: 900
+        print_sec: 7200
+        # Never start over a running print/ejection job. New physical starts
+        # wait up to this budget until PrusaLink clears the previous job and
+        # reports an idle/FINISHED state.
+        ready_wait_sec: 7200
+      auth:
+        # Prusa MK4S PrusaLink live writes were validated with digest auth.
+        # `memory/prusa_connection.json` remains authoritative and may override this.
+        mode: digest          # digest | api_key | basic | none
+        username_env: PRUSA_USERNAME
+        password_env: PRUSA_PASSWORD
+        api_key_env: PRUSA_API_KEY
+        api_key_header: X-Api-Key
+      allow_status: true
+      # This local profile is armed for actual MK4S live printing after the
+      # 2026-05-06 PrusaLink validation. Test modes remain virtual/read-only
+      # unless SpecimenMakingAgent explicitly selects the actual-print path.
+      allow_upload: true
+      allow_start_print: true
+      allow_ejection: false
+      allow_cancel_pause: false
+
+    slicer:
+      enabled: true
+      executable_env: PRUSA_SLICER_EXECUTABLE
+      # Used when the env var is unset. Build with:
+      #   docker build -t atr-prusa-slicer:ubuntu24.04 install/prusaslicer
+      timeout_sec: 300
+      # Optional map used by PrusaSlicer command templates that include
+      # `--load {profile_path}`. Keys may be slicer_profile_hint or printer_profile.
+      profile_map: {}
+      command_template:
+        - "{executable}"
+        - "--export-gcode"
+        - "--output"
+        - "{output_path}"
+        - "{stl_path}"
+
+    ejection:
+      enabled: false
+      method: bed_sweep
+      mode: append_end_gcode
+      require_cooldown: true
+      max_bed_temp_c: 40.0
+      require_pre_eject_vision: false
+      require_post_eject_vision: false
+      calibration_id: mk4s-bed-sweep-v0
+      max_feedrate_mm_min: 25000
+      safe_envelope:
+        x_min_mm: 0.0
+        x_max_mm: 250.0
+        y_min_mm: 0.0
+        y_max_mm: 210.0
+        z_min_mm: 0.0
+        z_max_mm: 220.0
+      paddle:
+        offset_x_mm: null
+        offset_y_mm: null
+        safe_z_mm: null
+        sweep_z_mm: null
+        sweep_start_x_mm: null
+        sweep_start_y_mm: null
+        sweep_end_x_mm: null
+        sweep_end_y_mm: null
+        sweep_feedrate_mm_min: null
+        park_x_mm: null
+        park_y_mm: null
+      bed_sweep:
+        cooldown_bed_temp_c: 40.0
+        bed_forward_y_mm: 210.0
+        bed_back_y_mm: 6.0
+        head_center_x_mm: 125.0
+        head_z_mm: 1.0
+        object_z_offset_mm: 10.0
+        travel_feedrate_mm_min: 6000.0
+        z_feedrate_mm_min: 3000.0
+        eject_feedrate_mm_min: 25000.0
+        cycles: 2
+        use_object_bounds: true
+        object_x_offset_mm: 0.0
+        home_xy_after: true
+        disable_motors_after: true
+        turn_off_heaters_after: true
+
+  camera:
+    mode: simulator
+    endpoint: local
+  specimen_pose_tracker:
+    enabled: true
+    camera_id: d455f_global
+    d455f_serial: "341522300873"
+    color_topic: /camera/d455f/color/image_raw
+    depth_topic: /camera/d455f/aligned_depth_to_color/image_raw
+    info_topic: /camera/d455f/color/camera_info
+    rsusb_pythonpath: ""
+    rsusb_library_path: ""
+    ros_setup_paths: []
+    extra_setup_paths: []
+    max_runtime_sec: 8.0
+    release_timeout_sec: 5.0
+    autostart_realsense: false
+    camera_startup_timeout_sec: 5.0
+    pose_confidence_threshold: 0.75
+    allow_virtual_pose_in_test: true
+  robot:
+    mode: simulator
+    endpoint: local
+  utm:
+    mode: simulator
+    endpoint: local
+
+  utm_vision_runtime:
+    enabled: true
+    # Source-of-truth UTM ROS workspace cloned from https://github.com/hylee12345/UTM.
+    # The RQT-like GUI graph follows this repository's launch/scripts flow.
+    workspace_root: ""
+    script_path: ""
+    stop_timeout_sec: 5.0
+    probe_timeout_sec: 2.0
+    summary_topic: /compression_tester/summary
+    frame_topic: /image_utm
+    ros_setup_paths: []
+    extra_setup_paths: []
+    environment:
+      YOLO_MODEL_PATH: ""
+    allow_virtual_bridge_in_test: true
+
+  equipment:
+    mode: simulator              # simulator | live
+    provider: windows_pyautogui
+    windows_pyautogui:
+      enabled: true
+      bridge_url_env: WINDOWS_PYAUTOGUI_BRIDGE_URL
+      token_env: WINDOWS_PYAUTOGUI_BRIDGE_TOKEN
+      token_header: X-Bridge-Token
+      request_timeout_sec: 60
+      discovery_timeout_sec: 0.45
+      discovery_port: 8765
+      allow_live_execute: false
+      allow_screenshot: true
+      allowed_actions:
+        - health
+        - screenshot
+        - locate_image
+        - focus_window
+        - assert_visible
+        - assert_text
+        - wait_until
+        - wait_until_image
+        - wait_until_text
+        - wait_for_file
+        - type_path
+        - wait
+        - move_to
+        - click
+        - double_click
+        - press
+        - hotkey
+        - write
+        - scroll
+        - run_registered_program
+        - demo_mouse_wiggle
+        - log
+      allowed_hotkeys:
+        - ["ctrl", "s"]
+        - ["ctrl", "o"]
+        - ["enter"]
+        - ["esc"]
+      limits:
+        max_wait_sec: 30
+        max_write_chars: 512
+        max_steps: 50
+      simulator:
+        screen_width: 1920
+        screen_height: 1080
+        screenshot_name: simulated_windows_screen.png
+        pyautogui_available: true
+      test_live_promotion:
+        enabled: false
+        transport: virtual
+        allow_real_network_in_test: false
+      default_sequence:
+        - action: health
+        - action: screenshot
+      registered_programs:
+        program1:
+          description: "Connectivity demo: bounded mouse wiggle and completion log."
+          requires_pyautogui: true
+          safe_test: true
+          program_type: connectivity_demo
+          sequence:
+            - action: health
+            - action: demo_mouse_wiggle
+              duration_sec: 1.0
+              distance_px: 20
+            - action: log
+              message: "program1 completed"
+
+        utm_compression_start_v1:
+          description: "UTM compression protocol: focus/assert/start/complete, save/export CSV, and expose artifact metadata."
+          requires_pyautogui: true
+          safe_test: true
+          program_type: utm_protocol
+          target_app: "UTM software"
+          target_window: "main_window_title_or_regex"
+          locator_backend: image
+          max_retries: 1
+          require_screen_assertions: false
+          export_glob: "*.csv"
+          artifact_timeout_s: 60
+          stable_for_sec: 2.0
+          locators:
+            ready_state:
+              image_path: "memory/equipment_locators/utm_ready_state.png"
+              confidence: 0.80
+            start_button:
+              image_path: "memory/equipment_locators/utm_start_button.png"
+              confidence: 0.80
+            running_state:
+              image_path: "memory/equipment_locators/utm_running_state.png"
+              confidence: 0.80
+            complete_state:
+              image_path: "memory/equipment_locators/utm_complete_state.png"
+              confidence: 0.80
+          sequence:
+            - action: health
+            - action: focus_window
+              window: main
+            - action: assert_visible
+              target: ready_state
+            - action: click
+              target: start_button
+            - action: wait_until
+              target: running_state
+              timeout_s: 10
+            - action: wait_until
+              target: complete_state
+              timeout_s: 300
+            - action: wait_for_file
+              pattern: "C:/ATR/utm_exports/{run_id}/{specimen_id}*.csv"
+              timeout_s: 20
+        utm_export_csv_v1:
+          description: "UTM CSV export protocol after test completion."
+          requires_pyautogui: true
+          safe_test: true
+          program_type: utm_export
+        utm_manual_save_csv_v1:
+          description: "Manual Save As fallback for UTM CSV data."
+          requires_pyautogui: true
+          safe_test: true
+          program_type: utm_export
+        utm_stop_or_abort_v1:
+          description: "Safe UTM stop/abort macro for recovery."
+          requires_pyautogui: true
+          safe_test: true
+          program_type: utm_abort

@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" data-theme="document" viewBox="0 0 1184 1046" role="img" aria-label="Analysis Agent Module five-area internal graph" style="font-family:Arial,sans-serif;background:#ffffff">
+      <title>Analysis Agent Module — five-area internal graph</title><desc>Executable owner operations and explicit outcomes. Positions are presentation only. Composite LLM tools are not separate editable operations.</desc>
+      <rect width="100%" height="100%" fill="#ffffff"/>
+      <defs><marker id="control-arrow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6z" fill="#526174"/></marker></defs>
+      <g class="runtime-control-area" data-control-area="high" pointer-events="none">
+      <rect x="360" y="56" width="488" height="148" rx="12" fill="#2463a5" fill-opacity=".035" stroke="#2463a5" stroke-opacity=".3"/>
+      <text x="376" y="82" fill="#2463a5" font-size="15" font-weight="600">High</text>
+      </g><g class="runtime-control-area" data-control-area="middle" pointer-events="none">
+      <rect x="360" y="312" width="488" height="292" rx="12" fill="#177768" fill-opacity=".035" stroke="#177768" stroke-opacity=".3"/>
+      <text x="376" y="338" fill="#177768" font-size="15" font-weight="600">Middle</text>
+      </g><g class="runtime-control-area" data-control-area="low" pointer-events="none">
+      <rect x="352" y="704" width="488" height="208" rx="12" fill="#4c6079" fill-opacity=".035" stroke="#4c6079" stroke-opacity=".3"/>
+      <text x="368" y="730" fill="#4c6079" font-size="15" font-weight="600">Low</text>
+      <text x="368" y="778" fill="#526174" font-size="12">No separate owner operation</text></g><g class="runtime-control-area" data-control-area="guardian" pointer-events="none">
+      <rect x="32" y="56" width="264" height="148" rx="12" fill="#a36b16" fill-opacity=".035" stroke="#a36b16" stroke-opacity=".3"/>
+      <text x="48" y="82" fill="#a36b16" font-size="15" font-weight="600">Guardian / Safety</text>
+      </g><g class="runtime-control-area" data-control-area="knowledge" pointer-events="none">
+      <rect x="896" y="56" width="264" height="596" rx="12" fill="#79529c" fill-opacity=".035" stroke="#79529c" stroke-opacity=".3"/>
+      <text x="912" y="82" fill="#79529c" font-size="15" font-weight="600">Knowledge / Evidence</text>
+      </g><defs><marker id="control-detail-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6z" fill="#526174"/></marker></defs><g data-implementation-edge="task" pointer-events="none"><title>equipment acquisition · evidence (code-owned)</title><path d="M920,142 C744,142 744,398 568,398" fill="none" stroke="#79529c" stroke-opacity=".5" stroke-width="1.2" stroke-dasharray="2 5" marker-end="url(#control-detail-arrow)"/></g><g data-implementation-edge="task" pointer-events="none"><title>LLM call · call (code-owned)</title><path d="M476,360 C500,270 500,270 476,180" fill="none" stroke="#526174" stroke-opacity=".5" stroke-width="1.2" stroke-dasharray="5 3" marker-end="url(#control-detail-arrow)"/></g><g data-implementation-edge="task" pointer-events="none"><title>accepted processing · call (code-owned)</title><path d="M476,180 C500,342 500,342 476,504" fill="none" stroke="#526174" stroke-opacity=".5" stroke-width="1.2" stroke-dasharray="5 3" marker-end="url(#control-detail-arrow)"/></g><g data-implementation-edge="task" pointer-events="none"><title>metric coverage · validation (code-owned)</title><path d="M384,542 C312,542 312,142 240,142" fill="none" stroke="#a36b16" stroke-opacity=".5" stroke-width="1.2" stroke-dasharray="8 5" marker-end="url(#control-detail-arrow)"/></g><g data-implementation-edge="task" pointer-events="none"><title>actual bounded measured-evidence review · call (code-owned)</title><path d="M240,142 C432,142 432,142 624,142" fill="none" stroke="#526174" stroke-opacity=".5" stroke-width="1.2" stroke-dasharray="5 3" marker-end="url(#control-detail-arrow)"/></g><g data-implementation-edge="task" pointer-events="none"><title>accepted measured result · evidence (code-owned)</title><path d="M808,142 C864,142 864,254 920,254" fill="none" stroke="#79529c" stroke-opacity=".5" stroke-width="1.2" stroke-dasharray="2 5" marker-end="url(#control-detail-arrow)"/></g><g data-implementation-edge="deliver" pointer-events="none"><title>original owner AgentResult · evidence (code-owned)</title><path d="M920,366 C864,366 864,398 808,398" fill="none" stroke="#79529c" stroke-opacity=".5" stroke-width="1.2" stroke-dasharray="2 5" marker-end="url(#control-detail-arrow)"/></g><g data-implementation-edge="deliver" pointer-events="none"><title>state and payload precedence · evidence (code-owned)</title><path d="M1012,404 C1036,422 1036,422 1012,440" fill="none" stroke="#79529c" stroke-opacity=".5" stroke-width="1.2" stroke-dasharray="2 5" marker-end="url(#control-detail-arrow)"/></g><g data-implementation-edge="deliver" pointer-events="none"><title>public run archives once · evidence (code-owned)</title><path d="M808,398 C864,398 864,590 920,590" fill="none" stroke="#79529c" stroke-opacity=".5" stroke-width="1.2" stroke-dasharray="2 5" marker-end="url(#control-detail-arrow)"/></g><g data-implementation-node="task::input" data-implementation-owner="task" pointer-events="auto" role="img"  aria-label="Equipment artifact and curve provenance; code-owned; AnalysisAgent._curve_from_equipment">
+      <title>Equipment artifact and curve provenance
+Code-owned inside task
+agents/analysis/agent.py · AnalysisAgent._curve_from_equipment</title>
+      <rect x="920" y="104" width="184" height="76" rx="5" fill="#ffffff" stroke="#79529c" stroke-opacity=".65" stroke-dasharray="4 3"/>
+      <text x="930" y="122" fill="#172b4d" font-size="12">Equipment artifact and</text><text x="930" y="137" fill="#172b4d" font-size="12">curve provenance</text>
+      <text x="930" y="171" fill="#526174" font-size="9">CODE · task</text>
+    </g><g data-implementation-node="task::data_decision" data-implementation-owner="task" pointer-events="auto" role="img"  aria-label="LLM data-processing selection; code-owned; decide">
+      <title>LLM data-processing selection
+Code-owned inside task
+agents/analysis/decisions.py · decide</title>
+      <rect x="384" y="104" width="184" height="76" rx="5" fill="#ffffff" stroke="#2463a5" stroke-opacity=".65" stroke-dasharray="4 3"/>
+      <text x="394" y="122" fill="#172b4d" font-size="12">LLM data-processing</text><text x="394" y="137" fill="#172b4d" font-size="12">selection</text>
+      <text x="394" y="171" fill="#526174" font-size="9">CODE · task</text>
+    </g><g data-implementation-node="task::validation_decision" data-implementation-owner="task" pointer-events="auto" role="img"  aria-label="LLM measured-evidence review; code-owned; decide">
+      <title>LLM measured-evidence review
+Code-owned inside task
+agents/analysis/decisions.py · decide</title>
+      <rect x="624" y="104" width="184" height="76" rx="5" fill="#ffffff" stroke="#2463a5" stroke-opacity=".65" stroke-dasharray="4 3"/>
+      <text x="634" y="122" fill="#172b4d" font-size="12">LLM measured-evidence</text><text x="634" y="137" fill="#172b4d" font-size="12">review</text>
+      <text x="634" y="171" fill="#526174" font-size="9">CODE · task</text>
+    </g><g data-implementation-node="task::quality" data-implementation-owner="task" pointer-events="auto" role="img"  aria-label="Existing curve and BO admission gates; code-owned; AnalysisAgent._quality_gate">
+      <title>Existing curve and BO admission gates
+Code-owned inside task
+agents/analysis/agent.py · AnalysisAgent._quality_gate</title>
+      <rect x="56" y="104" width="184" height="76" rx="5" fill="#ffffff" stroke="#a36b16" stroke-opacity=".65" stroke-dasharray="4 3"/>
+      <text x="66" y="122" fill="#172b4d" font-size="12">Existing curve and BO</text><text x="66" y="137" fill="#172b4d" font-size="12">admission gates</text>
+      <text x="66" y="171" fill="#526174" font-size="9">CODE · task</text>
+    </g><g data-implementation-node="task::metrics" data-implementation-owner="task" pointer-events="auto" role="img"  aria-label="UTM numerical metrics and objective inputs; code-owned; AnalysisAgent._metrics">
+      <title>UTM numerical metrics and objective inputs
+Code-owned inside task
+agents/analysis/agent.py · AnalysisAgent._metrics</title>
+      <rect x="384" y="504" width="184" height="76" rx="5" fill="#ffffff" stroke="#177768" stroke-opacity=".65" stroke-dasharray="4 3"/>
+      <text x="394" y="522" fill="#172b4d" font-size="12">UTM numerical metrics and</text><text x="394" y="537" fill="#172b4d" font-size="12">objective inputs</text>
+      <text x="394" y="571" fill="#526174" font-size="9">CODE · task</text>
+    </g><g data-implementation-node="task::handoff" data-implementation-owner="task" pointer-events="auto" role="img"  aria-label="Measured observation and BO handoff; code-owned; AnalysisAgent._handoff_payloads">
+      <title>Measured observation and BO handoff
+Code-owned inside task
+agents/analysis/agent.py · AnalysisAgent._handoff_payloads</title>
+      <rect x="920" y="216" width="184" height="76" rx="5" fill="#ffffff" stroke="#79529c" stroke-opacity=".65" stroke-dasharray="4 3"/>
+      <text x="930" y="234" fill="#172b4d" font-size="12">Measured observation and</text><text x="930" y="249" fill="#172b4d" font-size="12">BO handoff</text>
+      <text x="930" y="283" fill="#526174" font-size="9">CODE · task</text>
+    </g><g data-implementation-node="deliver::report" data-implementation-owner="deliver" pointer-events="auto" role="img"  aria-label="Analysis artifacts and evidence report; code-owned; AnalysisAgent._write_analysis_artifacts">
+      <title>Analysis artifacts and evidence report
+Code-owned inside deliver
+agents/analysis/agent.py · AnalysisAgent._write_analysis_artifacts</title>
+      <rect x="920" y="328" width="184" height="76" rx="5" fill="#ffffff" stroke="#79529c" stroke-opacity=".65" stroke-dasharray="4 3"/>
+      <text x="930" y="346" fill="#172b4d" font-size="12">Analysis artifacts and</text><text x="930" y="361" fill="#172b4d" font-size="12">evidence report</text>
+      <text x="930" y="395" fill="#526174" font-size="9">CODE · deliver</text>
+    </g><g data-implementation-node="deliver::projection" data-implementation-owner="deliver" pointer-events="auto" role="img"  aria-label="Owner report projection; code-owned; project_analysis_report">
+      <title>Owner report projection
+Code-owned inside deliver
+agents/analysis/presentation.py · project_analysis_report</title>
+      <rect x="920" y="440" width="184" height="76" rx="5" fill="#ffffff" stroke="#79529c" stroke-opacity=".65" stroke-dasharray="4 3"/>
+      <text x="930" y="458" fill="#172b4d" font-size="12">Owner report projection</text>
+      <text x="930" y="507" fill="#526174" font-size="9">CODE · deliver</text>
+    </g><g data-implementation-node="deliver::archive" data-implementation-owner="deliver" pointer-events="auto" role="img"  aria-label="Public run archive wrapper; code-owned; archive_agent_run">
+      <title>Public run archive wrapper
+Code-owned inside deliver
+utils/agent_artifact_archive.py · archive_agent_run</title>
+      <rect x="920" y="552" width="184" height="76" rx="5" fill="#ffffff" stroke="#79529c" stroke-opacity=".65" stroke-dasharray="4 3"/>
+      <text x="930" y="570" fill="#172b4d" font-size="12">Public run archive</text><text x="930" y="585" fill="#172b4d" font-size="12">wrapper</text>
+      <text x="930" y="619" fill="#526174" font-size="9">CODE · deliver</text>
+    </g><g data-source="task" data-target="deliver" data-outcome="next" data-kind="evidence"><title>task → deliver · next · evidence</title><path d="M 576 398 C 587.2 398, 604.8 398, 616 398" fill="none" stroke="#79529c" stroke-opacity=".8" stroke-width="2" stroke-dasharray="2 5" marker-end="url(#control-arrow)"/><rect x="577" y="388" width="38" height="20" rx="4" fill="#ffffff"/><text x="596" y="402" text-anchor="middle" fill="#79529c" font-size="11">next</text></g><g><title>task · analysis.task</title>
+        <rect x="384" y="360" width="184" height="76" rx="9" fill="#ffffff" stroke="#177768" stroke-width="2"/>
+        <text x="396" y="381" fill="#172b4d" font-size="12">Measurement processing</text><text x="396" y="397" fill="#172b4d" font-size="12">and objective evaluation</text>
+        <text x="489" y="428" fill="#177768" font-size="10">LLM call</text></g><g><title>deliver · analysis.deliver</title>
+        <rect x="624" y="360" width="184" height="76" rx="9" fill="#ffffff" stroke="#177768" stroke-width="2"/>
+        <text x="636" y="381" fill="#172b4d" font-size="12">Deliver owner result</text>
+        </g>
+      <line x1="24" x2="62" y1="970" y2="970" stroke="#526174" stroke-width="2" stroke-dasharray=""/><text x="72" y="974" fill="#172b4d" font-size="14">Execution</text><line x1="244" x2="282" y1="970" y2="970" stroke="#526174" stroke-width="2" stroke-dasharray="8 5"/><text x="292" y="974" fill="#172b4d" font-size="14">Validation</text><line x1="464" x2="502" y1="970" y2="970" stroke="#526174" stroke-width="2" stroke-dasharray="2 5"/><text x="512" y="974" fill="#172b4d" font-size="14">Evidence</text><line x1="684" x2="722" y1="970" y2="970" stroke="#526174" stroke-width="2" stroke-dasharray="5 3"/><text x="732" y="974" fill="#172b4d" font-size="14">Internal call</text>
+      <text x="24" y="1006" fill="#526174" font-size="13">Solid: execution · Dashed CODE: implementation · LLM: High decision · LLM call: process calls that decision</text>
+    </svg>

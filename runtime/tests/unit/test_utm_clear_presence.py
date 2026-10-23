@@ -1,0 +1,193 @@
+"""Generated fixtures below are synthetic software tests, not empty-hardware validation."""
+from datetime import datetime, timezone
+from io import BytesIO
+import base64
+import numpy as np
+from PIL import Image
+import pytest
+from utils import utm_specimen_presence as presence
+
+
+@pytest.mark.parametrize("on_platen", [False, True])
+def test_placement_detector_enforces_registered_roi(tmp_path, on_platen):
+    arr = np.full((480, 640, 3), 160, dtype=np.uint8)
+    arr[430:470, 260:320] = [225, 30, 35]
+    if on_platen:
+        arr[300:340, 270:310] = [225, 30, 35]
+    output = BytesIO()
+    Image.fromarray(arr).save(output, format="PNG")
+    result = presence.inspect_specimen_presence(
+        "data:image/png;base64," + base64.b64encode(output.getvalue()).decode(),
+        output_dir=tmp_path, specimen_id="test", frame_id="placement",
+        purpose="utm_placement_verification", roi_normalized=(0, 0, 1, 1))
+    assert result["roi_xyxy"] == list(presence.UTM_CLEAR_ROI_XYXY)
+    assert result["detected"] is on_platen
+    assert result["bbox_xyxy"] == ([270, 300, 310, 340] if on_platen else [])
+
+
+def frame(red=False):
+    arr = np.full((480, 640, 3), 160, dtype=np.uint8)
+    arr[363:373, 235:245] = [20, 220, 40]
+    arr[363:373, 347:357] = [20, 220, 40]
+    if red: arr[319:349, 258:316] = [225, 30, 35]
+    return arr
+
+
+@pytest.mark.parametrize("on_platen", [False, True])
+def test_both_verifications_exclude_material_below_green_marker_boundary(tmp_path, on_platen):
+    arr = frame(red=on_platen)
+    # Disposed material below the green marker boundary, formerly inside ROI.
+    arr[403:419, 260:300] = [225, 30, 35]
+    output = BytesIO()
+    Image.fromarray(arr).save(output, format="PNG")
+    placement = presence.inspect_specimen_presence(
+        "data:image/png;base64," + base64.b64encode(output.getvalue()).decode(),
+        output_dir=tmp_path, specimen_id="test", frame_id="placement-marker-boundary",
+        purpose="utm_placement_verification")
+    clearance = inspect(arr, tmp_path)
+    assert placement["detected"] is on_platen
+    assert clearance["clear_confirmed"] is (not on_platen)
+    assert placement["roi_xyxy"] == clearance["roi_xyxy"] == [200, 240, 400, 400]
+
+
+def inspect(arr, tmp_path, **kwargs):
+    output = BytesIO()
+    Image.fromarray(arr).save(output, format="PNG")
+    now = datetime.now(timezone.utc).timestamp()
+    evidence = {"topic": "/camera/image_rect", "camera_profile_id": "camera_utm_primary", "frame_timestamp": now,
+        "after_timestamp": now - 1, "material": "high_chroma_red"}
+    evidence.update(kwargs)
+    return presence.inspect_specimen_presence("data:image/png;base64," + base64.b64encode(output.getvalue()).decode(),
+        output_dir=tmp_path, specimen_id="s1", frame_id="synthetic", purpose="utm_clear_verification", capture_evidence=evidence)
+
+
+@pytest.mark.parametrize("red,expected", [(False, "clear"), (True, "occupied")])
+@pytest.mark.parametrize("topic", ["/camera/image_raw", "/camera/image_rect"])
+def test_roi_clear_and_compressed_positive(tmp_path, red, expected, topic):
+    result = inspect(frame(red), tmp_path, topic=topic)
+    assert result["status"] == expected
+    assert result["clear_confirmed"] is (not red)
+
+
+@pytest.mark.parametrize("red", [False, True])
+def test_markerless_platen_uses_roi_not_anchor_registration(tmp_path, red):
+    arr = frame()
+    arr[360:400, 230:365] = 160
+    if red: arr[375:390, 260:290] = [225, 30, 35]
+    result = inspect(arr, tmp_path)
+    assert result["status"] == ("occupied" if red else "clear")
+    assert result["roi_xyxy"] == [200, 240, 400, 400]
+    assert result["roi_valid"] is True
+    assert result["inspection_method"] == "fixed_platen_roi"
+    assert "registered" not in result
+
+
+@pytest.mark.parametrize("value", [0, 255])
+def test_no_signal_is_not_an_empty_platen(tmp_path, value):
+    arr = np.full((480, 640, 3), value, dtype=np.uint8)
+    result = inspect(arr, tmp_path)
+    assert result["status"] == "unknown"
+    assert result["clear_confirmed"] is False
+
+
+@pytest.mark.parametrize("topic", ["/camera/image_raw", "/camera/image_rect"])
+def test_fragment_aggregation_survives_opening_loss(tmp_path, topic):
+    arr = frame()
+    for y in range(280, 301, 4): arr[y:y+1, 230:270] = [225, 30, 35]
+    assert inspect(arr, tmp_path, topic=topic)["status"] == "occupied"
+
+
+@pytest.mark.parametrize("failure", [{"topic": "/image_utm"}, {"camera_profile_id": "other"}, {"frame_timestamp": 0},
+    {"frame_timestamp": 1}, {"material": "blue"}, {"material": ""}, {"after_timestamp": 1e20}])
+def test_invalid_evidence_is_unknown(tmp_path, failure):
+    result = inspect(frame(), tmp_path, **failure)
+    assert result["status"] == "unknown"
+    assert result["clear_confirmed"] is False
+
+
+@pytest.mark.parametrize("topic", ["/camera/image_raw", "/camera/image_rect"])
+def test_off_roi_discarded_red_and_missing_markers_do_not_block(tmp_path, topic):
+    arr = frame()
+    arr[10:100, 10:100] = [225, 30, 35]
+    arr[440:480, 80:160] = [225, 30, 35]
+    assert inspect(arr, tmp_path, topic=topic)["status"] == "clear"
+    arr[360:380, 230:250] = 160
+    assert inspect(arr, tmp_path, topic=topic)["status"] == "clear"
+
+
+@pytest.mark.parametrize("topic", ["/camera/image_raw", "/camera/image_rect"])
+def test_capture_boundary_uses_ros_timestamp_profile_unique_artifacts(tmp_path, topic, monkeypatch):
+    from device_bridges.camera_vision import tools
+    monkeypatch.setattr(tools, "_VISION_CYCLE_RELOADS", {})
+    from tests.unit.test_camera_tools_utm_runtime import FakeRuntimeManager
+    from mcp_tools.camera_tools import _utm_specimen_presence_capture
+    output = BytesIO()
+    Image.fromarray(frame()).save(output, format="PNG")
+    stamp = datetime.now(timezone.utc).timestamp()
+    manager = FakeRuntimeManager(frame={"ok": True, "frame_id": "repeated", "topic": topic,
+        "camera_profile_id": "camera_utm_primary", "frame_timestamp": stamp,
+        "data_url": "data:image/png;base64," + base64.b64encode(output.getvalue()).decode()})
+    payload = {"purpose": "utm_clear_verification", "runtime_mode": "live", "auto_start_runtime": False,
+        "output_dir": str(tmp_path), "run_id": "r", "loop_id": 0, "specimen_id": "s", "session_id": "child",
+        "material": "high_chroma_red", "after_timestamp": stamp - 1}
+    first = _utm_specimen_presence_capture(payload, utm_runtime_manager=manager)
+    second = _utm_specimen_presence_capture(payload, utm_runtime_manager=manager)
+    assert first["status"] == "clear"
+    assert first["frame_timestamp"] == stamp
+    assert first["loop_id"] == 0
+    assert first["raw_frame_path"] != second["raw_frame_path"]
+    assert manager.start_calls == 0  # Cycle admission owns ROS reload; capture never restarts it.
+    assert manager.raw_frame_calls == 2
+    assert manager.frame_calls == 0
+    manager._frame.pop("frame_timestamp")
+    assert _utm_specimen_presence_capture(payload, utm_runtime_manager=manager)["status"] == "unknown"
+
+
+@pytest.mark.parametrize("topic", ["/camera/image_raw", "/camera/image_rect"])
+def test_elongated_compressed_specimen_is_not_rejected_by_shape(tmp_path, topic):
+    arr = frame()
+    arr[327:347, 225:380] = [225, 30, 35]
+    result = inspect(arr, tmp_path, topic=topic)
+    assert result["status"] == "occupied"
+    assert result["clear_confirmed"] is False
+    assert result["residual_width_px"] > 140
+    assert result["residual_aspect_ratio"] > 7
+
+
+@pytest.mark.parametrize("path,bbox,area", [
+    ("tests/fixtures/utm_clear/upright_raw.png", [256, 290, 320, 352], 3336),
+    ("tests/fixtures/utm_clear/compressed_raw.png", [257, 318, 316, 350], 1540),
+])
+def test_immutable_real_positive_references(tmp_path, path, bbox, area):
+    from pathlib import Path
+    assert Path(path).is_file()
+    with Image.open(path) as img: arr = np.asarray(img.convert("RGB"))
+    result = inspect(arr, tmp_path)
+    assert result["status"] == "occupied"
+    assert result["bbox_xyxy"] == bbox
+    assert result["largest_component_area_px"] == area
+
+
+def test_raw_ros_contract_exposes_header_stamp(monkeypatch, capsys):
+    # Execute the actual ROS snippet with fake ROS modules; no ROS process/device calls.
+    import sys
+    import json
+    from types import SimpleNamespace
+    from device_bridges.utm_runtime_bridge import ROS_IMAGE_CAPTURE_SCRIPT
+    class FakeNode:
+        def __init__(self, *args): pass
+        def create_subscription(self, cls, topic, callback, qos):
+            callback(SimpleNamespace(header=SimpleNamespace(stamp=SimpleNamespace(sec=123, nanosec=500000000)),
+                width=2, height=2, encoding="bgr8", data=bytes([1]*12), step=6))
+        def destroy_node(self): pass
+    modules = {"rclpy": SimpleNamespace(init=lambda **k: None, shutdown=lambda: None),
+        "rclpy.node": SimpleNamespace(Node=FakeNode),
+        "rclpy.qos": SimpleNamespace(QoSProfile=lambda **k: k, ReliabilityPolicy=SimpleNamespace(RELIABLE=1),
+            HistoryPolicy=SimpleNamespace(KEEP_LAST=1), DurabilityPolicy=SimpleNamespace(VOLATILE=1)),
+        "sensor_msgs.msg": SimpleNamespace(Image=object), "cv_bridge": None,
+        "cv2": SimpleNamespace(imencode=lambda *a: (True, np.array([1,2], dtype=np.uint8)), IMWRITE_JPEG_QUALITY=1)}
+    for key, value in modules.items(): monkeypatch.setitem(sys.modules, key, value)
+    monkeypatch.setattr(sys, "argv", ["snapshot", "/camera/image_rect", "0.1"])
+    exec(ROS_IMAGE_CAPTURE_SCRIPT, {})
+    result = json.loads(capsys.readouterr().out)
+    assert result["frame_timestamp"] == 123.5

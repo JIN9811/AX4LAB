@@ -1,0 +1,33 @@
+digraph equipment_execution_effect_boundary {
+  graph [rankdir=TB, bgcolor="transparent", pad="0.25", nodesep="0.35", ranksep="0.45", fontname="DejaVu Sans", label="Equipment managed Flow: execution and recovery boundary", labelloc="t", fontsize=18];
+  node [shape=box, style="rounded,filled", fillcolor="#EEF4FF", color="#315C9B", fontname="DejaVu Sans", fontsize=12, margin="0.12,0.09"];
+  edge [color="#52667A", fontname="DejaVu Sans", fontsize=10, arrowsize=0.7];
+  claim [label="Durable run / loop / specimen claim\nexisting preflight + exact Flow/Skill snapshot"];
+  cached [label="Same unchanged invocation\nreuse terminal result; otherwise block", shape=note, fillcolor="#E9F7EF", color="#2E7D59"];
+  select [label="LLM: execute_stacked_workflow\nor request_operator", fillcolor="#E8E2FF"];
+  gate [label="Code: scope · stop · placement\nexact Skills · live approval · Guardian", fillcolor="#FFF1D6", color="#B26A00", penwidth=2];
+  run [label="Existing Flow / Skills / worker\ndesktop + instrument effects\nNO nested automatic LLM recovery", shape=octagon, fillcolor="#FFE9E7", color="#A33A32", penwidth=2];
+  screen [label="Terminal screenshot + execution logs\nvalidate image / identity / CSV / readiness", shape=note, fillcolor="#E9F7EF", color="#2E7D59"];
+  judge [label="LLM: terminal result review\naccept / observe / eligible recovery / operator", fillcolor="#E8E2FF"];
+  recovery [label="ONE bounded wait or configured-window focus\nGuardian + zero actions + no completed segments\nno instrument motion", fillcolor="#FFF1D6", color="#B26A00"];
+  rejudge [label="Fresh post-recovery screenshot\nLLM compares before / after\nseparate resume_failed_block choice", fillcolor="#E8E2FF"];
+  resume [label="Code rechecks safe checkpoint\nresume failed block only\nNEVER repeat successful blocks / segments", fillcolor="#FFF1D6", color="#B26A00", penwidth=2];
+  handoff [label="Existing gated handoff\nthen Manipulation + Vision → Analysis"];
+  stop [label="Block / operator review\nunknown effect · stop · changed scope\nmissing proof · exhausted budget", fillcolor="#FFE9E7", color="#A33A32", penwidth=2];
+  claim -> cached [label="already claimed"];
+  claim -> select [label="new + preflight ready"];
+  select -> gate [label="valid exact proposal"];
+  select -> stop [label="invalid / rejected"];
+  gate -> run [label="pass"];
+  gate -> stop [label="blocked"];
+  run -> screen [label="normal / error termination"];
+  screen -> judge [label="evidence", color="#2E7D59"];
+  judge -> handoff [label="code success + accepted review"];
+  judge -> screen [style=dashed, label="optional read-only observation"];
+  judge -> recovery [style=dashed, label="optional; proven safe failure"];
+  recovery -> rejudge [style=dashed, label="recovery succeeded"];
+  rejudge -> resume [style=dashed, label="explicit resume"];
+  resume -> run [style=dashed, label="same invocation checkpoint"];
+  judge -> stop [label="review required"];
+  resume -> stop [label="no-action proof absent / invalid"];
+}

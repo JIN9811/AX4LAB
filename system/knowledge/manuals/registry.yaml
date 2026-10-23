@@ -1,0 +1,6 @@
+schema: manual_source_registry.v1
+# Vendor manual originals are not bundled in the public AX4LAB release.
+# Operators supply appropriately licensed inputs locally; do not commit them.
+# Source Library intake guidance: ../manual_rag_knowledge.ko.md
+# Publication boundary: ../publication.md
+sources: []

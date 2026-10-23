@@ -1,0 +1,19033 @@
+"""
+File purpose:
+- FastAPI entrypoint exposing runtime control APIs and web dashboard.
+
+Key classes/functions:
+- app
+- start_run
+- stream_events
+
+Inputs/outputs:
+- Input: HTTP control requests and SSE subscriptions
+- Output: state snapshots and live orchestration events
+
+Dependencies:
+- fastapi
+- app.bootstrap.load_runtime
+
+Modification guide:
+- Safe places to edit: endpoint payload fields and response shapes
+- Risky places to edit: SSE formatting and lifecycle behavior
+- Related files: app/controller.py, web/static/app.js
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import copy
+import csv
+import ctypes
+import hashlib
+import importlib.util
+import ipaddress
+import json
+import mimetypes
+import os
+import re
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import quote, unquote, urlparse
+
+import yaml
+import httpx
+from dotenv import dotenv_values
+from json_repair import repair_json
+from typing import Any, AsyncIterator, Callable, Literal
+
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    Response,
+    StreamingResponse,
+)
+from fastapi.routing import APIRoute
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, Field, model_validator
+from mcp_tools.lerobot_schemas import IsaacLabSyntheticRequest
+
+from agents.manipulation.agent import ManipulationAgent
+from agents.bo.agent import BOAgent
+from agents.equipment.agent import LabEquipmentAgent
+from app.bootstrap import load_runtime
+from graphs import ATRLangGraphCompiler, GraphConfig, GraphVersionStore, HandlerRegistry, ModuleConfig, ModuleConfigStore, load_graph_config
+from graphs.generated_adapter import GENERATED_MODULE_HANDLER_ID, generated_adapter_enabled, generated_adapter_path, validate_generated_adapter_file
+from knowledge.graph_backend import NullGraphBackend, graph_backend_from_env
+from knowledge.graph_importer import import_store_to_graph
+from knowledge.graphify_bridge import import_project_graph, scan_project_graph
+from knowledge.relation_store import RelationStore
+from knowledge.schemas import EvolutionOutcomeRecord
+from knowledge.service import KnowledgeService
+from knowledge.manuals.service import ManualKnowledgeService
+from knowledge.manuals.prompting import manual_context_audit
+from knowledge.reconciliation_service import GraphRevisionConflict, KnowledgeReconciliationService, KnowledgeReconciliationWorker
+from knowledge.stores import JsonlKnowledgeStore
+from device_bridges.bambu_bridge import (
+    BambuConnectionMemory,
+    BambuStudioSlicerRunner,
+    PrinterDeviceBridgeManager,
+    build_bambu_project_file_command_draft,
+    validate_bambu_project_file_local_artifact,
+)
+from device_bridges.lerobot_bridge import LeRobotBridge, LeRobotBridgeConfig
+from device_bridges.printer_fleet.monitoring import shared_video, close_monitors
+from device_bridges.plc_bridge import PLCBridge, PymcProtocolTransport
+from device_bridges.prusa_bridge import PrusaBridgeConfig, PrinterAgenticWorkflow
+from device_bridges.specimen_pose_tracker import SpecimenPoseTrackerBridge, get_specimen_pose_tracker_bridge
+from device_bridges.utm_runtime_bridge import UTMRuntimeProcessManager, get_utm_runtime_manager
+from experiments.bo_visualization import rebuild_legacy_continuous_objective_trace, validate_bo_visualization
+from experiments.lhs_design_visualization import validate_lhs_design_visualization
+from device_bridges.windows_pyautogui_bridge import (
+    WindowsPyAutoGUIBridge,
+    WindowsPyAutoGUIBridgeConfig,
+    discover_windows_pyautogui_bridges,
+)
+from orchestrator.state import Mode, OrchestratorState, Stage
+from orchestrator.runtime_defaults import TEST_MODE_LOOP_CYCLES
+from objectives.authoring import objective_authoring_manifest
+from objectives.compiler import ObjectiveCompileError
+from objectives.service import ObjectiveConflict, ObjectiveNotFound, ObjectiveService
+from orchestrator.supervisor import build_mission_contract, build_orchestration_plan, build_orchestrator_control_plane_snapshot
+from utils.config_loader import load_all_configs
+from utils.yaml_cache import read_yaml
+from utils.lerobot_rollout_profile import (
+    LEROBOT_ROLLOUT_PROFILE_PATH,
+    load_lerobot_rollout_profile,
+    save_lerobot_rollout_profile,
+)
+from utils.lerobot_joint_telemetry import (
+    GRASP_OUTCOME_SCHEMA,
+    JointTelemetryFileObserver,
+    TELEMETRY_SCHEMA,
+    TERMINAL_SESSION_STATUSES,
+    build_joint_telemetry_batch,
+    empty_grasp_outcome_summary,
+    finalize_grasp_outcome_artifact,
+    finalize_policy_tracking_artifacts,
+    session_status_label,
+)
+from utils.manipulation_runtime_view import build_manipulation_runtime_view
+from utils.monitor_process import monitor_process, close_monitor_processes, existing_monitor_process
+from utils.manipulation_profile import (
+    MANIPULATION_AGENT_PROFILE_PATH,
+    load_manipulation_agent_profile,
+    normalize_manipulation_agent_profile,
+    save_manipulation_agent_profile,
+)
+from utils.recording_specimen_pose import load_recording_specimen_pose
+from utils.ids import is_run_id, make_event_id
+from utils.equipment_profiles import DEFAULT_UTM_PROFILE_ID, EquipmentProfile, EquipmentProfileRegistry, build_execution_contract
+from utils.equipment_skill_runtime import EquipmentSkillRegistry, SkillContractError, canonical_sha256
+from utils.equipment_skill_flow import EquipmentSkillFlowError, EquipmentSkillFlowStore, normalize_equipment_skill_flow
+from utils.equipment_agentic_task import build_utm_compression_flow_template, list_equipment_agentic_tasks
+from utils.equipment_vision_tasks import get_equipment_vision_task, list_equipment_vision_tasks
+from utils.equipment_skill_workflow import validate_editable_workflow
+from utils.equipment_skill_authoring_jobs import EquipmentSkillAuthoringJobManager, TERMINAL_STATUSES
+from utils.equipment_skill_vision import (
+    SkillVisionEvidence,
+    apply_visual_locator_annotations,
+    build_temporal_storyboards,
+    collect_visual_annotation_evidence,
+    resolve_visual_locator_source,
+    strip_inline_image_payloads,
+)
+from utils.equipment_runtime_service import EquipmentRuntimeContractError, EquipmentRuntimeService
+from utils.local_pyautogui_bridge import LocalPyAutoGUIBridgeSupervisor
+from utils.paths import resolve_path
+from utils.runtime_paths import resolve_runtime_path
+from utils.printer_profile import (
+    PRUSA_PRINT_PROFILE_PATH,
+    adapt_print_profile_for_provider,
+    load_prusa_print_profile,
+    save_prusa_print_profile,
+)
+from utils.plc_bridge_service import PLCBridgeService
+from utils.specimen_placement import SpecimenPlacement, validate_sliced_placement
+from utils.bambu_material_priority import MaterialPriority, load_priority, save_priority, priority_path, bind_artifact, material_artifact_path
+from utils.test_mode_execution_profiles import (
+    TestModeExecutionProfileConflictError,
+    TestModeExecutionProfileStore,
+    TestModeExecutionProfileValidationError,
+)
+from utils.operator_teleop_handoff import OperatorTeleopHandoffError
+
+controller = load_runtime()
+RUNTIME_PATHS = controller._deps.paths
+if RUNTIME_PATHS is None:
+    raise RuntimeError("Bootstrap must supply finalized RuntimePaths")
+
+app = FastAPI(title="AX4LAB")
+app.state.specimen_pose_server_started_at_ms = int(time.time() * 1000)
+templates = Jinja2Templates(directory=str(resolve_runtime_path("web/templates", paths=RUNTIME_PATHS)))
+app.mount("/static", StaticFiles(directory=str(resolve_runtime_path("web/static", paths=RUNTIME_PATHS))), name="static")
+app.mount(
+    "/assets/robotis-omx",
+    StaticFiles(directory=str(resolve_runtime_path("sim/robotis_omx", paths=RUNTIME_PATHS))),
+    name="robotis-omx-assets",
+)
+
+_LOCAL_PYAUTOGUI_BRIDGE_SUPERVISOR: LocalPyAutoGUIBridgeSupervisor | None = None
+_KNOWLEDGE_RECONCILIATION_SERVICE: KnowledgeReconciliationService | None = None
+_KNOWLEDGE_RECONCILIATION_WORKER: KnowledgeReconciliationWorker | None = None
+_KNOWLEDGE_RECONCILIATION_KNOWLEDGE_SERVICE: KnowledgeService | None = None
+_EQUIPMENT_AGENTIC_RUN_GUARD = threading.Lock()
+_EQUIPMENT_AGENTIC_ACTIVE_PROFILES: set[str] = set()
+_EQUIPMENT_AGENTIC_CANCEL_EVENTS: dict[str, threading.Event] = {}
+_EQUIPMENT_AGENTIC_RESET_PROFILES: set[str] = set()
+_BO_VISUALIZATION_UPGRADE_CACHE: dict[tuple[str, int, str], dict[str, Any]] = {}
+_PLC_BRIDGE_SERVICE: PLCBridgeService | None = None
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+@app.head("/favicon.ico", include_in_schema=False)
+async def favicon() -> FileResponse:
+    """Serve the AX4LAB GUI favicon for browser default icon requests."""
+    return FileResponse(resolve_runtime_path("web/static/favicon.svg", paths=RUNTIME_PATHS), media_type="image/svg+xml")
+
+
+def _installed_agent_module(module_id: str):
+    registry = getattr(getattr(controller, "_deps", None), "agent_registry", None)
+    lookup = getattr(registry, "get_module", None)
+    installed = lookup(module_id) if callable(lookup) else None
+    if installed is not None:
+        return installed
+    names = getattr(registry, "names", None)
+    get_installed = getattr(registry, "get_installed", None)
+    if not callable(names) or not callable(get_installed):
+        return None
+    for agent_name in names():
+        owner = get_installed(agent_name)
+        core_module = getattr(owner, "core_module", None)
+        contract = core_module() if callable(core_module) else None
+        if contract is not None and contract.module_id == module_id:
+            return contract
+    return None
+
+
+@app.get("/module-assets/{module_id}/{asset_path:path}")
+async def get_agent_module_asset(module_id: str, asset_path: str):
+    installed = _installed_agent_module(module_id)
+    if (installed is None or installed.frontend_root is None
+            or installed.agent_name not in controller._deps.agent_registry.active_names()):
+        raise HTTPException(status_code=404, detail="Inactive or unknown module asset")
+    root = installed.frontend_root.resolve()
+    path = (root / asset_path).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        raise HTTPException(status_code=404, detail="Unknown module asset")
+    return FileResponse(path)
+
+PLC_CONFIG_PATH = RUNTIME_PATHS.runtime_root / "configs/plc.yaml"
+PLC_CONFIG_MEMORY_PATH = RUNTIME_PATHS.memory_root / "plc_bridge_config.json"
+PLC_TRANSACTION_STATE_PATH = RUNTIME_PATHS.memory_root / "plc_bridge_state.json"
+AGENT_BASELINE_DOC_PATH = RUNTIME_PATHS.system_root / "runtime/agent_program_baseline.md"
+BO_WORKSPACE_SETTINGS_PATH = RUNTIME_PATHS.memory_root / "bo_workspace_settings.json"
+EQUIPMENT_SKILL_ROOT = RUNTIME_PATHS.memory_root / "equipment_skills"
+EQUIPMENT_SKILL_FLOW_PATH = RUNTIME_PATHS.runtime_root / "graphs/modules/equipment/equipment_skill_flows.json"
+EQUIPMENT_SKILL_FLOW_RUNTIME_ROOT = RUNTIME_PATHS.memory_root / "equipment_runtime/equipment_skill_flow_latest"
+EQUIPMENT_RUNTIME_ROOT = RUNTIME_PATHS.memory_root / "equipment_runtime"
+EQUIPMENT_SKILL_AUTHORING_JOB_ROOT = RUNTIME_PATHS.memory_root / "equipment_runtime/skill_authoring_jobs"
+EQUIPMENT_WORKSPACE_SETTINGS_PATH = RUNTIME_PATHS.memory_root / "equipment_workspace_settings.json"
+KNOWLEDGE_MEMORY_ROOT = RUNTIME_PATHS.memory_root / "knowledge"
+PRIMARY_RUNTIME_GRAPH_ID = "atr_closed_loop"
+RUNTIME_GRAPH_CONFIG_ROOT = RUNTIME_PATHS.runtime_root / "graphs/configs"
+RUNTIME_GRAPH_CONFIG_PATH = RUNTIME_GRAPH_CONFIG_ROOT / f"{PRIMARY_RUNTIME_GRAPH_ID}.yaml"
+RUNTIME_GRAPH_VERSION_ROOT = RUNTIME_PATHS.memory_root / "graph_versions"
+RUNTIME_MODULE_ROOT = RUNTIME_PATHS.runtime_root / "graphs/modules"
+RUNTIME_MODULE_VERSION_ROOT = RUNTIME_PATHS.memory_root / "module_versions"
+API_KEY_SETTINGS_PATH = RUNTIME_PATHS.memory_root / "api_keys.json"
+WANDB_LOCAL_API_KEY_SETTINGS_PATH = RUNTIME_PATHS.memory_root / "wandb_local_api_key.json"
+TEST_MODE_EXECUTION_PROFILES_PATH = RUNTIME_PATHS.memory_root / "test_mode_execution_profiles.json"
+LEROBOT_ACTION_LOG_ROOT = RUNTIME_PATHS.run_root / "lerobot_action_logs"
+ACTIVE_ROBOT_CAM_LATEST_RESULT_PATH = RUNTIME_PATHS.run_root / "active_robot_cam/latest_active_robot_cam_result.json"
+BAMBU_HTTP_EXPORT_ROOT = RUNTIME_PATHS.artifact_root / "bambu_http_exports"
+BAMBU_DIRECT_COOLDOWN_POLL_SEC = 5.0
+BAMBU_DIRECT_COOLDOWN_MAX_WAIT_SEC = 1800.0
+_BAMBU_DIRECT_COOLDOWN_POLL_SEC = BAMBU_DIRECT_COOLDOWN_POLL_SEC
+_BAMBU_DIRECT_COOLDOWN_MAX_WAIT_SEC = BAMBU_DIRECT_COOLDOWN_MAX_WAIT_SEC
+_RUNTIME_GRAPH_DRY_RUN_RECORDS: dict[str, dict[str, object]] = {}
+_SYSTEM_RESOURCE_CACHE: dict[str, object] = {"updated_at_monotonic": 0.0, "payload": {}, "last_good_gpu": {}}
+try:
+    _NVIDIA_SMI_TIMEOUT_SEC = float(os.getenv("AUTONOMOUS_NVIDIA_SMI_TIMEOUT_SEC", "5.0") or 5.0)
+except ValueError:
+    _NVIDIA_SMI_TIMEOUT_SEC = 5.0
+_RUNTIME_MODULE_MANAGEMENT_LOADED: set[str] = set()
+_LEROBOT_BRIDGE: LeRobotBridge | None = None
+_LEROBOT_CONFIG_MTIME_NS: int = -1
+_utm_runtime_manager: UTMRuntimeProcessManager | None = None
+_specimen_pose_tracker: SpecimenPoseTrackerBridge | None = None
+
+
+class PLCConfigRequest(BaseModel):
+    """Editable, non-secret PLC connection settings."""
+
+    transport: Literal["pymcprotocol_type3e"] = "pymcprotocol_type3e"
+    host: str = Field(default="192.168.50.90", min_length=1, max_length=253)
+    port: int = Field(default=4999, ge=1, le=65535)
+    poll_interval_s: float = Field(default=0.2, ge=0.05, le=5.0)
+    stale_after_s: float = Field(default=1.0, ge=0.1, le=60.0)
+    handshake_timeout_s: float = Field(default=5.0, ge=1.0, le=60.0)
+    runtime_environment: Literal["plc"] = "plc"
+
+    @model_validator(mode="after")
+    def validate_runtime_contract(self) -> "PLCConfigRequest":
+        if self.stale_after_s < 2 * self.poll_interval_s:
+            raise ValueError("stale_after_s must be at least 2 * poll_interval_s")
+        return self
+
+
+class PLCVirtualInputRequest(BaseModel):
+    """Explicit test-transport input, never an arbitrary register write."""
+
+    action: Literal["estop", "resume", "reset"]
+
+
+def _plc_config() -> dict[str, object]:
+    tracked = yaml.safe_load(PLC_CONFIG_PATH.read_text(encoding="utf-8"))
+    if not isinstance(tracked, dict):
+        raise RuntimeError("PLC config must be a mapping")
+    saved = _read_workspace_settings(PLC_CONFIG_MEMORY_PATH)
+    editable = {
+        key: saved.get(key, tracked.get(key))
+        for key in PLCConfigRequest.model_fields
+    }
+    validated = PLCConfigRequest.model_validate(editable).model_dump()
+    return {
+        "schema": "plc_bridge_config.v1",
+        **validated,
+        "registers": {
+            "command": "D100",
+            "estop": "D101",
+            "recovery_ack": "D102",
+        },
+    }
+
+
+def _plc_bridge_service() -> PLCBridgeService:
+    """Return the sole process-owned PLC service, constructing it lazily."""
+    global _PLC_BRIDGE_SERVICE
+    if _PLC_BRIDGE_SERVICE is not None:
+        return _PLC_BRIDGE_SERVICE
+
+    config = _plc_config()
+    _PLC_BRIDGE_SERVICE = PLCBridgeService(
+        PLCBridge(PymcProtocolTransport()),
+        controller,
+        host=str(config["host"]),
+        port=int(config["port"]),
+        poll_interval_s=float(config["poll_interval_s"]),
+        stale_after_s=float(config["stale_after_s"]),
+        handshake_timeout_s=float(config["handshake_timeout_s"]),
+        fast_stop_callback=controller.request_plc_fast_stop,
+        state_path=PLC_TRANSACTION_STATE_PATH,
+    )
+    return _PLC_BRIDGE_SERVICE
+
+
+def _plc_status() -> dict[str, object]:
+    status = _plc_bridge_service().status()
+    status["legacy_controls_available"] = "plc_pb2" not in status["active_estop_sources"]
+    return status
+
+
+def _plc_mutation_payload(
+    *,
+    ok: bool,
+    message: str,
+    failure_code: str | None = None,
+    step_trace: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    snapshot = _plc_status()
+    transaction = snapshot.get("transaction")
+    transaction_id = transaction.get("transaction_id") if isinstance(transaction, dict) else None
+    return {
+        "ok": ok,
+        "status": snapshot["safety_state"],
+        "failure_code": failure_code if failure_code is not None else snapshot["failure_code"],
+        "message": message,
+        "transaction_id": transaction_id,
+        "register_snapshot": snapshot["register_snapshot"],
+        "connection_state": snapshot["connection_state"],
+        "step_trace": step_trace or [],
+    }
+
+
+def _plc_lifecycle_failure(operation: Literal["config", "disconnect"]) -> tuple[str, str] | None:
+    """Return the fail-closed lifecycle gate for a PLC service mutation."""
+    controller_snapshot = controller.snapshot()
+    if bool(controller_snapshot.get("is_running")):
+        return (
+            f"PLC_{operation.upper()}_ACTIVE_RUN",
+            "PLC lifecycle changes are blocked while a runtime is active.",
+        )
+
+    service_status = _plc_bridge_service().status()
+    if bool(service_status.get("active_handshake")):
+        return (
+            f"PLC_{operation.upper()}_HANDSHAKE_ACTIVE",
+            "PLC lifecycle changes are blocked during a recovery handshake.",
+        )
+    if operation == "config" and service_status.get("monitor_state") == "running":
+        return (
+            "PLC_CONFIG_MONITOR_RUNNING",
+            "Stop the PLC monitor before changing its configuration.",
+        )
+    if operation == "config" and service_status.get("connection_state") != "offline":
+        return (
+            "PLC_CONFIG_REQUIRES_DISCONNECT",
+            "Disconnect the PLC before changing its configuration.",
+        )
+    return None
+
+
+async def _gui_emergency_stop(route_family: str) -> dict[str, object]:
+    """Latch a mouse-originated E-STOP without asserting the physical PLC input."""
+    details: dict[str, object] = {"route_family": route_family}
+    result = await controller.emergency_stop(source="gui_estop", details=details)
+    if result.get("ok") is not True:
+        return result
+    return {
+        **result,
+        "plc_sync_ok": True,
+        "plc_sync_skipped": True,
+        "plc_sync_failure_code": None,
+        "plc_sync_message": "GUI E-STOP is controller-local; PLC D101 was not written.",
+    }
+
+
+async def _gui_emergency_recovery(
+    command: Literal["resume", "reset"],
+) -> dict[str, object] | JSONResponse:
+    """Use the single PLC service gate for every GUI recovery route."""
+    result = await _plc_bridge_service().request_gui_recovery(command)
+    if result.get("ok") is True:
+        return result
+    return JSONResponse(status_code=409, content=result)
+
+
+@app.exception_handler(RequestValidationError)
+async def plc_request_validation_error(
+    request: Request,
+    exc: RequestValidationError,
+) -> Response:
+    """Preserve the PLC mutation contract while leaving other validation unchanged."""
+    failure_codes = {
+        "/api/plc/config": "PLC_CONFIG_VALIDATION_FAILED",
+        "/api/plc/virtual/input": "PLC_VIRTUAL_INPUT_VALIDATION_FAILED",
+    }
+    failure_code = failure_codes.get(request.url.path) if request.method == "POST" else None
+    if failure_code is None:
+        return await request_validation_exception_handler(request, exc)
+    return JSONResponse(
+        status_code=422,
+        content=_plc_mutation_payload(
+            ok=False,
+            failure_code=failure_code,
+            message="Invalid PLC request payload.",
+            step_trace=[{"step": "REQUEST_VALIDATION", "status": "failed"}],
+        ),
+    )
+
+
+def _objective_service() -> ObjectiveService:
+    """Return the ObjectiveService shared with the runtime ToolRegistry."""
+    service = controller._deps.agent_context.tools.resource("objective.service")
+    if not isinstance(service, ObjectiveService):
+        raise HTTPException(status_code=503, detail="Objective Compiler service is unavailable")
+    return service
+
+
+def _objective_http_error(exc: Exception) -> HTTPException:
+    """Map bounded objective failures without exposing local storage paths."""
+    if isinstance(exc, ObjectiveNotFound):
+        return HTTPException(status_code=404, detail=str(exc).strip("'"))
+    if isinstance(exc, ObjectiveConflict):
+        return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, (ObjectiveCompileError, ValueError, TypeError)):
+        return HTTPException(status_code=422, detail=str(exc))
+    return HTTPException(status_code=500, detail="Objective Compiler operation failed")
+
+LIVE_AGENT_DEFINITIONS: list[dict[str, str]] = [
+    {"agent_id": "objective", "label": "Objective", "stage": "idle", "module_id": "objective"},
+    {"agent_id": "orchestrator", "label": "Orchestrator", "stage": "orchestrator", "module_id": "orchestrator"},
+    {"agent_id": "specimen", "label": "Specimen Agent", "stage": "specimen", "module_id": "specimen"},
+    {"agent_id": "vision", "label": "Vision Agent", "stage": "vision", "module_id": "vision"},
+    {"agent_id": "manipulation", "label": "Manipulation Agent", "stage": "manipulation", "module_id": "manipulation"},
+    {"agent_id": "equipment", "label": "Lab Equipment Agent", "stage": "equipment", "module_id": "equipment"},
+    {"agent_id": "analysis", "label": "Analysis Agent", "stage": "analysis", "module_id": "analysis"},
+    {"agent_id": "knowledge", "label": "Knowledge Agent", "stage": "knowledge", "module_id": "knowledge"},
+    {"agent_id": "bo", "label": "BO Agent", "stage": "bo", "module_id": "bo"},
+    {"agent_id": "guardian", "label": "Guardian Agent", "stage": "guardian", "module_id": "guardian"},
+]
+
+LIVE_AGENT_REPORT_PROFILES: dict[str, dict[str, object]] = {
+    "objective": {
+        "title": "Objective Intake / Experiment Contract",
+        "summary": "Tracks operator intent, required specimen constraints, missing values, and the trigger condition for starting the workflow.",
+        "focus_rows": [
+            {"label": "Intent", "value": "experiment objective, target metric, and material domain"},
+            {"label": "Required inputs", "value": "specimen size, material, print mode, evaluation target, safety gates"},
+            {"label": "Start gate", "value": "workflow starts only after explicit execution intent or a configured test-mode command"},
+        ],
+        "checklist": ["Confirm missing parameters", "Keep examples visible", "Preserve operator trigger wording"],
+    },
+    "orchestrator": {
+        "title": "Orchestration Plan / Handoff Control",
+        "summary": "Coordinates stage order, missing-input questions, handoff messages, and safe workflow continuation.",
+        "focus_rows": [
+            {"label": "Route", "value": "Objective -> Design -> Specimen -> Vision -> Manipulation -> Equipment -> Analysis -> Knowledge -> BO -> Guardian"},
+            {"label": "Decision gate", "value": "ask for missing required values instead of fabricating live parameters"},
+            {"label": "Context", "value": "session memory, selected chat target, selected trace, and active graph stage"},
+        ],
+        "checklist": ["Validate required inputs", "Emit system handoff messages", "Stop on unresolved approval"],
+    },
+}
+
+
+def _read_workspace_settings(path: Path) -> dict[str, Any]:
+    """Read a workspace settings JSON file, returning an empty dict on first use/corruption."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _write_workspace_settings(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    """Persist workspace settings under memory/ using an atomic-ish replace."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+    return payload
+
+
+def _mask_api_key(value: str) -> str:
+    """Return a display-safe API key hint without exposing the secret."""
+    clean = str(value or "").strip()
+    if not clean:
+        return ""
+    if len(clean) <= 8:
+        return "*" * len(clean)
+    return f"{clean[:4]}••••{clean[-4:]}"
+
+
+def _read_openai_api_key_from_local_env() -> tuple[str, str]:
+    """Read only OPENAI_API_KEY from supported local env sources."""
+    env_key = str(os.getenv("OPENAI_API_KEY", "")).strip()
+    if env_key:
+        return env_key, "env"
+    for env_path in (resolve_path(".env"), resolve_path("env")):
+        if not env_path.exists() or not env_path.is_file():
+            continue
+        try:
+            file_key = str(dotenv_values(env_path).get("OPENAI_API_KEY") or "").strip()
+        except Exception:
+            file_key = ""
+        if file_key:
+            return file_key, env_path.name
+    return "", "none"
+
+
+def _read_api_key_settings(*, import_env: bool = True) -> dict[str, Any]:
+    """Read the gitignored API key settings file, initializing from .env on first use."""
+    path = API_KEY_SETTINGS_PATH
+    existed = path.exists()
+    settings = _read_workspace_settings(path) if existed else {}
+    env_key, env_source = _read_openai_api_key_from_local_env()
+    api_key = str(settings.get("api_key") or "").strip()
+    source = str(settings.get("source") or "").strip()
+    if import_env and not existed and env_key:
+        settings = {
+            "schema": "api_key.v1",
+            "provider": "openai",
+            "api_key": env_key,
+            "enabled": True,
+            "source": env_source,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _write_workspace_settings(path, settings)
+        return settings
+    enabled = bool(settings.get("enabled", False)) and bool(api_key)
+    return {
+        "schema": "api_key.v1",
+        "provider": "openai",
+        "api_key": api_key,
+        "enabled": enabled,
+        "source": source or ("memory" if api_key else "none"),
+        "updated_at": str(settings.get("updated_at") or ""),
+    }
+
+
+def _write_api_key_settings(api_key: str, *, enabled: bool, source: str = "user") -> dict[str, Any]:
+    """Persist OpenAI API key settings to the local gitignored single-file store."""
+    clean_key = str(api_key or "").strip()
+    payload = {
+        "schema": "api_key.v1",
+        "provider": "openai",
+        "api_key": clean_key,
+        "enabled": bool(enabled and clean_key),
+        "source": source,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return _write_workspace_settings(API_KEY_SETTINGS_PATH, payload)
+
+
+def _public_api_key_settings(settings: dict[str, Any]) -> dict[str, object]:
+    """Return API key status without the secret value."""
+    api_key = str(settings.get("api_key") or "").strip()
+    enabled = bool(settings.get("enabled") and api_key)
+    return {
+        "ok": True,
+        "provider": "openai",
+        "enabled": enabled,
+        "has_key": bool(api_key),
+        "key_status": "registered" if api_key else "not_registered",
+        "source": str(settings.get("source") or ("memory" if api_key else "none")),
+        "settings_path": str(API_KEY_SETTINGS_PATH),
+        "updated_at": str(settings.get("updated_at") or ""),
+    }
+
+
+async def _apply_runtime_api_key_settings(settings: dict[str, Any], *, emit_event: bool = True) -> dict[str, object]:
+    apply_result = await controller.apply_openai_api_key(
+        str(settings.get("api_key") or ""),
+        enabled=bool(settings.get("enabled")),
+        emit_event=emit_event,
+    )
+    public = _public_api_key_settings(settings)
+    public["apply_result"] = apply_result
+    public["primary_backend"] = str(apply_result.get("primary_backend") or "")
+    public["fallback_backend"] = str(apply_result.get("fallback_backend") or "")
+    return public
+
+
+def _read_wandb_local_api_key_settings() -> dict[str, Any]:
+    """Read the gitignored W&B local API key store."""
+    settings = _read_workspace_settings(WANDB_LOCAL_API_KEY_SETTINGS_PATH)
+    api_key = str(settings.get("api_key") or "").strip()
+    return {
+        "schema": "wandb_local_api_key.v1",
+        "provider": "wandb_local",
+        "api_key": api_key,
+        "enabled": bool(settings.get("enabled", False)) and bool(api_key),
+        "source": str(settings.get("source") or ("memory" if api_key else "none")),
+        "updated_at": str(settings.get("updated_at") or ""),
+    }
+
+
+def _write_wandb_local_api_key_settings(api_key: str, *, enabled: bool, source: str = "user") -> dict[str, Any]:
+    """Persist the W&B local API key to a local gitignored file."""
+    clean_key = str(api_key or "").strip()
+    payload = {
+        "schema": "wandb_local_api_key.v1",
+        "provider": "wandb_local",
+        "api_key": clean_key,
+        "enabled": bool(enabled and clean_key),
+        "source": source,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return _write_workspace_settings(WANDB_LOCAL_API_KEY_SETTINGS_PATH, payload)
+
+
+def _public_wandb_local_api_key_settings(settings: dict[str, Any]) -> dict[str, object]:
+    """Return W&B local API key status without exposing the secret value."""
+    api_key = str(settings.get("api_key") or "").strip()
+    enabled = bool(settings.get("enabled") and api_key)
+    return {
+        "ok": True,
+        "provider": "wandb_local",
+        "enabled": enabled,
+        "has_key": bool(api_key),
+        "key_status": "registered" if api_key else "not_registered",
+        "source": str(settings.get("source") or ("memory" if api_key else "none")),
+        "settings_path": str(WANDB_LOCAL_API_KEY_SETTINGS_PATH),
+        "updated_at": str(settings.get("updated_at") or ""),
+    }
+
+
+from app.run_review_routes import review_router
+from utils.run_review import RunReviewRecorder
+
+app.include_router(review_router(controller._deps.run_root, templates, paths=RUNTIME_PATHS))
+from app.live_fullscreen import router as live_fullscreen_router
+app.include_router(live_fullscreen_router)
+_RUN_REVIEW_RECORDER = None
+_ARTIFACT_PRESERVATION_SERVICE = None
+
+
+@app.on_event("startup")
+async def start_artifact_preservation() -> None:
+    global _ARTIFACT_PRESERVATION_SERVICE
+    from utils.artifact_preservation import PreservationService
+    from utils.agent_artifact_archive import set_preservation_sink
+    try:
+        _ARTIFACT_PRESERVATION_SERVICE = PreservationService(paths=RUNTIME_PATHS)
+        set_preservation_sink(_ARTIFACT_PRESERVATION_SERVICE.offer)
+        run = controller._deps.run_root / controller._state.run_id
+        if (run / 'runtime/loops').is_dir():
+            _ARTIFACT_PRESERVATION_SERVICE.offer(run)
+    except Exception:
+        set_preservation_sink(None)  # Optional derived export cannot block the server.
+
+
+@app.on_event("shutdown")
+async def stop_artifact_preservation() -> None:
+    from utils.agent_artifact_archive import set_preservation_sink
+    set_preservation_sink(None)
+    if _ARTIFACT_PRESERVATION_SERVICE is not None:
+        _ARTIFACT_PRESERVATION_SERVICE.close()
+
+
+@app.on_event("startup")
+async def start_read_only_run_review() -> None:
+    global _RUN_REVIEW_RECORDER
+    try:
+        _RUN_REVIEW_RECORDER = RunReviewRecorder(controller._deps.run_root, controller._state.run_id, paths=RUNTIME_PATHS)
+        _RUN_REVIEW_RECORDER.start()
+        controller.review_event_sink = _RUN_REVIEW_RECORDER.offer
+        from utils import run_review
+        run_review.capture_sink = _RUN_REVIEW_RECORDER.offer
+    except Exception:
+        # Optional presentation infrastructure cannot prevent runtime startup.
+        controller.review_event_sink = None
+
+
+@app.on_event("shutdown")
+async def stop_read_only_run_review() -> None:
+    controller.review_event_sink = None
+    from utils import run_review
+    run_review.capture_sink = None
+    if _RUN_REVIEW_RECORDER is not None:
+        _RUN_REVIEW_RECORDER.stop()
+        await asyncio.to_thread(_RUN_REVIEW_RECORDER.thread.join, 2.0)
+
+
+@app.on_event("startup")
+async def keep_startup_side_effect_free() -> None:
+    """Keep GUI startup free of model prewarming while applying saved secrets."""
+    plc_service = _plc_bridge_service()
+    controller.set_terminal_error_notifier(plc_service.set_terminal_estop)
+    controller.set_plc_safety_status_provider(plc_service.status)
+    await plc_service.start()
+    _cleanup_bambu_video_stream_processes(include_orphans=True)
+    settings = _read_api_key_settings(import_env=True)
+    await _apply_runtime_api_key_settings(settings, emit_event=False)
+    controller._deps.agent_context.on_knowledge_ingest = None
+    await _source_ingestion_service().start()
+
+
+@app.on_event("startup")
+async def start_cpu_compute_pool() -> None:
+    from utils.compute_pool import configure_compute_pool
+    configure_compute_pool(int(os.environ.get('ATR_CPU_WORKERS', '3')), paths=RUNTIME_PATHS)
+
+
+@app.on_event("shutdown")
+async def stop_cpu_compute_pool() -> None:
+    from utils.compute_pool import close_compute_pool
+    await asyncio.to_thread(close_compute_pool)
+
+
+@app.get('/api/runtime/compute')
+async def cpu_compute_status() -> dict[str, Any]:
+    from utils.compute_pool import compute_status
+    return compute_status()
+
+
+@app.on_event("shutdown")
+async def shutdown_lerobot_subprocesses() -> None:
+    """Release LeRobot live subprocesses so cameras/serial ports are not left busy."""
+    if _SOURCE_INGESTION_SERVICE is not None:
+        await _SOURCE_INGESTION_SERVICE.shutdown()
+    if _PLC_BRIDGE_SERVICE is not None:
+        await _PLC_BRIDGE_SERVICE.shutdown()
+    controller.set_terminal_error_notifier(None)
+    controller.set_plc_safety_status_provider(None)
+    if _ROBOT_MONITOR_PUBLISHER is not None:
+        _ROBOT_MONITOR_PUBLISHER.cancel()
+    await asyncio.to_thread(close_monitor_processes)
+    await asyncio.to_thread(close_monitors)
+    _cleanup_bambu_video_stream_processes(include_orphans=True)
+    _lerobot_bridge().shutdown()
+    _utm_runtime_bridge().shutdown()
+    if _LOCAL_PYAUTOGUI_BRIDGE_SUPERVISOR is not None:
+        _LOCAL_PYAUTOGUI_BRIDGE_SUPERVISOR.stop()
+    if _KNOWLEDGE_RECONCILIATION_WORKER is not None:
+        await _KNOWLEDGE_RECONCILIATION_WORKER.shutdown()
+    if _KNOWLEDGE_RECONCILIATION_KNOWLEDGE_SERVICE is not None:
+        _KNOWLEDGE_RECONCILIATION_KNOWLEDGE_SERVICE.close()
+
+
+class StartRunRequest(BaseModel):
+    """Request body for run start endpoint."""
+
+    mode: Literal["live", "test", "replay", "fault-injection"] = "test"
+    goal: str | None = None
+    backend: Literal["openai", "nemoclaw", "ollama", "vllm"] | None = None
+    fault: str = Field(default="none", description="Fault name for fault-injection mode")
+    fault_stage: str = Field(default="", description="Stage where fault is injected")
+
+
+class TestModeExecutionProfileSaveRequest(BaseModel):
+    """Revision-bounded replacement of one complete execution profile."""
+
+    model_config = {"extra": "forbid"}
+
+    expected_revision: int = Field(..., ge=0)
+    profile: dict[str, Any]
+    total_cycles: int | None = Field(default=None, ge=1, strict=True)
+
+
+class TestModeExecutionProfileResetRequest(BaseModel):
+    """Revision-bounded reset of one profile or all profiles."""
+
+    model_config = {"extra": "forbid"}
+
+    expected_revision: int = Field(..., ge=0)
+    profile_id: Literal["virtual_bridge", "installed_printer", "physical_print"] | None = None
+
+
+class OperatorTeleopHandoffConfirmRequest(BaseModel):
+    """Cycle-bound operator confirmation after a matching teleop stop."""
+
+    model_config = {"extra": "forbid"}
+
+    handoff_token: str = Field(..., min_length=20, max_length=256)
+    teleop_session_id: str = Field(..., min_length=1, max_length=256)
+    confirmed_by: str = Field(default="local_operator", min_length=1, max_length=120)
+
+
+class PlanningMessageRequest(BaseModel):
+    """Request body for planning-workspace orchestrator messages."""
+
+    message: str = Field(..., min_length=1)
+    goal: str | None = None
+    backend: Literal["openai", "nemoclaw", "ollama", "vllm"] | None = None
+    constraints: dict[str, object] = Field(default_factory=dict)
+    session_id: str | None = None
+    setup_context: dict | None = None
+
+
+class PlanningSetupActionRequest(BaseModel):
+    """Confirmation/discard is next-run scoped and never starts execution."""
+    model_config = {"extra": "forbid"}
+    action: Literal["confirm", "discard"]
+    proposal_id: str = Field(min_length=1)
+    expected_revision: int = Field(ge=1, strict=True)
+    request_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    target: Literal["next_run"]
+
+
+class PlanningBootstrapRequest(BaseModel):
+    """Request body for starting the Live GUI orchestrator before user input."""
+
+    goal: str | None = None
+    backend: Literal["openai", "nemoclaw", "ollama", "vllm"] | None = None
+    constraints: dict[str, object] = Field(default_factory=dict)
+    session_id: str | None = None
+
+
+class KnowledgeRelationDecisionRequest(BaseModel):
+    proposal_version: int = Field(..., ge=1)
+    graph_context_hash: str = Field(..., min_length=1, max_length=128)
+    operator: str = Field(default="local-operator", min_length=1, max_length=120)
+    rationale: str = Field(default="", max_length=2000)
+
+
+class KnowledgeRelationRevisionRequest(KnowledgeRelationDecisionRequest):
+    target_id: str = Field(..., min_length=1, max_length=512)
+    relation_type: str = Field(..., min_length=1, max_length=80)
+
+
+class KnowledgeGraphEditRequest(BaseModel):
+    graph_revision: str = Field(..., min_length=1, max_length=256)
+    operator: str = Field(default="local-operator", min_length=1, max_length=120)
+    draft_id: str = Field(default="", max_length=256)
+    changes: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
+
+
+class VisionSpecimenPlacementRetryRequest(BaseModel):
+    """Operator retry for one run-scoped Vision specimen checkpoint."""
+
+    checkpoint: Literal["active_cam_ejection", "utm_post_place"]
+
+
+class BackendSwitchRequest(BaseModel):
+    """Request body for one-click inference backend switching."""
+
+    backend: Literal["openai", "nemoclaw", "ollama", "vllm"]
+
+
+class RuntimeGraphSaveRequest(BaseModel):
+    """Request body for saving a validated Runtime IDE graph config."""
+
+    graph: dict[str, object] = Field(default_factory=dict)
+    reason: str = "runtime_ide_save"
+    author: str = "operator"
+    activate: bool = True
+
+
+class RuntimeGraphSaveVersionRequest(BaseModel):
+    """Compatibility request body for package graph save-version calls."""
+
+    graph: dict[str, object] = Field(default_factory=dict)
+    reason: str = "package_save_version"
+    author: str = "operator"
+    activate: bool = False
+
+
+class RuntimeGraphYamlImportRequest(BaseModel):
+    """Request body for importing a graph YAML draft into the Runtime IDE."""
+
+    yaml_text: str = Field(..., min_length=1)
+
+
+class RuntimeModuleSaveRequest(BaseModel):
+    """Request body for saving Runtime IDE module config."""
+
+    module: dict[str, object] = Field(default_factory=dict)
+    reason: str = "runtime_module_save"
+    author: str = "operator"
+    activate: bool = True
+
+
+class RuntimeModuleCreateRequest(BaseModel):
+    """Request body for creating a cataloged Runtime IDE module."""
+
+    module_id: str = Field(..., min_length=1)
+    label: str = Field(..., min_length=1)
+    category: str = ""
+    handler: str = "runtime.step_complete"
+    llm_role: str = ""
+    tools: list[str] = Field(default_factory=list)
+    source_filename: str = ""
+    source_text: str = ""
+    notes: str = ""
+    transform_with_llm: bool = True
+    transform_model: str = ""
+
+
+class RuntimeModuleTemplateRequest(BaseModel):
+    """Request body for creating an inactive draft module template."""
+
+    module_id: str = Field(..., min_length=1)
+    label: str = Field(..., min_length=1)
+    category: str = "custom"
+    notes: str = ""
+    author: str = "runtime_ide"
+
+
+class RuntimeModuleUiSaveRequest(BaseModel):
+    """Request body for saving a module-local ui.yaml descriptor."""
+
+    ui: dict[str, object] = Field(default_factory=dict)
+    reason: str = "runtime_module_ui_save"
+    author: str = "operator"
+
+
+class RuntimeBridgeActionSaveRequest(BaseModel):
+    """Request body for saving graph-backed bridge action descriptor metadata."""
+
+    action: dict[str, object] = Field(default_factory=dict)
+    reason: str = "runtime_bridge_action_save"
+    author: str = "operator"
+    graph_id: str = PRIMARY_RUNTIME_GRAPH_ID
+
+
+class RuntimeGraphDryRunRequest(BaseModel):
+    """Request body for graph dry-run simulation options."""
+
+    start_stage: str = "idle"
+    max_steps: int = 24
+    graph: dict[str, object] = Field(default_factory=dict)
+
+
+class RuntimeModelRequest(BaseModel):
+    """Request body for managed vLLM model load/unload controls."""
+
+    model: str = Field(..., min_length=1)
+
+
+class RuntimeApiKeyRequest(BaseModel):
+    """Request body for local API key storage controls."""
+
+    api_key: str = Field(..., min_length=1)
+    enabled: bool = True
+
+
+class LeRobotWandBLocalApiKeyRequest(BaseModel):
+    """Request body for local W&B API key storage controls."""
+
+    api_key: str = Field(..., min_length=1)
+    enabled: bool = True
+
+
+class BOAgentRequest(BaseModel):
+    """Request body for BO Workspace benchmark and agent execution."""
+
+    strategy: str = "bo"
+    strategy_control: Literal["configured", "adaptive"] = "configured"
+    acquisition: str = "expected_improvement"
+    budget: int = 8
+    random_seed: int = 7
+    kappa: float = 2.0
+    xi: float = 0.01
+    exploration_weight: float = 0.35
+    exploitation_weight: float = 0.65
+    llm_preference_enabled: bool = True
+    llm_candidate_weight: float | str = "auto"
+    top_k: int = 5
+    bo_backend: str = "botorch"
+    initial_sampler: str = "latin_hypercube"
+    initial_design_size: int | Literal["auto"] = "auto"
+    num_restarts: int = 12
+    raw_samples: int = 256
+    optimizer_timeout_s: float = 30.0
+    parameter_space: dict[str, object] = Field(default_factory=dict)
+    objective: dict[str, object] = Field(default_factory=dict)
+    mode: Literal["test", "live", "virtual", "replay"] = "test"
+
+    @model_validator(mode="after")
+    def validate_continuous_domain(self) -> "BOAgentRequest":
+        # Reject malformed bounds at the API boundary before save or execution.
+        if self.parameter_space:
+            BOAgent._two_variable_parameter_space(self.parameter_space)
+        return self
+
+
+class ObjectiveComposeRequest(BaseModel):
+    intent: str = Field(..., min_length=1, max_length=4000)
+
+
+class ObjectiveManualDraftRequest(BaseModel):
+    spec: dict[str, object]
+    operator: str = Field(..., min_length=1, max_length=160)
+    revision_of: str | None = Field(default=None, min_length=1)
+
+
+class ObjectiveReferenceRequest(BaseModel):
+    objective_id: str = Field(..., min_length=1)
+    version: int | None = Field(default=None, ge=1)
+
+
+class ObjectivePreviewRequest(ObjectiveReferenceRequest):
+    observations: list[dict[str, object]] = Field(default_factory=list)
+
+
+class ObjectiveRevisionRequest(BaseModel):
+    objective_id: str = Field(..., min_length=1)
+    instruction: str = Field(..., min_length=1, max_length=4000)
+
+
+class ObjectiveApprovalRequest(ObjectiveReferenceRequest):
+    operator: str = Field(..., min_length=1)
+
+
+class ObjectiveActivationRequest(BaseModel):
+    objective_id: str = Field(..., min_length=1)
+    version: int = Field(..., ge=1)
+    run_id: str = Field(..., min_length=1)
+    operator: str = Field(..., min_length=1)
+
+
+class ObjectiveEvaluationRequest(BaseModel):
+    run_id: str = Field(..., min_length=1)
+    observation_id: str = Field(..., min_length=1)
+    metrics: dict[str, object] = Field(default_factory=dict)
+    uncertainty: float | dict[str, float] | None = None
+    provenance_refs: list[str] = Field(default_factory=list)
+    fidelity: str = "measured"
+
+
+class ObjectiveCompareRequest(BaseModel):
+    candidates: list[dict[str, object]] = Field(default_factory=list)
+    observations: list[dict[str, object]] = Field(default_factory=list)
+
+
+
+
+class PrinterProfileRequest(BaseModel):
+    """Request body for operator-controlled printer defaults."""
+
+    material: str = "PLA"
+    printer_model: str = "Prusa MK4S"
+    printer_profile: str = "prusa_mk4s_pla_0p4_nozzle"
+    slicer_profile_hint: str = "0.2mm_quality"
+    specimen_placement: SpecimenPlacement = Field(default_factory=SpecimenPlacement)
+    nozzle_diameter_mm: float = 0.4
+    layer_height_mm: float = 0.2
+    first_layer_height_mm: float = 0.2
+    slow_first_layer_enabled: bool = True
+    first_layer_speed_mm_s: float = 10.0
+    xy_speed_scale_percent: float = Field(default=100.0, ge=1, le=100, allow_inf_nan=False)
+    start_point_prime_mm: float = Field(default=0.1, ge=0, allow_inf_nan=False)
+    start_point_prime_enabled: bool = True
+    early_layer_speed_limit_enabled: bool = True
+    early_layer_z_speed_limit_enabled: bool = True
+    early_layer_speed_mm_s: float = Field(default=50.0, ge=0.1, le=1000, allow_inf_nan=False)
+    early_layer_z_speed_mm_s: float = Field(default=5.0, ge=0.1, le=20, allow_inf_nan=False)
+    bed_temperature_c: float = 60.0
+    first_layer_bed_temperature_c: float = 60.0
+    bed_leveling_enabled: bool = True
+    flow_calibration_enabled: bool = True
+    storage: str = "usb"
+    max_print_time_min: float = 120.0
+    overwrite: bool = True
+    start_immediately_live: bool = True
+    allow_ejection: bool = False
+    skirt_enabled: bool = False
+    top_cap_enabled: bool = False
+    bottom_cap_enabled: bool = True
+    top_bottom_cap: bool = True
+    skin_thickness_mm: float = 0.8
+    require_flat_compression_faces: bool = False
+    test_specimen_size_mm: list[float] = Field(default_factory=lambda: [30.0, 30.0, 30.0])
+    test_unit_cell_size_mm: float = 10.0
+    notes: str = ""
+
+
+class PrinterConnectionRequest(BaseModel):
+    """Request body for editable printer bridge connection memory."""
+
+    host: str = Field(default="", min_length=0)
+    scheme: Literal["http", "https"] = "http"
+    port: int = Field(default=80, ge=1, le=65535)
+    storage: str = "usb"
+    auth_mode: Literal["digest", "basic", "api_key", "none", "lan_access_code"] = "lan_access_code"
+    username: str = ""
+    password: str = ""
+    api_key: str = ""
+    api_key_header: str = "X-Api-Key"
+    serial: str = ""
+    printer_name: str = ""
+    model: str = "Bambu Lab X2D"
+    access_code: str = ""
+    lan_mode_confirmed: bool = False
+    developer_mode_confirmed: bool = False
+
+
+class PrinterFleetSelectionRequest(BaseModel):
+    """Request body for explicit selected-printer profile changes."""
+
+    profile_id: str = Field(..., min_length=1)
+
+
+class PrinterAutoejectionTestRequest(BaseModel):
+    """Request body for standalone 3DP autoejection test programs."""
+
+    position: Literal["left", "center", "right"] = "center"
+    mode: Literal["live", "test"] = "live"
+    object_size_mm: list[float] = Field(default_factory=lambda: [30.0, 30.0, 20.0])
+    start_immediately: bool = True
+    public_base_url: str = ""
+    plate_id: int = Field(default=1, ge=1, le=32)
+    use_ams: bool = False
+    ams_mapping: list[int] | None = None
+    timelapse: bool = False
+    bed_leveling: bool = False
+    flow_cali: bool = False
+    vibration_cali: bool = False
+    layer_inspect: bool = False
+    verify_fetch: bool = True
+    fetch_timeout_sec: float = Field(default=3.0, ge=0.5, le=15.0)
+    operator_confirmed: bool = False
+    guardian_approved: bool = False
+    dry_run: bool = True
+    door_or_front_path_clear: bool = False
+    ejection_ramp_or_bin_ready: bool = False
+    toolhead_cover_secured: bool = False
+    release_surface_confirmed: bool = False
+    release_surface_profile: str = ""
+    first_ejection_supervised: bool = False
+
+
+class PrinterAutoejectionConfigRequest(BaseModel):
+    """Request body for operator-verified Bambu autoejection gate settings."""
+
+    enabled: bool = False
+    provider: str = "bambu_gcode_patch"
+    verified_routine_id: str = ""
+    pre_eject_vision_profile: str = ""
+    post_eject_vision_profile: str = ""
+    require_verified_routine: bool = True
+    require_pre_eject_vision: bool = True
+    require_post_eject_vision: bool = True
+    recovery_to_robot_pickoff: bool = False
+    fallback_to_robot_pickoff: bool | None = None
+    push_direction: Literal["left", "center", "right"] = "center"
+    z_push_offset_mm: float = Field(default=15.0, ge=0.0, le=200.0)
+    push_lane_offset_mm: float = Field(default=30.0, ge=0.0, le=120.0)
+    push_speed_mm_min: int = Field(default=6000, ge=100, le=12000)
+    enable_full_bed_sweep: bool = False
+    sweep_z_mm: float = Field(default=1.0, ge=0.5, le=50.0)
+    sweep_speed_mm_min: int = Field(default=6000, ge=100, le=12000)
+
+
+class PrinterBambuAutoejectionPatchRequest(BaseModel):
+    """Request body for deterministic Bambu G-code autoejection artifact patching."""
+
+    artifact_path: str = ""
+    specimen_id: str = ""
+    position: Literal["left", "center", "right"] = "center"
+    plate_id: int = Field(default=1, ge=1, le=32)
+    loop_index: int = Field(default=1, ge=1, le=10000)
+    run_id: str = ""
+    validate_only: bool = False
+
+
+class PrinterBedClearRequest(BaseModel):
+    """Request body for Bambu post-ejection bed-clear evidence."""
+
+    bed_clear_required: bool = False
+    bed_clear_verified: bool = False
+    verification_method: str = "operator"
+    remote_path: str = ""
+    subtask_name: str = ""
+    source_artifact_path: str = ""
+    source_artifact_sha256: str = ""
+    patched_artifact_path: str = ""
+    patched_artifact_sha256: str = ""
+    manifest_path: str = ""
+    publish_sequence_id: str = ""
+    publish_topic: str = ""
+    post_publish_status: str = ""
+    camera_snapshot_path: str = ""
+
+
+class PrinterBambuAutoejectionProofTemplateRequest(BaseModel):
+    """Request body for writing a fail-closed Bambu physical proof scaffold."""
+
+    proof_package_path: str = ""
+    printer_profile_id: str = ""
+    provider: str = "bambulab"
+
+
+class PrinterBambuAutoejectionCompletionAuditRequest(BaseModel):
+    """Request body for auditing Bambu physical autoejection proof evidence."""
+
+    proof_package_path: str = ""
+    latest: bool = False
+
+
+class PrinterUploadPathProbeRequest(BaseModel):
+    """Request body for safe Bambu FTPS marker write/delete path probing."""
+
+    candidate_dirs: list[str] = Field(default_factory=lambda: ["", "cache", "sdcard", "Metadata", "data/Metadata"])
+    timeout_sec: float = Field(default=8.0, ge=1.0, le=60.0)
+
+
+class PrinterStartCommandDraftRequest(BaseModel):
+    """Request body for draft-only Bambu project_file command inspection."""
+
+    remote_path: str = ""
+    material: str = ""
+    subtask_name: str = ""
+    plate_id: int = Field(default=1, ge=1, le=32)
+    use_ams: bool = False
+    ams_mapping: list[int] | None = None
+    timelapse: bool = False
+    bed_leveling: bool = False
+    flow_cali: bool = False
+    vibration_cali: bool = False
+    layer_inspect: bool = False
+
+
+class PrinterStartGateRequest(PrinterStartCommandDraftRequest):
+    """Request body for guarded Bambu project_file start preflight."""
+
+    operator_confirmed: bool = False
+    guardian_approved: bool = False
+    dry_run: bool = True
+    door_or_front_path_clear: bool = False
+    ejection_ramp_or_bin_ready: bool = False
+    toolhead_cover_secured: bool = False
+    release_surface_confirmed: bool = False
+    release_surface_profile: str = ""
+    first_ejection_supervised: bool = False
+
+
+class PrinterSpcReadinessRequest(PrinterStartGateRequest):
+    """Request body for Specimen Making Agent printer-readiness aggregation."""
+
+    mode: Literal["live", "test"] = "live"
+
+
+class PrinterBambuSliceArtifactRequest(BaseModel):
+    """Request body for creating a real Bambu sliced artifact from an STL/3MF source."""
+
+    source_path: str = ""
+    specimen_placement: SpecimenPlacement | None = None
+    specimen_id: str = ""
+    load_settings: str = ""
+    load_filaments: str = ""
+    extra_args: list[str] = Field(default_factory=list)
+    timeout_sec: float | None = Field(default=None, ge=1.0, le=3600.0)
+
+
+class PrinterHttpArtifactRouteRequest(BaseModel):
+    """Request body for exposing a sliced Bambu artifact over a printer-reachable HTTP route."""
+
+    artifact_path: str = ""
+    material: str = ""
+    public_base_url: str = ""
+    subtask_name: str = ""
+    plate_id: int = Field(default=1, ge=1, le=32)
+    use_ams: bool = False
+    ams_mapping: list[int] | None = None
+    timelapse: bool = False
+    bed_leveling: bool = False
+    flow_cali: bool = False
+    vibration_cali: bool = False
+    layer_inspect: bool = False
+    verify_fetch: bool = True
+    fetch_timeout_sec: float = Field(default=3.0, ge=0.5, le=15.0)
+
+
+class PrinterBambuPrestartCheckRequest(BaseModel):
+    """Request body for the user-facing Bambu pre-start checklist."""
+
+    source_path: str = ""
+    material: str = ""
+    specimen_placement: SpecimenPlacement | None = None
+    artifact_path: str = ""
+    specimen_id: str = ""
+    run_id: str = ""
+    load_settings: str = ""
+    load_filaments: str = ""
+    extra_args: list[str] = Field(default_factory=list)
+    timeout_sec: float | None = Field(default=None, ge=1.0, le=3600.0)
+    public_base_url: str = ""
+    subtask_name: str = ""
+    plate_id: int = Field(default=1, ge=1, le=32)
+    use_ams: bool = False
+    ams_mapping: list[int] | None = None
+    timelapse: bool = False
+    bed_leveling: bool = False
+    flow_cali: bool = False
+    vibration_cali: bool = False
+    layer_inspect: bool = False
+    verify_fetch: bool = True
+    fetch_timeout_sec: float = Field(default=3.0, ge=0.5, le=15.0)
+    operator_confirmed: bool = False
+    guardian_approved: bool = False
+    dry_run: bool = True
+    door_or_front_path_clear: bool = False
+    ejection_ramp_or_bin_ready: bool = False
+    toolhead_cover_secured: bool = False
+    release_surface_confirmed: bool = False
+    release_surface_profile: str = ""
+    first_ejection_supervised: bool = False
+    mode: Literal["live", "test"] = "live"
+
+
+class WindowsBridgeDiscoverRequest(BaseModel):
+    """Request body for discovering Windows PyAutoGUI bridge hosts."""
+
+    subnet: str = ""
+    port: int = 8765
+    token: str = ""
+    timeout_sec: float | None = None
+    max_hosts: int = 256
+
+
+class WindowsBridgeConnectRequest(BaseModel):
+    """Request body for saving a selected Windows PyAutoGUI bridge candidate."""
+
+    candidate_alias: str = ""
+    name: str = Field(default="", min_length=0)
+    host: str = ""
+    bridge_url: str = ""
+    port: int = 8765
+    token: str = ""
+    token_header: str = "X-Bridge-Token"
+
+
+class WindowsBridgePairRequest(BaseModel):
+    """Request body for pairing a discovered bridge with its short-lived local code."""
+
+    candidate_alias: str = Field(..., min_length=1)
+    host: str = ""
+    bridge_url: str = ""
+    port: int = 8765
+    pairing_code: str = Field(..., pattern=r"^\d{4}$")
+
+
+class WindowsBridgeCandidateRequest(BaseModel):
+    """Request body for selecting/deleting a saved Windows PyAutoGUI candidate."""
+
+    candidate_alias: str = Field(..., min_length=1)
+
+
+class WindowsBridgeRunProgramRequest(BaseModel):
+    """Request body for setup-GUI macro execution tests."""
+
+    program_id: str = Field(default="program1", min_length=1)
+    command: str = ""
+    confirm_execute: bool = False
+    require_screen_assertions: bool = False
+    simulate_utm_protocol: bool = False
+    export_glob: str = ""
+    artifact_timeout_s: float | None = None
+    stable_for_sec: float | None = None
+    expected_export_path: str = ""
+    require_window_focus: bool = False
+    manual_save_required_if_no_artifact: bool = True
+    target_window: str = ""
+    target_window_regex: str = ""
+    locators: dict[str, object] = Field(default_factory=dict)
+    sequence: list[dict[str, object]] = Field(default_factory=list)
+
+
+class EquipmentProfileActionRequest(BaseModel):
+    """Bounded action request for a registered common equipment profile."""
+
+    confirm_execute: bool = False
+    program_id: str = ""
+    include_screenshot: bool = True
+    vision_link_enabled: bool | None = None
+
+
+class EquipmentAgenticRunRequest(BaseModel):
+    """Explicit operator confirmation for one server-authoritative live Skill Flow."""
+
+    runtime_mode: Literal["live"] = "live"
+    confirm_execute: bool = False
+
+
+class EquipmentProfileSettingsRequest(BaseModel):
+    """Persist operator preferences for one registered equipment Profile."""
+
+    vision_link_enabled: bool
+
+
+class EquipmentSkillFlowSaveRequest(BaseModel):
+    """Save one Profile-bound middle/low-level Equipment Skill Flow."""
+
+    flow: dict[str, Any] = Field(default_factory=dict)
+
+
+class EquipmentSkillDraftRequest(BaseModel):
+    """Create one exact Skill draft from a saved operator demonstration."""
+
+    recording: dict[str, Any]
+    skill_id: str = Field(..., min_length=1, max_length=96)
+    version: str = Field(default="1.0.0", min_length=5, max_length=64)
+    target_profile: str = Field(..., min_length=1, max_length=96)
+
+
+class EquipmentRecordingImportRequest(BaseModel):
+    """Pull one saved worker recording into the Linux-owned Skill registry."""
+
+    skill_id: str = Field(..., min_length=1, max_length=96)
+    version: str = Field(default="1.0.0", min_length=5, max_length=64)
+    target_profile: str = Field(..., min_length=1, max_length=96)
+    bridge_id: str = Field(..., min_length=1, max_length=96)
+
+
+class EquipmentSkillAnnotationRequest(BaseModel):
+    """Run selected-model annotation or persist reviewed annotations."""
+
+    annotations: dict[str, Any] = Field(default_factory=dict)
+    use_model: bool = True
+
+
+class EquipmentSkillDeploymentRequest(BaseModel):
+    """Bind one validated Skill version to an exact bridge deployment."""
+
+    bridge_id: str = Field(..., min_length=1, max_length=96)
+    deployment_sha256: str = Field(default="", min_length=0, max_length=64)
+
+
+class EquipmentSkillWorkflowUpdateRequest(BaseModel):
+    """Atomically replace one exact editable Skill workflow revision."""
+
+    expected_workflow_sha256: str = Field(..., min_length=64, max_length=64)
+    workflow: dict[str, Any]
+
+
+class EquipmentSkillWorkflowCheckRequest(BaseModel):
+    """Check a draft workflow without persisting or compiling it."""
+
+    workflow: dict[str, Any]
+
+
+class EquipmentSkillWorkflowStepTestRequest(BaseModel):
+    """Run exactly one selected workflow step against one worker."""
+
+    bridge_id: str = Field(..., min_length=1, max_length=96)
+    confirm_execute: bool = False
+
+
+class EquipmentSkillEnabledRequest(BaseModel):
+    """Enable or disable one exact deployed Skill version."""
+
+    enabled: bool
+
+
+class EquipmentRawCsvExportContext(BaseModel):
+    """Structured identifiers used by the Windows worker to derive one Raw CSV path."""
+
+    mode: Literal["dry_run", "test", "live"]
+    session_id: str = Field(..., min_length=1, max_length=96)
+    specimen_id: str = Field(..., min_length=1, max_length=96)
+    loop_index: int = Field(..., ge=1, le=9999)
+    repeat_index: int = Field(..., ge=1, le=9999)
+
+
+class EquipmentSkillTestRequest(BaseModel):
+    """Execute an exact deployed Skill version through the configured bridge."""
+
+    runtime_mode: Literal["dry_run", "test", "live"] = "dry_run"
+    confirm_execute: bool = False
+    export_context: EquipmentRawCsvExportContext | None = None
+    runtime_context: dict[str, str | int | float | bool] = Field(default_factory=dict)
+
+
+class WindowsBridgeScreenshotRequest(BaseModel):
+    """Request body for manual Windows bridge screenshot capture."""
+
+    checkpoint: str = "manual"
+    run_id: str = "locator-calibration"
+    confirm_capture: bool = False
+
+
+class WindowsBridgeUtmProfileRequest(BaseModel):
+    """Request body for persisting UTM protocol GUI calibration into autonomous runs."""
+
+    program_id: str = Field(default="utm_compression_start_v1", min_length=1)
+    export_glob: str = "*.csv"
+    artifact_timeout_s: float | None = None
+    stable_for_sec: float | None = None
+    robot_entry_clearance_mm: float | None = Field(default=None, gt=0, le=1000)
+    expected_export_path: str = ""
+    require_window_focus: bool = False
+    manual_save_required_if_no_artifact: bool = True
+    target_window: str = ""
+    target_window_regex: str = ""
+    require_screen_assertions: bool = False
+    simulate_utm_protocol: bool = False
+    locators: dict[str, object] = Field(default_factory=dict)
+    sequence: list[dict[str, object]] = Field(default_factory=list)
+
+
+class WindowsBridgeLocatorCaptureRequest(BaseModel):
+    """Request body for Windows bridge image-locator calibration."""
+
+    program_id: str = Field(default="utm_compression_start_v1", min_length=1)
+    name: str = Field(default="ready_state", min_length=1)
+    region: list[float] = Field(default_factory=list)
+    confidence: float = 0.8
+    confirm_capture: bool = False
+
+
+class WindowsBridgeLivePreflightRequest(BaseModel):
+    """Request body for non-actuating live UTM bridge preflight."""
+
+    confirm_preflight: bool = False
+    include_locators: bool = True
+    include_screenshot: bool = False
+    include_request_log: bool = True
+
+
+class WindowsBridgeLiveValidationRequest(BaseModel):
+    """Request body for live UTM validation report generation."""
+
+    confirm_non_actuating: bool = False
+    confirm_live_execute: bool = False
+    confirm_physical_setup_safe: bool = False
+    run_id: str = ""
+    sequence_id: str = ""
+    specimen_id: str = "specimen-live-validation"
+    program_id: str = "utm_compression_start_v1"
+    command: str = "Run UTM compression protocol and export CSV"
+    include_screenshot: bool = False
+    require_screen_assertions: bool = False
+    require_window_focus: bool = False
+    manual_save_required_if_no_artifact: bool = True
+    export_glob: str = ""
+    artifact_timeout_s: float | None = None
+    stable_for_sec: float | None = None
+    expected_export_path: str = ""
+    target_window: str = ""
+    target_window_regex: str = ""
+    locators: dict[str, object] = Field(default_factory=dict)
+    sequence: list[dict[str, object]] = Field(default_factory=list)
+    vision_proof: dict[str, object] = Field(default_factory=dict)
+
+
+class WindowsBridgeRequestLogRequest(BaseModel):
+    """Request body for retrieving Windows bridge request-audit events."""
+
+    runtime_mode: Literal["test", "live"] = "live"
+    confirm_live: bool = False
+
+
+class WindowsBridgeProofPackageVerifyRequest(BaseModel):
+    """Request body for verifying a persisted Windows UTM proof package."""
+
+    path: str = ""
+    use_current: bool = True
+
+
+class WindowsBridgeCompletionAuditRequest(BaseModel):
+    """Request body for strict Improvement 05 completion audit."""
+
+    path: str = ""
+    use_current: bool = True
+    latest: bool = False
+
+
+class WindowsBridgeVisionProofDraftRequest(BaseModel):
+    """Request body for building a non-actuating Vision proof draft."""
+
+    run_id: str = ""
+    specimen_id: str = ""
+
+
+class LeRobotConfigRequest(BaseModel):
+    """Request body for selecting a LeRobot robot profile."""
+
+    profile_id: str = ""
+    observation_pipeline_id: str = ""
+    mode: Literal["live", "test", "replay", "fault-injection"] = "test"
+
+
+class LeRobotAPIRequest(BaseModel):
+    """Request body shared by LeRobot GUI action endpoints."""
+
+    mode: Literal["live", "test", "replay", "fault-injection"] = "test"
+    runtime_mode: Literal["live", "test", "replay", "fault-injection"] | None = None
+    profile_id: str = ""
+    observation_pipeline_id: str = ""
+    session_id: str = ""
+    replay_episode: int = Field(default=0, ge=0)
+    run_id: str = ""
+    loop_id: str | int = ""
+    specimen_id: str = ""
+    handoff_token: str = ""
+    handoff_run_id: str = ""
+    plc_rollout_stop_enabled: bool = False
+    isaac_mirror_enabled: bool = False
+    isaac_mirror_endpoint: str = "http://127.0.0.1:8766/joints"
+    isaac_mirror_sample_hz: float = 15.0
+    isaac_mirror_timeout_s: float = 0.5
+    isaac_mirror_max_samples: int | None = None
+    isaac_mirror_record_path: str = ""
+    isaac_mirror_attached_to_session_id: str = ""
+    isaac_mirror_receiver_launch_mode: str = "isaac_extension"
+    isaac_mirror_receiver_isaac_sim_executable: str = ""
+    isaac_mirror_receiver_python: str = ""
+    isaac_mirror_receiver_scene: str = ""
+    isaac_mirror_receiver_start_timeout_s: float | None = None
+    isaac_mirror_receiver_force_restart: bool = False
+    isaac_mirror_receiver_play_timeline_on_startup: bool = False
+    isaac_viewport_frame_on_start: bool = True
+    isaac_rgbd_render_enabled: bool = True
+    isaac_rgbd_render_target_fps: float = 15.0
+    isaac_rgbd_render_cameras: str = "top,front,right"
+    isaac_rgbd_post_render_auto_on_record_success: bool = True
+    isaac_rgbd_post_render_inline: bool = False
+    isaac_rgbd_post_render_poll_timeout_s: float = 10.0
+    isaac_rgbd_post_render_overwrite: bool = False
+    isaac_rgbd_post_render_episode_indices: str = ""
+    isaac_rgbd_post_render_execution_mode: str = "headless_preplay_replay"
+    record_attempt_overwrite: bool = True
+    active_robot_cam_enabled: bool = False
+    active_robot_cam_record_start_enabled: bool = True
+    active_robot_cam_camera_priority: str = "d405,d455f"
+    active_robot_cam_primary_camera_key: str = "wrist"
+    active_robot_cam_fallback_camera_key: str = "top"
+    active_robot_cam_capture_pose_path: str = ""
+    active_robot_cam_home_pose_path: str = ""
+    active_robot_cam_resume_mode: str = "auto"
+    active_robot_cam_d455f_fallback_enabled: bool = True
+    active_robot_cam_trigger_on_first_action: bool = True
+    task_instruction: str = "pick and place specimen"
+    dataset_path: str = ""
+    dataset_root: str = ""
+    dataset_repo_id: str = ""
+    policy_path: str = ""
+    policy_repo_id: str = ""
+    policy_checkpoint_path: str = ""
+    policy_pretrained_path: str = ""
+    policy_type: str = "act"
+    output_dir: str = ""
+    job_name: str = ""
+    device: str = "cuda"
+    seed: int | None = None
+    batch_size: int = 8
+    steps: int = 100000
+    num_workers: int = 4
+    eval_freq: int = 20000
+    log_freq: int = 200
+    save_freq: int = 20000
+    save_checkpoint: bool = True
+    eval_batch_size: int | None = None
+    optimizer_type: str = ""
+    optimizer_lr: float | None = None
+    optimizer_weight_decay: float | None = None
+    optimizer_grad_clip_norm: float | None = None
+    scheduler_type: str = ""
+    scheduler_warmup_steps: int | None = None
+    scheduler_decay_steps: int | None = None
+    scheduler_peak_lr: float | None = None
+    scheduler_decay_lr: float | None = None
+    policy_n_obs_steps: int | None = None
+    policy_chunk_size: int | None = None
+    policy_n_action_steps: int | None = None
+    policy_use_amp: bool = False
+    wandb_enable: bool = False
+    wandb_project: str = ""
+    wandb_mode: str = "disabled"
+    wandb_base_url: str = ""
+    wandb_local_port: int = 8081
+    train_extra_args: list[str] = Field(default_factory=list)
+    dataset_include_real_original: bool = True
+    dataset_include_isaac_rgbd: bool = True
+    dataset_include_isaac_augmentation: bool = True
+    dataset_include_isaac_lab_synthetic: bool = True
+    dataset_mix_real_original_weight: float = 1.0
+    dataset_mix_isaac_rgbd_weight: float = 0.5
+    dataset_mix_isaac_augmentation_weight: float = 0.5
+    dataset_mix_isaac_lab_synthetic_weight: float = 0.5
+    dataset_mix_real_original_max_samples: int | None = None
+    dataset_mix_isaac_rgbd_max_samples: int | None = None
+    dataset_mix_isaac_augmentation_max_samples: int | None = None
+    dataset_mix_isaac_lab_synthetic_max_samples: int | None = None
+    dataset_mix_seed: int = 0
+    dataset_exclude_flagged_episodes: bool = True
+    fidelity_weighting_enabled: bool = True
+    fidelity_real_original_weight: float = 1.0
+    fidelity_isaac_rgbd_weight: float = 0.5
+    fidelity_isaac_augmentation_weight: float = 0.3
+    fidelity_isaac_lab_synthetic_weight: float = 0.2
+    fps: int | None = None
+    camera_fps: int | None = None
+    teleop_time_s: float | None = None
+    warmup_s: float = 2.0
+    episode_s: float = 5.0
+    reset_s: float = 2.0
+    num_episodes: int = 1
+    continuous_rollout: bool = False
+    rollout_action_clamp: bool = False
+    rollout_linear_enabled: bool = False
+    rollout_linear_hz: int = Field(default=100, ge=1, le=100)
+    rollout_max_relative_target: int = 5
+    rollout_shoulder_lift_backstop: bool = True
+    rollout_temporal_ensemble: bool = True
+    rollout_temporal_ensemble_coeff: float = 0.01
+    rollout_inference_type: str = ""
+    rollout_rtc_execution_horizon: int | None = None
+    rollout_rtc_max_guidance_weight: float | None = None
+    rollout_action_queue_size_to_get_new_actions: int | None = None
+    max_duration_s: float | None = None
+    policy_backend: str = "lerobot_cli"
+    camera_enabled: bool = False
+    display_data: bool = False
+    resume: bool = False
+    push_to_hub: bool = False
+    tts_engine: str = ""
+    tts_rate: int | None = None
+    tts_voice: str = ""
+    confirm_live_execute: bool = False
+    episode_index: int = 0
+    episode_indices: str = ""
+    visualization_tool: Literal["html", "rerun"] = "rerun"
+    visualization_mode: Literal["local", "distant"] = "distant"
+    visualization_batch_size: int = 32
+    visualization_num_workers: int = 4
+    visualization_save: bool = False
+    visualization_output_dir: str = ""
+    visualization_web_port: int = 9092
+    visualization_ws_port: int = 9089
+    visualization_tolerance_s: float = 1e-4
+    isaac_data_augmentation_output_dir: str = ""
+    isaac_data_augmentation_variants: int = 8
+    isaac_data_augmentation_max_frames: int = 200
+    isaac_data_augmentation_seed: int | None = 0
+    isaac_data_augmentation_cameras: str = "top,front,right"
+    isaac_data_augmentation_profile: Literal["conservative", "sim2real", "stress"] = "conservative"
+    isaac_data_augmentation_image_enabled: bool = True
+    isaac_data_augmentation_photometric_enabled: bool = True
+    isaac_data_augmentation_sensor_noise_enabled: bool = True
+    isaac_data_augmentation_depth_noise_enabled: bool = True
+    isaac_data_augmentation_render_domain_enabled: bool = True
+    isaac_data_augmentation_camera_pose_enabled: bool = True
+    isaac_data_augmentation_rgb_strength: float = 1.0
+    isaac_data_augmentation_depth_strength: float = 1.0
+    isaac_data_augmentation_render_domain_strength: float = 1.0
+    isaac_data_augmentation_camera_pose_strength: float = 1.0
+    isaac_data_augmentation_preview_count: int = 20
+    isaac_data_augmentation_async: bool = False
+    isaac_data_augmentation_job_id: str = ""
+    observation: dict[str, object] = Field(default_factory=dict)
+    fault: str = ""
+    dry_run: bool = True
+
+
+class ManipulationAgentBridgeRequest(LeRobotAPIRequest):
+    """Request body for running the actual Manipulation Agent from the LeRobot GUI."""
+
+    manipulation_strategy: str = "pi05_lerobot_policy"
+    task_id: str = "transfer_to_utm"
+    skill_id: str = ""
+    source_location: str = "3dp_output_area"
+    target_location: str = "utm_fixture"
+    specimen_result: dict[str, object] = Field(default_factory=dict)
+    task_profiles: dict[str, object] = Field(default_factory=dict)
+
+
+class LeRobotDatasetManageSourceRequest(BaseModel):
+    """One source dataset selection for local dataset management."""
+
+    dataset_repo_id: str = ""
+    repo_id: str = ""
+    dataset_path: str = ""
+    episode_range: str = "all"
+
+
+class LeRobotDatasetManageSplitRequest(BaseModel):
+    """One named split output selection for local dataset management."""
+
+    name: str = ""
+    episode_range: str = "all"
+    output_repo_id: str = ""
+    output_path: str = ""
+    overwrite: bool = False
+
+
+class LeRobotDatasetManageRequest(BaseModel):
+    """Request body for local LeRobot dataset merge/split/delete actions."""
+
+    mode: Literal["live", "test", "replay", "fault-injection"] = "test"
+    runtime_mode: Literal["live", "test", "replay", "fault-injection"] | None = None
+    profile_id: str = ""
+    dataset_root: str = ""
+    namespace: str = "jin"
+    date_prefix: str = ""
+    output_repo_id: str = ""
+    output_path: str = ""
+    overwrite: bool = False
+    sources: list[LeRobotDatasetManageSourceRequest] = Field(default_factory=list)
+    source: LeRobotDatasetManageSourceRequest | None = None
+    splits: list[LeRobotDatasetManageSplitRequest] = Field(default_factory=list)
+    delete_episode_range: str = ""
+
+
+class LeRobotRecordControlAPIRequest(BaseModel):
+    """Request body for LeRobot recording controls."""
+
+    action: Literal["stop", "retry", "next", "finish"] = "stop"
+    mode: Literal["live", "test", "replay", "fault-injection"] = "test"
+    runtime_mode: Literal["live", "test", "replay", "fault-injection"] | None = None
+    profile_id: str = ""
+    session_id: str = ""
+    dry_run: bool = True
+
+
+class LeRobotBrowseRequest(BaseModel):
+    """Request body for local LeRobot path browsing."""
+
+    kind: Literal["dataset", "policy", "output", "any"] = "any"
+    path: str = ""
+    include_files: bool = True
+    select: Literal["directory", "file"] = "directory"
+
+
+class LeRobotDevicePortAPIRequest(BaseModel):
+    """Request body for LeRobot follower/leader/camera port setup."""
+
+    mode: Literal["live", "test", "replay", "fault-injection"] = "test"
+    runtime_mode: Literal["live", "test", "replay", "fault-injection"] | None = None
+    profile_id: str = ""
+    device_role: Literal["follower", "leader", "camera"] = "follower"
+    port: str = ""
+    camera_key: str = "top"
+    camera_index: int | None = None
+    camera_backend: str = "opencv"
+    camera_use_depth: bool = False
+    camera_fps: int | None = None
+    camera_width: int = 640
+    camera_height: int = 480
+    confirm_live_execute: bool = False
+    dry_run: bool = True
+
+
+class LeRobotVisualizationFileRequest(BaseModel):
+    """Request body for safe local dataset visualization file serving."""
+
+    path: str = Field(..., min_length=1)
+
+
+class RuntimeApprovalCreateRequest(BaseModel):
+    """Request body for creating a runtime human-approval request event."""
+
+    title: str = Field(default="Human approval required", min_length=1)
+    reason: str = ""
+    stage: str = ""
+    safety_class: str = "operator_review"
+    requester: str = "runtime_ide"
+    payload: dict[str, object] = Field(default_factory=dict)
+
+
+class RuntimeApprovalResolveRequest(BaseModel):
+    """Request body for resolving a runtime human-approval request."""
+
+    decision: Literal["approved", "rejected", "cancelled"] = "approved"
+    note: str = ""
+    operator: str = "operator"
+
+
+class RuntimeAgentMessageRequest(BaseModel):
+    """Compatibility request body for context-aware agent messages."""
+
+    message: str = Field(..., min_length=1)
+    goal: str | None = None
+    backend: Literal["openai", "nemoclaw", "ollama", "vllm"] | None = None
+    mode: Literal["ask", "command", "approval", "edit_report"] = "ask"
+    constraints: dict[str, object] = Field(default_factory=dict)
+    session_id: str | None = None
+
+
+class RuntimeOperatorEventRequest(BaseModel):
+    """Request body for recording an operator UI action into the runtime event stream."""
+
+    event_type: str = Field(default="operator.event", min_length=1, max_length=160)
+    message: str = ""
+    action: str = ""
+    agent_id: str = ""
+    node_id: str = ""
+    trace_id: str = ""
+    event_key: str = ""
+    level: Literal["INFO", "WARNING", "ERROR"] = "INFO"
+    payload: dict[str, object] = Field(default_factory=dict)
+
+
+class GuardianIncidentNoteRequest(BaseModel):
+    """Request body for attaching an operator note to a Guardian incident."""
+
+    note: str = Field(..., min_length=1, max_length=4000)
+    operator: str = "operator"
+    source: str = "live_gui"
+
+
+def _load_agent_baseline_markdown() -> str:
+    """Read baseline markdown for agent program integration."""
+    if not AGENT_BASELINE_DOC_PATH.exists():
+        raise HTTPException(status_code=404, detail=f"Baseline doc not found: {AGENT_BASELINE_DOC_PATH}")
+    return AGENT_BASELINE_DOC_PATH.read_text(encoding="utf-8")
+
+
+def _equipment_bridge() -> WindowsPyAutoGUIBridge:
+    cfg = load_all_configs(RUNTIME_PATHS.runtime_root / "configs", paths=RUNTIME_PATHS)
+    config = WindowsPyAutoGUIBridgeConfig.from_devices_config(cfg.get("devices", {}), repo_root=RUNTIME_PATHS.repository_root, paths=RUNTIME_PATHS)
+    return WindowsPyAutoGUIBridge(config)
+
+
+def _local_pyautogui_bridge_supervisor() -> LocalPyAutoGUIBridgeSupervisor:
+    global _LOCAL_PYAUTOGUI_BRIDGE_SUPERVISOR
+    if _LOCAL_PYAUTOGUI_BRIDGE_SUPERVISOR is None:
+        _LOCAL_PYAUTOGUI_BRIDGE_SUPERVISOR = LocalPyAutoGUIBridgeSupervisor(RUNTIME_PATHS.repository_root, paths=RUNTIME_PATHS)
+    return _LOCAL_PYAUTOGUI_BRIDGE_SUPERVISOR
+
+
+def _printer_workflow() -> PrinterAgenticWorkflow:
+    cfg = load_all_configs(RUNTIME_PATHS.runtime_root / "configs", paths=RUNTIME_PATHS)
+    config = PrusaBridgeConfig.from_devices_config(cfg.get("devices", {}), repo_root=RUNTIME_PATHS.repository_root, paths=RUNTIME_PATHS)
+    return PrinterAgenticWorkflow(config, repo_root=RUNTIME_PATHS.repository_root, paths=RUNTIME_PATHS)
+
+
+def _printer_bridge_manager() -> PrinterDeviceBridgeManager:
+    """Return the selected-printer bridge manager used by 3D GUI and printer.prepare."""
+    cfg = load_all_configs(RUNTIME_PATHS.runtime_root / "configs", paths=RUNTIME_PATHS)
+    return PrinterDeviceBridgeManager.from_devices_config(cfg.get("devices", {}), repo_root=RUNTIME_PATHS.repository_root, paths=RUNTIME_PATHS)
+
+
+def _redacted_printer_connection(workflow: PrinterAgenticWorkflow) -> dict[str, object]:
+    """Return PrusaLink connection memory without exposing secrets."""
+    config = workflow.config
+    memory = workflow.connection_memory.load()
+    auth = memory.get("auth") if isinstance(memory.get("auth"), dict) else {}
+    live_auth = config.live.get("auth", {}) if isinstance(config.live.get("auth"), dict) else {}
+    return {
+        "host": memory.get("host", ""),
+        "scheme": memory.get("scheme", config.live.get("scheme", "http")),
+        "port": memory.get("port", config.live.get("port", 80)),
+        "storage": memory.get("storage", config.live.get("storage", "usb")),
+        "auth_mode": auth.get("mode", live_auth.get("mode", "digest")),
+        "username": auth.get("username", ""),
+        "password_set": bool(auth.get("password")),
+        "api_key_set": bool(auth.get("api_key")),
+        "api_key_header": auth.get("api_key_header", live_auth.get("api_key_header", "X-Api-Key")),
+        "connection_memory_path": str(workflow.connection_memory.path),
+    }
+
+
+def _redacted_selected_printer_connection(manager: PrinterDeviceBridgeManager) -> dict[str, object]:
+    """Return selected printer connection memory without exposing Bambu/Prusa secrets."""
+    profile, _reason = manager.fleet_selection()
+    if profile.provider == "bambulab_x2d":
+        return BambuConnectionMemory(profile.connection_memory_path).redacted()
+    workflow = _printer_workflow()
+    return _redacted_printer_connection(workflow)
+
+
+def _host_is_loopback_or_unspecified(host: str) -> bool:
+    normalized = str(host or "").strip().lower()
+    if not normalized or normalized == "localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(normalized)
+    except ValueError:
+        return False
+    return bool(ip.is_loopback or ip.is_unspecified)
+
+
+def _detect_printer_reachable_host(printer_host: str) -> str:
+    """Return the local interface IP that would route to the printer host."""
+    if not printer_host:
+        return ""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.settimeout(1.0)
+        sock.connect((printer_host, 9))
+        return str(sock.getsockname()[0])
+    except OSError:
+        return ""
+    finally:
+        sock.close()
+
+
+def _bambu_http_public_base_url(request: Request, *, printer_host: str, override: str = "") -> str:
+    raw_override = str(override or "").strip().rstrip("/")
+    if raw_override:
+        parsed = urlparse(raw_override)
+        if parsed.scheme not in {"http", "https"} or _host_is_loopback_or_unspecified(parsed.hostname or ""):
+            raise HTTPException(status_code=400, detail="BAMBU_HTTP_ARTIFACT_URL_NOT_PRINTER_REACHABLE")
+        return raw_override
+
+    local_host = _detect_printer_reachable_host(printer_host)
+    if not local_host:
+        req_host = request.url.hostname or ""
+        if _host_is_loopback_or_unspecified(req_host):
+            raise HTTPException(status_code=400, detail="BAMBU_HTTP_ARTIFACT_HOST_DETECTION_FAILED")
+        local_host = req_host
+    port = request.url.port
+    netloc = f"{local_host}:{port}" if port else local_host
+    scheme = request.url.scheme if request.url.scheme in {"http", "https"} else "http"
+    return f"{scheme}://{netloc}"
+
+
+def _safe_bambu_http_artifact_source(path_value: str) -> Path:
+    source = Path(str(path_value or "")).expanduser()
+    if not source.is_absolute():
+        source = resolve_path(source)
+    source = source.resolve()
+    if not source.exists() or not source.is_file():
+        raise HTTPException(status_code=404, detail="BAMBU_HTTP_ARTIFACT_FILE_NOT_FOUND")
+    name = source.name.lower()
+    allowed = name.endswith((".gcode.3mf", ".3mf", ".gcode"))
+    if not allowed:
+        raise HTTPException(status_code=400, detail="BAMBU_HTTP_ARTIFACT_UNSUPPORTED_EXTENSION")
+    return source
+
+
+def _safe_bambu_http_filename(source: Path) -> str:
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", source.name).strip("._")
+    return name or "bambu_artifact.gcode.3mf"
+
+
+def _safe_bambu_http_export_path(token: str, filename: str) -> Path:
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", str(token or "")):
+        raise HTTPException(status_code=404, detail="Bambu HTTP artifact not found")
+    safe_name = _safe_bambu_http_filename(Path(filename))
+    root = BAMBU_HTTP_EXPORT_ROOT.resolve()
+    path = (root / token / safe_name).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Bambu HTTP artifact path escapes export root") from exc
+    return path
+
+
+def _bambu_http_export_path_from_remote_path(remote_path: str) -> Path | None:
+    """Resolve an AX4LAB-served Bambu artifact URL back to its local export path."""
+    parsed = urlparse(str(remote_path or ""))
+    path_value = parsed.path if parsed.scheme else str(remote_path or "")
+    parts = [unquote(part) for part in str(path_value or "").split("/") if part]
+    if len(parts) >= 4 and parts[-4:-2] == ["printer-artifacts", "bambu"]:
+        token = parts[-2]
+        filename = parts[-1]
+        try:
+            return _safe_bambu_http_export_path(token, filename)
+        except HTTPException:
+            return None
+    candidate = Path(str(remote_path or "")).expanduser()
+    if candidate.is_file():
+        return candidate.resolve()
+    return None
+
+
+def _load_bambu_autoejection_manifest_for_artifact(artifact_path: Path | None) -> dict[str, object]:
+    if artifact_path is None:
+        return {}
+    manifest_path = Path(f"{artifact_path}.manifest.json")
+    if not manifest_path.exists() or not manifest_path.is_file():
+        return {}
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {**payload, "manifest_path": str(manifest_path)}
+
+
+def _bambu_bed_clear_publish_evidence(
+    *,
+    remote_path: str,
+    subtask_name: str,
+    publish_result: dict[str, object],
+    post_publish_state: dict[str, object],
+) -> dict[str, object]:
+    """Build bed-clear evidence references for a just-published autoejection artifact."""
+    artifact_path = _bambu_http_export_path_from_remote_path(remote_path)
+    manifest = _load_bambu_autoejection_manifest_for_artifact(artifact_path)
+    patched_sha = str(manifest.get("patched_sha256") or "")
+    if not patched_sha and artifact_path and artifact_path.exists():
+        try:
+            patched_sha = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+        except OSError:
+            patched_sha = ""
+    return {
+        "remote_path": str(remote_path or ""),
+        "subtask_name": str(subtask_name or ""),
+        "source_artifact_path": str(manifest.get("source_path") or ""),
+        "source_artifact_sha256": str(manifest.get("source_sha256") or ""),
+        "patched_artifact_path": str(manifest.get("patched_artifact_path") or artifact_path or ""),
+        "patched_artifact_sha256": patched_sha,
+        "manifest_path": str(manifest.get("manifest_path") or ""),
+        "publish_sequence_id": str(publish_result.get("sequence_id") or ""),
+        "publish_topic": str(publish_result.get("topic") or ""),
+        "post_publish_status": str(post_publish_state.get("status") or ""),
+    }
+
+
+async def _probe_bambu_http_artifact_fetch(
+    artifact_url: str,
+    *,
+    expected_sha256: str,
+    timeout_sec: float = 3.0,
+) -> dict[str, object]:
+    """Fetch the prepared artifact URL and compare bytes before treating it as a transfer route."""
+    parsed = urlparse(str(artifact_url or ""))
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return {
+            "ok": False,
+            "failure_code": "BAMBU_HTTP_ARTIFACT_PROBE_URL_INVALID",
+            "message": "Artifact URL is not an HTTP(S) URL.",
+        }
+    try:
+        async with httpx.AsyncClient(timeout=float(timeout_sec), follow_redirects=True) as client:
+            response = await client.get(artifact_url)
+    except Exception as exc:  # noqa: BLE001 - return operator-facing probe evidence.
+        return {
+            "ok": False,
+            "failure_code": "BAMBU_HTTP_ARTIFACT_FETCH_FAILED",
+            "message": f"AX4LAB server artifact URL could not be fetched: {exc}",
+        }
+    content = response.content
+    digest = hashlib.sha256(content).hexdigest()
+    status_ok = 200 <= response.status_code < 300
+    hash_ok = digest == expected_sha256
+    return {
+        "ok": bool(status_ok and hash_ok),
+        "status_code": response.status_code,
+        "size_bytes": len(content),
+        "sha256": digest,
+        "matches_expected_sha256": hash_ok,
+        "failure_code": "" if status_ok and hash_ok else (
+            "BAMBU_HTTP_ARTIFACT_HASH_MISMATCH" if status_ok else "BAMBU_HTTP_ARTIFACT_FETCH_STATUS_FAILED"
+        ),
+        "message": (
+            "Artifact URL fetched successfully and sha256 matched."
+            if status_ok and hash_ok
+            else "Artifact URL fetch did not prove that the prepared file is reachable and intact."
+        ),
+    }
+
+
+def _selected_print_profile(manager: PrinterDeviceBridgeManager) -> dict[str, object]:
+    """Return print defaults adapted to the selected printer provider without mutating memory."""
+    profile = load_prusa_print_profile(path=RUNTIME_PATHS.memory_root / "prusa_print_profile.json")
+    selected_profile, _reason = manager.fleet_selection()
+    return adapt_print_profile_for_provider(profile, selected_profile.provider)
+
+
+def _selected_printer_autoejection_payload(
+    manager: PrinterDeviceBridgeManager,
+    config: PrusaBridgeConfig,
+    profile: dict[str, object],
+) -> dict[str, object]:
+    selected_profile, _reason = manager.fleet_selection()
+    if selected_profile.provider == "bambulab_x2d":
+        status = manager.autoejection_status()
+        return {
+            "enabled": bool(status.get("enabled", False)),
+            "method": status.get("provider", "none"),
+            "mode": status.get("status", "not_configured"),
+            "requested": bool(status.get("requested", False)),
+            "can_run_test": bool(status.get("can_run_test", False)),
+            "blockers": status.get("blockers", []),
+            "verified_routine_id": status.get("verified_routine_id", ""),
+            "pre_eject_vision_profile": status.get("pre_eject_vision_profile", ""),
+            "post_eject_vision_profile": status.get("post_eject_vision_profile", ""),
+            "require_verified_routine": bool(status.get("require_verified_routine", True)),
+            "require_pre_eject_vision": bool(status.get("require_pre_eject_vision", True)),
+            "require_post_eject_vision": bool(status.get("require_post_eject_vision", True)),
+        }
+    return {
+        "enabled": bool(profile.get("allow_ejection", False)),
+        "method": config.ejection.method,
+        "mode": config.ejection.mode,
+    }
+
+
+def _selected_printer_profile_live_gates(
+    manager: PrinterDeviceBridgeManager,
+    config: PrusaBridgeConfig,
+) -> dict[str, object]:
+    """Return non-actuating profile-page gate defaults for the active printer."""
+    selected_profile, _reason = manager.fleet_selection()
+    if selected_profile.provider == "bambulab_x2d":
+        autoejection = manager.autoejection_status()
+        return {
+            "allow_status": True,
+            # Profile load must not imply Bambu upload/start readiness. The live
+            # status/SPC routes attach the current MQTT/transfer/start evidence.
+            "allow_upload": False,
+            "allow_start_print": False,
+            "allow_ejection": bool(autoejection.get("enabled", False)),
+        }
+    return {
+        "allow_status": config.live_gate("allow_status", True),
+        "allow_upload": config.live_gate("allow_upload", False),
+        "allow_start_print": config.live_gate("allow_start_print", False),
+        "allow_ejection": config.live_gate("allow_ejection", False),
+    }
+
+
+def _selected_printer_slicer_payload(
+    manager: PrinterDeviceBridgeManager,
+    config: PrusaBridgeConfig,
+) -> dict[str, object]:
+    """Return slicer config for the active printer provider."""
+    selected_profile, _reason = manager.fleet_selection()
+    if selected_profile.provider == "bambulab_x2d":
+        return manager.config.slicer.resolved_payload(repo_root=RUNTIME_PATHS.repository_root, paths=RUNTIME_PATHS)
+    return {
+        "enabled": config.slicer.enabled,
+        "available": bool(os.environ.get(config.slicer.executable_env) or Path(config.slicer.executable_path).exists()),
+        "source": "env" if os.environ.get(config.slicer.executable_env) else "configured",
+        "executable_env": config.slicer.executable_env,
+        "executable_path": config.slicer.executable_path,
+        "configured_executable_path": config.slicer.executable_path,
+        "resolved_executable_path": os.environ.get(config.slicer.executable_env, config.slicer.executable_path),
+        "output_dir": config.slicer.output_dir,
+        "timeout_sec": config.slicer.timeout_sec,
+    }
+
+
+def _registered_lerobot_bridge() -> LeRobotBridge | None:
+    """Return the LeRobot bridge owned by the backend ToolRegistry when available."""
+    resource_getter = getattr(controller._deps.agent_context.tools, "resource", None)
+    if callable(resource_getter):
+        bridge = resource_getter("lerobot.bridge")
+        if isinstance(bridge, LeRobotBridge):
+            return bridge
+    return None
+
+
+def _lerobot_bridge() -> LeRobotBridge:
+    """Return the shared LeRobot bridge used by registered backend tools."""
+    global _LEROBOT_BRIDGE, _LEROBOT_CONFIG_MTIME_NS
+    if _LEROBOT_BRIDGE is not None:
+        return _LEROBOT_BRIDGE
+    bridge = _registered_lerobot_bridge()
+    if bridge is not None:
+        return bridge
+    config_path = RUNTIME_PATHS.runtime_root / "configs/lerobot.yaml"
+    try:
+        config_mtime_ns = config_path.stat().st_mtime_ns
+    except OSError:
+        config_mtime_ns = -1
+    if _LEROBOT_BRIDGE is None or config_mtime_ns != _LEROBOT_CONFIG_MTIME_NS:
+        cfg = load_all_configs(RUNTIME_PATHS.runtime_root / "configs", paths=RUNTIME_PATHS)
+        config = LeRobotBridgeConfig.from_config(cfg.get("lerobot", {}), repo_root=RUNTIME_PATHS.repository_root, paths=RUNTIME_PATHS)
+        config.artifact_run_root = RUNTIME_PATHS.run_root
+        _LEROBOT_BRIDGE = LeRobotBridge(config)
+        _LEROBOT_CONFIG_MTIME_NS = config_mtime_ns
+    return _LEROBOT_BRIDGE
+
+
+def _joint_telemetry_session_context() -> dict[str, Any] | None:
+    """Select the current rollout log without opening robot or camera devices."""
+
+    reset_at_ms = getattr(controller, "telemetry_reset_at_ms", 0)
+    sessions: list[dict[str, Any]] = []
+    session_log_paths: dict[str, Path] = {}
+    seen_sessions: set[str] = set()
+    seen_bridges: set[int] = set()
+    for bridge in (_lerobot_bridge(), _registered_lerobot_bridge()):
+        if bridge is None or id(bridge) in seen_bridges:
+            continue
+        seen_bridges.add(id(bridge))
+        try:
+            recent = bridge.sessions_recent()
+        except Exception:
+            continue
+        for raw_session in recent:
+            if not isinstance(raw_session, dict) or str(raw_session.get("workflow") or "") != "rollout":
+                continue
+            if reset_at_ms:
+                try:
+                    created_ms = datetime.fromisoformat(str(raw_session.get("created_at") or "").replace("Z", "+00:00")).timestamp() * 1000
+                except (ValueError, TypeError):
+                    continue
+                if created_ms <= reset_at_ms:
+                    continue
+            session_id = str(raw_session.get("session_id") or "").strip()
+            if not session_id or session_id in seen_sessions:
+                continue
+            seen_sessions.add(session_id)
+            sessions.append(dict(raw_session))
+            if re.fullmatch(r"[A-Za-z0-9_.-]+", session_id):
+                log_directory = getattr(bridge, "_omx_action_log_dir", None)
+                if callable(log_directory):
+                    session_log_paths[session_id] = log_directory(session_id) / "motor_events.jsonl"
+    if not sessions:
+        return None
+
+    active = [
+        session
+        for session in sessions
+        if str(session.get("status") or "").upper() not in TERMINAL_SESSION_STATUSES
+    ]
+    selected = max(
+        active or sessions,
+        key=lambda session: (
+            str(session.get("created_at") or session.get("updated_at") or ""),
+            str(session.get("session_id") or ""),
+        ),
+    )
+    session_id = str(selected.get("session_id") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", session_id):
+        return None
+    from utils.rollout_artifact_stream import resolve_rollout_log
+    return {
+        "session": selected,
+        "log_path": session_log_paths.get(session_id) or resolve_rollout_log(LEROBOT_ACTION_LOG_ROOT / session_id) / "motor_events.jsonl",
+    }
+
+
+def _joint_telemetry_public_session(session: dict[str, Any]) -> dict[str, Any]:
+    """Keep WebSocket status packets compact and free of command previews."""
+
+    keys = (
+        "session_id",
+        "workflow",
+        "status",
+        "mode",
+        "profile_id",
+        "policy_type",
+        "policy_path",
+        "policy_checkpoint_path",
+        "created_at",
+    )
+    return {key: session[key] for key in keys if session.get(key) not in (None, "")}
+
+
+def _joint_telemetry_artifacts(log_path: Path, session: dict[str, Any]) -> dict[str, Any]:
+    """Finalize policy-tracking evidence and expose allowed local file URLs."""
+
+    artifacts = finalize_policy_tracking_artifacts(log_path, session)
+    if not artifacts.get("ok"):
+        return artifacts
+    for path_key in (
+        "plot_png_path",
+        "summary_json_path",
+        "raw_jsonl_path",
+        "raw_csv_path",
+        "grasp_outcomes_path",
+    ):
+        value = str(artifacts.get(path_key) or "").strip()
+        if not value or not Path(value).is_file():
+            continue
+        url_key = path_key.removesuffix("_path") + "_url"
+        artifacts[url_key] = f"/api/lerobot/visualization/file?path={quote(value, safe='')}"
+    return artifacts
+
+
+def _manipulation_runtime_state() -> dict[str, Any]:
+    """Return only state fields needed by the read-only manipulation dashboard."""
+
+    state = controller._state
+    metadata = state.run_metadata if isinstance(state.run_metadata, dict) else {}
+    return {
+        "run_id": state.run_id,
+        "stage": state.stage.value,
+        "safe_stop_requested": state.safe_stop_requested,
+        "emergency_stop_requested": state.emergency_stop_requested,
+        "task_progress_projection_version": 1,
+        "run_metadata": {
+            key: metadata[key]
+            for key in ("manipulation_report", "robot_task_result", "manipulation_task_progress",
+                        "initial_manipulation_execution", "manipulation_execution", "utm_clear_execution")
+            if isinstance(metadata.get(key), dict)
+        },
+    }
+
+
+def _manipulation_runtime_view(
+    session: dict[str, Any] | None = None,
+    packet: dict[str, Any] | None = None,
+    artifacts: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return build_manipulation_runtime_view(
+        session=session or {},
+        state=_manipulation_runtime_state(),
+        packet=packet,
+        artifacts=artifacts or {},
+    )
+
+
+def _utm_runtime_bridge() -> UTMRuntimeProcessManager:
+    """Return the shared UTM ROS runtime manager used by GUI routes and tools."""
+    global _utm_runtime_manager
+    if _utm_runtime_manager is None:
+        cfg = load_all_configs(RUNTIME_PATHS.runtime_root / "configs", paths=RUNTIME_PATHS)
+        _utm_runtime_manager = get_utm_runtime_manager(cfg.get("devices", {}), repo_root=RUNTIME_PATHS.repository_root, paths=RUNTIME_PATHS)
+    return _utm_runtime_manager
+
+
+def _specimen_pose_tracker_bridge() -> SpecimenPoseTrackerBridge:
+    """Return the shared one-shot D455F specimen pose tracker bridge."""
+    global _specimen_pose_tracker
+    if _specimen_pose_tracker is None:
+        cfg = load_all_configs(RUNTIME_PATHS.runtime_root / "configs", paths=RUNTIME_PATHS)
+        _specimen_pose_tracker = get_specimen_pose_tracker_bridge(cfg.get("devices", {}), repo_root=RUNTIME_PATHS.repository_root, paths=RUNTIME_PATHS)
+    return _specimen_pose_tracker
+
+
+async def _publish_lerobot_result(result: dict[str, object]) -> dict[str, object]:
+    """Broadcast LeRobot tool results into the shared runtime event stream."""
+    await controller.emit_lerobot_result(result)
+    return result
+
+
+async def _call_lerobot_backend_tool(tool_name: str, payload: dict[str, object], *, publish: bool = True) -> dict[str, object]:
+    """Call LeRobot through the backend ToolRegistry so device queues and guards apply."""
+    try:
+        result = await asyncio.to_thread(controller._deps.agent_context.tools.call, tool_name, payload)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if publish:
+        return await _publish_lerobot_result(result)
+    return result
+
+
+def _test_mode_execution_profile_store() -> TestModeExecutionProfileStore:
+    """Build the profile store from the current configured path for test isolation."""
+    return TestModeExecutionProfileStore(TEST_MODE_EXECUTION_PROFILES_PATH)
+
+
+@app.get("/", response_class=HTMLResponse)
+async def home(request: Request) -> HTMLResponse:
+    """Serve main web dashboard."""
+    return templates.TemplateResponse(
+        request=request,
+        name="index.html",
+        context={"title": "AX4LAB Dashboard"},
+    )
+
+
+@app.get("/test-mode-settings", response_class=HTMLResponse)
+async def test_mode_settings_gui(request: Request) -> HTMLResponse:
+    """Serve the persistent test-mode execution-profile editor."""
+    return templates.TemplateResponse(
+        request=request,
+        name="test_mode_settings.html",
+        context={"title": "Test Mode Settings"},
+    )
+
+
+@app.get("/api/test-mode-execution-profiles")
+async def get_test_mode_execution_profiles() -> dict[str, Any]:
+    """Return the complete revisioned test-mode profile document."""
+    return _test_mode_execution_profile_store().snapshot()
+
+
+@app.put("/api/test-mode-execution-profiles/{profile_id}")
+async def put_test_mode_execution_profile(
+    profile_id: str,
+    request: TestModeExecutionProfileSaveRequest,
+) -> dict[str, Any]:
+    """Validate and atomically replace one complete test-mode profile."""
+    try:
+        return _test_mode_execution_profile_store().save_profile(
+            profile_id,
+            request.profile,
+            expected_revision=request.expected_revision,
+            total_cycles=request.total_cycles,
+        )
+    except TestModeExecutionProfileConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except TestModeExecutionProfileValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/test-mode-execution-profiles/reset")
+async def reset_test_mode_execution_profiles(
+    request: TestModeExecutionProfileResetRequest,
+) -> dict[str, Any]:
+    """Restore one or all built-in test-mode profiles."""
+    try:
+        return _test_mode_execution_profile_store().reset(
+            request.profile_id,
+            expected_revision=request.expected_revision,
+        )
+    except TestModeExecutionProfileConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except TestModeExecutionProfileValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/planning/runs/{run_id}/teleop-handoff")
+async def get_operator_teleop_handoff(run_id: str, handoff_token: str) -> dict[str, Any]:
+    """Return a token-bounded pending handoff to the Manipulation Bridge popup."""
+    try:
+        return controller.teleop_handoff_status(run_id=run_id, handoff_token=handoff_token)
+    except OperatorTeleopHandoffError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/planning/runs/{run_id}/teleop-handoff/confirm")
+async def confirm_operator_teleop_handoff(
+    run_id: str,
+    request: OperatorTeleopHandoffConfirmRequest,
+) -> dict[str, Any]:
+    """Confirm transfer only after the existing LeRobot status proves resource release."""
+    try:
+        handoff = controller.teleop_handoff_status(
+            run_id=run_id,
+            handoff_token=request.handoff_token,
+        )
+    except OperatorTeleopHandoffError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if str(handoff.get("teleop_session_id") or "") != request.teleop_session_id:
+        raise HTTPException(status_code=409, detail="TELEOP_SESSION_MISMATCH")
+    status = _lerobot_bridge().teleoperate_status(
+        {
+            "mode": "live",
+            "runtime_mode": "live",
+            "session_id": request.teleop_session_id,
+        }
+    )
+    if str(status.get("session_id") or "") != request.teleop_session_id:
+        raise HTTPException(status_code=409, detail="TELEOP_SESSION_MISMATCH")
+    try:
+        result = controller.confirm_teleop_handoff(
+            run_id=run_id,
+            handoff_token=request.handoff_token,
+            teleop_session_id=request.teleop_session_id,
+            teleop_evidence=status,
+            confirmed_by=request.confirmed_by,
+        )
+    except OperatorTeleopHandoffError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    await controller.emit_runtime_event(
+        event_type="operator_teleop_handoff_confirmed",
+        message="Operator teleop transfer confirmed; UTM Vision verification is next.",
+        payload={
+            "run_id": run_id,
+            "cycle_index": result.get("cycle_index"),
+            "specimen_id": result.get("specimen_id"),
+            "candidate_id": result.get("candidate_id"),
+            "teleop_session_id": request.teleop_session_id,
+            "status": result.get("status"),
+        },
+        level="INFO",
+        run_id=run_id,
+    )
+    return result
+
+
+@app.get("/lerobot", response_class=HTMLResponse)
+async def lerobot_gui(request: Request) -> HTMLResponse:
+    """Serve LeRobot / ROBOTIS teleoperation, recording, and rollout GUI."""
+    return templates.TemplateResponse(
+        request=request,
+        name="lerobot.html",
+        context={"title": "LeRobot ROBOTIS GUI", "isaac_resources": _lerobot_bridge().isaac_resource_defaults()},
+    )
+
+
+@app.get("/plc", response_class=HTMLResponse)
+async def plc_gui(request: Request) -> HTMLResponse:
+    """Serve the dedicated PLC device workspace shell."""
+    return templates.TemplateResponse(
+        request=request,
+        name="plc.html",
+        context={"title": "PLC Device Workspace"},
+    )
+
+
+@app.get("/api/plc/config")
+async def plc_config() -> dict[str, object]:
+    """Return the editable PLC configuration without runtime history."""
+    return _plc_config()
+
+
+@app.post("/api/plc/config", response_model=None)
+async def save_plc_config(request: PLCConfigRequest) -> dict[str, object] | JSONResponse:
+    """Persist validated settings only while the physical connection is offline."""
+    service = _plc_bridge_service()
+    lifecycle_failure = _plc_lifecycle_failure("config")
+    if lifecycle_failure is not None:
+        failure_code, message = lifecycle_failure
+        return JSONResponse(
+            status_code=409,
+            content=_plc_mutation_payload(
+                ok=False,
+                failure_code=failure_code,
+                message=message,
+                step_trace=[{"step": "CONFIG_GATE", "status": "blocked"}],
+            ),
+        )
+
+    saved = request.model_dump()
+    _write_workspace_settings(PLC_CONFIG_MEMORY_PATH, saved)
+    service._host = request.host
+    service._port = request.port
+    service._poll_interval_s = request.poll_interval_s
+    service._stale_after_s = request.stale_after_s
+    service._handshake_timeout_s = request.handshake_timeout_s
+    return _plc_mutation_payload(
+        ok=True,
+        message="PLC configuration saved.",
+        step_trace=[{"step": "CONFIG_VALIDATE_AND_SAVE", "status": "ok"}],
+    )
+
+
+@app.get("/api/plc/status")
+async def plc_status() -> dict[str, object]:
+    """Return cached PLC state without waiting for physical I/O."""
+    return _plc_status()
+
+
+@app.post("/api/plc/connect")
+async def connect_plc() -> dict[str, object]:
+    """Start the sole background monitor without blocking on connection I/O."""
+    started = await _plc_bridge_service().start()
+    return _plc_mutation_payload(
+        ok=True,
+        message="PLC monitoring started." if started else "PLC monitoring is already running.",
+        step_trace=[{"step": "MONITOR_START", "status": "ok"}],
+    )
+
+
+@app.post("/api/plc/disconnect", response_model=None)
+async def disconnect_plc() -> dict[str, object] | JSONResponse:
+    """Stop monitoring and disconnect the configured transport."""
+    lifecycle_failure = _plc_lifecycle_failure("disconnect")
+    if lifecycle_failure is not None:
+        failure_code, message = lifecycle_failure
+        return JSONResponse(
+            status_code=409,
+            content=_plc_mutation_payload(
+                ok=False,
+                failure_code=failure_code,
+                message=message,
+                step_trace=[{"step": "DISCONNECT_GATE", "status": "blocked"}],
+            ),
+        )
+    await _plc_bridge_service().shutdown()
+    return _plc_mutation_payload(
+        ok=True,
+        message="PLC monitoring stopped.",
+        step_trace=[{"step": "MONITOR_SHUTDOWN", "status": "ok"}],
+    )
+
+
+@app.post("/api/plc/preflight", response_model=None)
+async def preflight_plc() -> dict[str, object] | JSONResponse:
+    """Read and validate the bounded register contract without actuation."""
+    service = _plc_bridge_service()
+    try:
+        result = await service.preflight()
+    except Exception as exc:
+        await service.mark_disconnected(str(exc))
+        return _plc_mutation_payload(
+            ok=False,
+            failure_code="PLC_CONNECT_FAILED",
+            message=str(exc),
+            step_trace=[{"step": "PREFLIGHT_CONNECT_AND_READ", "status": "failed"}],
+        )
+    payload = _plc_mutation_payload(
+        ok=bool(result["ok"]),
+        failure_code=str(result["failure_code"]) if result["failure_code"] else None,
+        message=(
+            "PLC preflight passed."
+            if result["ok"]
+            else str(result.get("message") or "PLC preflight failed.")
+        ),
+        step_trace=[
+            {
+                "step": (
+                    "PREFLIGHT_HANDSHAKE_GATE"
+                    if result.get("failure_code") == "PLC_PREFLIGHT_HANDSHAKE_ACTIVE"
+                    else "PREFLIGHT_CONNECT_AND_READ"
+                ),
+                "status": "ok" if result["ok"] else "blocked",
+            }
+        ],
+    )
+    if result.get("failure_code") == "PLC_PREFLIGHT_HANDSHAKE_ACTIVE":
+        return JSONResponse(status_code=409, content=payload)
+    return payload
+
+
+@app.get("/api/plc/events")
+async def plc_events() -> dict[str, object]:
+    """Return the service's bounded in-memory event history."""
+    events = _plc_bridge_service().events()
+    return {"events": events, "count": len(events)}
+
+
+@app.post("/api/plc/virtual/input", response_model=None)
+async def set_virtual_plc_input(
+    request: PLCVirtualInputRequest,
+) -> dict[str, object] | JSONResponse:
+    """Apply a named pushbutton action only to an explicit virtual transport."""
+    service = _plc_bridge_service()
+    action = {
+        "estop": service.virtual_estop,
+        "resume": service.virtual_resume,
+        "reset": service.virtual_reset,
+    }[request.action]
+    try:
+        await action()
+    except RuntimeError:
+        return JSONResponse(
+            status_code=409,
+            content=_plc_mutation_payload(
+                ok=False,
+                failure_code="PLC_VIRTUAL_INPUT_UNAVAILABLE",
+                message="Virtual PLC input is unavailable for the configured live transport.",
+                step_trace=[{"step": "VIRTUAL_TRANSPORT_GATE", "status": "blocked"}],
+            ),
+        )
+    return _plc_mutation_payload(
+        ok=True,
+        message=f"Virtual PLC {request.action} input applied.",
+        step_trace=[{"step": "VIRTUAL_INPUT", "status": "ok", "action": request.action}],
+    )
+
+
+@app.get("/printer", response_class=HTMLResponse)
+async def printer_gui(request: Request) -> HTMLResponse:
+    """Serve Prusa MK4S 3DP profile and bridge control GUI."""
+    return templates.TemplateResponse(
+        request=request,
+        name="printer.html",
+        context={"title": "3D Printer GUI"},
+    )
+
+
+@app.get("/bo", response_class=HTMLResponse)
+async def bo_gui(request: Request) -> HTMLResponse:
+    """Serve Bayesian Optimization / MBO workspace GUI."""
+    return templates.TemplateResponse(
+        request=request,
+        name="bo.html",
+        context={"title": "BO Workspace"},
+    )
+
+
+
+
+@app.get("/knowledge", response_class=HTMLResponse)
+async def knowledge_gui(request: Request) -> HTMLResponse:
+    """Serve the Knowledge Graph, ontology, memory, and sync workspace."""
+    return templates.TemplateResponse(
+        request=request,
+        name="knowledge.html",
+        context={"title": "Knowledge Workspace"},
+    )
+
+
+@app.get("/device-bridge/vision-utm", response_class=HTMLResponse)
+async def vision_utm_device_bridge_gui(request: Request) -> HTMLResponse:
+    """Serve Camera/UTM Vision device bridge setup and verification GUI."""
+    return templates.TemplateResponse(
+        request=request,
+        name="vision_utm_device_bridge.html",
+        context={"title": "Vision Camera Device Bridge"},
+    )
+
+
+@app.get("/ide", response_class=HTMLResponse)
+async def runtime_ide(request: Request) -> HTMLResponse:
+    """Serve config-driven LangGraph Runtime IDE."""
+    return templates.TemplateResponse(
+        request=request,
+        name="runtime_ide.html",
+        context={"title": "AX4LAB Runtime IDE"},
+    )
+
+
+@app.get("/module-management", response_class=HTMLResponse)
+async def module_management_tool(request: Request) -> HTMLResponse:
+    """Serve the standalone Module Management Tool GUI."""
+    return templates.TemplateResponse(
+        request=request,
+        name="module_management.html",
+        context={"title": "Module Management Tool"},
+    )
+
+
+@app.get("/planning", response_class=HTMLResponse)
+async def planning(request: Request) -> HTMLResponse:
+    """Serve the live-mode GUI workspace (legacy planning route)."""
+    return await live_gui(request)
+
+
+@app.get("/live", response_class=HTMLResponse)
+async def live_gui(request: Request) -> HTMLResponse:
+    """Serve the live-mode GUI conversation workspace."""
+    controller.prepare_live_gui(
+        goal=request.query_params.get("goal"),
+        backend=request.query_params.get("backend"),
+        reset=request.query_params.get("fresh") == "1",
+    )
+    return templates.TemplateResponse(
+        request=request,
+        name="planning.html",
+        context={"title": "Live GUI"},
+    )
+
+
+@app.get("/equipment/windows", response_class=HTMLResponse)
+async def windows_equipment_gui(request: Request) -> HTMLResponse:
+    """Serve Windows PyAutoGUI bridge discovery and setup GUI."""
+    return templates.TemplateResponse(
+        request=request,
+        name="windows_equipment.html",
+        context={"title": "Windows Equipment Bridge"},
+    )
+
+
+@app.get("/equipment/agent-manager", response_class=HTMLResponse)
+async def equipment_agent_manager(request: Request) -> HTMLResponse:
+    """Serve the sole Profile-bound Lab Equipment flow authoring surface."""
+    return templates.TemplateResponse(
+        request=request,
+        name="equipment_agent_manager.html",
+        context={"title": "Lab Equipment Agent Manager"},
+    )
+
+
+@app.get("/equipment/skills/{skill_id}/{version}/workflow-editor", response_class=HTMLResponse)
+async def equipment_skill_workflow_editor(request: Request, skill_id: str, version: str) -> HTMLResponse:
+    """Serve the exact-version sequential Equipment Skill editor."""
+    try:
+        package = _equipment_skill_registry().get(skill_id, version)
+    except SkillContractError as exc:
+        raise _skill_contract_http_error(exc) from exc
+    return templates.TemplateResponse(
+        request=request,
+        name="equipment_skill_workflow_editor.html",
+        context={
+            "title": f"Skill Workflow · {skill_id}@{version}",
+            "skill_id": skill_id,
+            "skill_version": version,
+            "skill_lifecycle": str(package.get("manifest", {}).get("lifecycle") or "draft"),
+        },
+    )
+
+
+def _rewrite_windows_bridge_console_html(html: str) -> str:
+    """Keep the Windows bridge's absolute API calls inside the AX4LAB proxy namespace."""
+    prefix = "/equipment/windows/bridge-ui"
+    shim = (
+        "<script>"
+        "(()=>{localStorage.setItem(\"bridgeToken\",\"atr-proxy-session\");"
+        "const f=window.fetch.bind(window);window.fetch=(input,init)=>{"
+        "if(typeof input==='string'&&input.startsWith('/'))input='" + prefix + "'+input;"
+        "return f(input,init);};})();"
+        "</script>"
+    )
+    if "</head>" in html:
+        return html.replace("</head>", shim + "</head>", 1)
+    return shim + html
+
+
+_BUNDLED_WINDOWS_CONSOLE_HTML: str | None = None
+
+
+def _bundled_windows_bridge_console_html() -> str:
+    """Load the packaged Windows console locally so the operator UI is always viewable."""
+    global _BUNDLED_WINDOWS_CONSOLE_HTML
+    if _BUNDLED_WINDOWS_CONSOLE_HTML is not None:
+        return _BUNDLED_WINDOWS_CONSOLE_HTML
+    source_path = RUNTIME_PATHS.runtime_root / "Pyautogui_server_for_window" / "bridge" / "windows_pyautogui_bridge_server.py"
+    module_name = "atr_bundled_windows_pyautogui_console"
+    spec = importlib.util.spec_from_file_location(module_name, source_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load bundled Windows console source: {source_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    _BUNDLED_WINDOWS_CONSOLE_HTML = _rewrite_windows_bridge_console_html(str(module.INDEX_HTML))
+    return _BUNDLED_WINDOWS_CONSOLE_HTML
+
+
+@app.get("/equipment/windows/console", response_class=HTMLResponse)
+async def local_windows_equipment_console() -> HTMLResponse:
+    """Render the packaged Windows operator console without requiring the remote bridge to be online."""
+    return HTMLResponse(content=_bundled_windows_bridge_console_html(), headers={"Cache-Control": "no-store"})
+
+
+@app.api_route(
+    "/equipment/windows/bridge-ui/{resource_path:path}",
+    methods=["GET", "POST", "DELETE"],
+    response_class=Response,
+)
+async def proxy_windows_equipment_bridge_ui(resource_path: str, request: Request) -> Response:
+    """Serve the selected Windows bridge GUI through AX4LAB without exposing its token."""
+    bridge = _equipment_bridge()
+    request_body = await request.body()
+    result = await asyncio.to_thread(
+        bridge.proxy_ui_request,
+        method=request.method,
+        resource_path=resource_path,
+        query_string=request.url.query,
+        body=request_body,
+        content_type=request.headers.get("content-type", ""),
+    )
+    content = result.get("content", b"")
+    content_type = str(result.get("content_type") or "application/octet-stream")
+    if content_type.lower().startswith("text/html") and isinstance(content, bytes):
+        content = _rewrite_windows_bridge_console_html(content.decode("utf-8", errors="replace")).encode("utf-8")
+    return Response(
+        content=content,
+        status_code=int(result.get("status_code") or 502),
+        media_type=content_type.split(";", 1)[0],
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _bytes_to_gb(value: int | float | None) -> float | None:
+    """Convert bytes to GiB with stable rounding for UI display."""
+    if value is None:
+        return None
+    return round(float(value) / (1024 ** 3), 2)
+
+
+def _read_windows_ram_snapshot() -> dict[str, object]:
+    """Read host RAM through the Windows API when /proc is unavailable."""
+    if os.name != "nt":
+        return {"status": "unknown", "message": "Windows RAM metrics unavailable on this OS"}
+
+    class MemoryStatusEx(ctypes.Structure):
+        _fields_ = [
+            ("dwLength", ctypes.c_ulong),
+            ("dwMemoryLoad", ctypes.c_ulong),
+            ("ullTotalPhys", ctypes.c_ulonglong),
+            ("ullAvailPhys", ctypes.c_ulonglong),
+            ("ullTotalPageFile", ctypes.c_ulonglong),
+            ("ullAvailPageFile", ctypes.c_ulonglong),
+            ("ullTotalVirtual", ctypes.c_ulonglong),
+            ("ullAvailVirtual", ctypes.c_ulonglong),
+            ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+        ]
+
+    status = MemoryStatusEx()
+    status.dwLength = ctypes.sizeof(MemoryStatusEx)
+    try:
+        ok = ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
+    except (AttributeError, OSError, ValueError):
+        return {"status": "unknown", "message": "Windows RAM metrics unavailable"}
+    if not ok:
+        return {"status": "unknown", "message": "Windows RAM metrics unavailable"}
+
+    total = int(status.ullTotalPhys)
+    available = int(status.ullAvailPhys)
+    if not total:
+        return {"status": "unknown", "message": "RAM total unavailable"}
+    used = max(total - available, 0)
+    used_percent = round((used / total) * 100, 1)
+    health = "error" if used_percent >= 92 else "warn" if used_percent >= 82 else "ready"
+    return {
+        "status": health,
+        "total_bytes": total,
+        "available_bytes": available,
+        "used_bytes": used,
+        "total_gb": _bytes_to_gb(total),
+        "available_gb": _bytes_to_gb(available),
+        "used_gb": _bytes_to_gb(used),
+        "used_percent": used_percent,
+        "source": "windows_api",
+    }
+
+
+def _read_ram_snapshot() -> dict[str, object]:
+    """Read host RAM from /proc/meminfo without adding a psutil dependency."""
+    if os.name == "nt":
+        return _read_windows_ram_snapshot()
+
+    values: dict[str, int] = {}
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            key, _, rest = line.partition(":")
+            if key in {"MemTotal", "MemAvailable", "MemFree"}:
+                values[key] = int(rest.strip().split()[0]) * 1024
+    except (OSError, ValueError, IndexError):
+        return {"status": "unknown", "message": "RAM metrics unavailable"}
+    total = values.get("MemTotal")
+    available = values.get("MemAvailable", values.get("MemFree", 0))
+    if not total:
+        return {"status": "unknown", "message": "RAM total unavailable"}
+    used = max(total - available, 0)
+    used_percent = round((used / total) * 100, 1)
+    status = "error" if used_percent >= 92 else "warn" if used_percent >= 82 else "ready"
+    return {
+        "status": status,
+        "total_bytes": total,
+        "available_bytes": available,
+        "used_bytes": used,
+        "total_gb": _bytes_to_gb(total),
+        "available_gb": _bytes_to_gb(available),
+        "used_gb": _bytes_to_gb(used),
+        "used_percent": used_percent,
+    }
+
+
+def _float_or_none(value: str) -> float | None:
+    """Parse nvidia-smi numeric fields while tolerating N/A tokens."""
+    clean = str(value or "").strip().replace("[", "").replace("]", "")
+    if not clean or clean.upper() == "N/A":
+        return None
+    try:
+        return float(clean)
+    except ValueError:
+        return None
+
+
+def _resolve_nvidia_smi() -> str:
+    """Resolve nvidia-smi with Windows-specific executable fallbacks."""
+    candidates: list[Path] = []
+    for executable in ("nvidia-smi", "nvidia-smi.exe"):
+        found = shutil.which(executable)
+        if found:
+            candidates.append(Path(found))
+
+    if os.name == "nt":
+        system_root = os.getenv("SystemRoot") or os.getenv("windir") or "C:\\Windows"
+        program_files = [os.getenv("ProgramFiles"), os.getenv("ProgramW6432"), os.getenv("ProgramFiles(x86)")]
+        candidates.extend(
+            [
+                Path(system_root) / "System32" / "nvidia-smi.exe",
+                Path(system_root) / "Sysnative" / "nvidia-smi.exe",
+            ]
+        )
+        for root in program_files:
+            if root:
+                candidates.append(Path(root) / "NVIDIA Corporation" / "NVSMI" / "nvidia-smi.exe")
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.expanduser().resolve()
+        except OSError:
+            resolved = candidate
+        key = str(resolved).casefold() if os.name == "nt" else str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        if resolved.is_file():
+            return str(resolved)
+    return ""
+
+
+def _read_nvidia_process_memory_mb(nvidia_smi: str) -> dict[str, float]:
+    """Fallback GPU memory view for devices whose aggregate memory is reported as N/A."""
+    try:
+        result = subprocess.run([nvidia_smi], check=False, capture_output=True, text=True, timeout=_NVIDIA_SMI_TIMEOUT_SEC)
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    memory_by_gpu: dict[str, float] = {}
+    for line in result.stdout.splitlines():
+        match = re.search(r"^\|\s*(\d+)\s+.*?\s+(\d+)MiB\s*\|$", line)
+        if not match:
+            continue
+        gpu_index, memory_mib = match.groups()
+        memory_by_gpu[gpu_index] = memory_by_gpu.get(gpu_index, 0.0) + float(memory_mib)
+    return memory_by_gpu
+
+
+def _read_gpu_snapshot() -> dict[str, object]:
+    """Read GPU/VRAM through nvidia-smi when present; degrade safely otherwise."""
+    nvidia_smi = _resolve_nvidia_smi()
+    if not nvidia_smi:
+        return {"status": "unavailable", "message": "nvidia-smi not found", "gpus": []}
+    query = "index,name,memory.total,memory.used,utilization.gpu,temperature.gpu"
+    try:
+        result = subprocess.run(
+            [nvidia_smi, f"--query-gpu={query}", "--format=csv,noheader,nounits"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_NVIDIA_SMI_TIMEOUT_SEC,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        fallback = _last_good_gpu_snapshot(f"nvidia-smi telemetry delayed: {exc}")
+        if fallback:
+            return fallback
+        return {"status": "unknown", "message": f"nvidia-smi failed: {exc}", "gpus": []}
+    if result.returncode != 0:
+        message = (result.stderr or result.stdout or "nvidia-smi returned non-zero").strip().splitlines()[0]
+        fallback = _last_good_gpu_snapshot(f"nvidia-smi telemetry unavailable: {message}")
+        if fallback:
+            return fallback
+        return {"status": "unknown", "message": message, "gpus": []}
+    raw_rows = []
+    needs_process_memory = False
+    for line in result.stdout.splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 6:
+            continue
+        if _float_or_none(parts[3]) is None:
+            needs_process_memory = True
+        raw_rows.append(parts[:6])
+
+    process_memory = _read_nvidia_process_memory_mb(nvidia_smi) if needs_process_memory else {}
+    gpus: list[dict[str, object]] = []
+    for index, name, mem_total, mem_used, util, temp in raw_rows:
+        total_mb = _float_or_none(mem_total)
+        used_mb = _float_or_none(mem_used)
+        if used_mb is None:
+            used_mb = process_memory.get(index)
+        util_percent = _float_or_none(util)
+        temp_c = _float_or_none(temp)
+        used_percent = round((used_mb / total_mb) * 100, 1) if total_mb and used_mb is not None else None
+        status = "error" if used_percent is not None and used_percent >= 94 else "warn" if used_percent is not None and used_percent >= 86 else "ready"
+        item: dict[str, object] = {
+            "index": index,
+            "name": name,
+            "status": status,
+            "memory_total_mb": round(total_mb, 1) if total_mb is not None else None,
+            "memory_used_mb": round(used_mb, 1) if used_mb is not None else None,
+            "memory_total_gb": round(total_mb / 1024, 2) if total_mb is not None else None,
+            "memory_used_gb": round(used_mb / 1024, 2) if used_mb is not None else None,
+            "memory_used_percent": used_percent,
+            "utilization_percent": util_percent,
+            "temperature_c": temp_c,
+            "memory_source": "query" if _float_or_none(mem_used) is not None else "process_table" if used_mb is not None else "unavailable",
+        }
+        gpus.append(item)
+    if not gpus:
+        fallback = _last_good_gpu_snapshot("nvidia-smi telemetry parse returned no rows")
+        if fallback:
+            return fallback
+        return {"status": "unknown", "message": "No GPU rows parsed from nvidia-smi", "gpus": []}
+    worst = "error" if any(gpu["status"] == "error" for gpu in gpus) else "warn" if any(gpu["status"] == "warn" for gpu in gpus) else "ready"
+    total_values = [float(gpu["memory_total_mb"]) for gpu in gpus if gpu.get("memory_total_mb") is not None]
+    used_values = [float(gpu["memory_used_mb"]) for gpu in gpus if gpu.get("memory_used_mb") is not None]
+    total_mb = sum(total_values) if total_values else None
+    used_mb = sum(used_values) if used_values else None
+    util_values = [float(gpu["utilization_percent"]) for gpu in gpus if gpu.get("utilization_percent") is not None]
+    aggregate: dict[str, object] = {
+        "memory_total_gb": round(total_mb / 1024, 2) if total_mb is not None else None,
+        "memory_used_gb": round(used_mb / 1024, 2) if used_mb is not None else None,
+        "memory_used_percent": round((used_mb / total_mb) * 100, 1) if total_mb and used_mb is not None else None,
+        "utilization_percent": round(sum(util_values) / len(util_values), 1) if util_values else None,
+    }
+    snapshot = {
+        "status": worst,
+        "message": f"{len(gpus)} NVIDIA GPU(s)",
+        "gpus": gpus,
+        "aggregate": aggregate,
+    }
+    _SYSTEM_RESOURCE_CACHE["last_good_gpu"] = snapshot
+    return snapshot
+
+
+def _last_good_gpu_snapshot(message: str) -> dict[str, object]:
+    """Return the previous successful GPU telemetry snapshot with a stale marker."""
+    previous = _SYSTEM_RESOURCE_CACHE.get("last_good_gpu")
+    if not isinstance(previous, dict) or not previous.get("gpus"):
+        return {}
+    snapshot = dict(previous)
+    snapshot["stale"] = True
+    snapshot["message"] = f"{previous.get('message', 'GPU telemetry cached')} (cached; {message})"
+    return snapshot
+
+
+def _system_resource_snapshot() -> dict[str, object]:
+    """Return a short-lived cached host/GPU resource snapshot for Runtime IDE panels."""
+    now = time.monotonic()
+    cached_at = float(_SYSTEM_RESOURCE_CACHE.get("updated_at_monotonic") or 0.0)
+    if now - cached_at < 2.0 and isinstance(_SYSTEM_RESOURCE_CACHE.get("payload"), dict):
+        return dict(_SYSTEM_RESOURCE_CACHE["payload"])
+    payload = {
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "ram": _read_ram_snapshot(),
+        "gpu": _read_gpu_snapshot(),
+    }
+    _SYSTEM_RESOURCE_CACHE["updated_at_monotonic"] = now
+    _SYSTEM_RESOURCE_CACHE["payload"] = payload
+    return payload
+
+
+def _guardian_status_payload(run_id: str | None = None, *, snapshot: dict[str, object] | None = None) -> dict[str, object]:
+    """Build a graph-wide Guardian monitor payload for Live GUI and Runtime IDE consumers."""
+    snapshot = snapshot if isinstance(snapshot, dict) else controller.planning_snapshot()
+    state = snapshot.get("state", {}) if isinstance(snapshot.get("state"), dict) else {}
+    active_run_id = str(state.get("run_id") or _current_run_id() or "")
+    requested_run_id = str(run_id or active_run_id)
+    if requested_run_id and requested_run_id != active_run_id and not _safe_run_dir(requested_run_id).exists():
+        raise HTTPException(status_code=404, detail=f"Unknown run_id={requested_run_id}")
+    metadata = state.get("run_metadata", {}) if isinstance(state.get("run_metadata"), dict) else {}
+
+    gates = [dict(item) for item in metadata.get("guardian_gates", []) if isinstance(item, dict)] if isinstance(metadata.get("guardian_gates"), list) else []
+    incidents = [dict(item) for item in metadata.get("incident_records", []) if isinstance(item, dict)] if isinstance(metadata.get("incident_records"), list) else []
+    hardware_alerts = [dict(item) for item in metadata.get("hardware_alerts", []) if isinstance(item, dict)] if isinstance(metadata.get("hardware_alerts"), list) else []
+    tool_records = [dict(item) for item in metadata.get("tool_call_records", []) if isinstance(item, dict)] if isinstance(metadata.get("tool_call_records"), list) else []
+    corrective_actions = [dict(item) for item in metadata.get("corrective_actions", []) if isinstance(item, dict)] if isinstance(metadata.get("corrective_actions"), list) else []
+    contracts = [dict(item) for item in metadata.get("guardian_contracts", []) if isinstance(item, dict)] if isinstance(metadata.get("guardian_contracts"), list) else []
+    current_spec = state.get("current_experiment_spec", {}) if isinstance(state.get("current_experiment_spec"), dict) else {}
+    constraints = current_spec.get("constraints", {}) if isinstance(current_spec.get("constraints"), dict) else {}
+    objective = state.get("current_experiment_objective", {}) if isinstance(state.get("current_experiment_objective"), dict) else {}
+
+    def safe_float(value: object, default: float | None = None) -> float | None:
+        try:
+            if value in (None, ""):
+                return default
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def first_number(*values: object, default: float | None = None) -> float | None:
+        for value in values:
+            resolved = safe_float(value, None)
+            if resolved is not None:
+                return resolved
+        return default
+
+    def first_int(*values: object, default: int = 0) -> int:
+        resolved = first_number(*values, default=float(default))
+        try:
+            return int(resolved if resolved is not None else default)
+        except (TypeError, ValueError):
+            return default
+
+    def tool_name(item: dict[str, object]) -> str:
+        return str(item.get("tool") or item.get("name") or item.get("requested_tool") or "").lower()
+
+    def count_tool_records(*needles: str) -> int:
+        lowered = tuple(str(item).lower() for item in needles)
+        return sum(1 for item in tool_records if any(needle in tool_name(item) for needle in lowered))
+
+    risk_classes = ["hardware", "vision", "robot", "equipment", "data", "optimization", "operator"]
+    risk_map: dict[str, dict[str, object]] = {
+        key: {"risk_class": key, "score": 0.0, "stage": "", "decision": "allow", "reason_code": "OK", "gate_id": ""}
+        for key in risk_classes
+    }
+    for gate in gates:
+        vector = gate.get("risk_vector") if isinstance(gate.get("risk_vector"), dict) else {}
+        for key in risk_classes:
+            try:
+                score = float(vector.get(key, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                score = 0.0
+            if score >= float(risk_map[key]["score"] or 0.0):
+                risk_map[key] = {
+                    "risk_class": key,
+                    "score": round(score, 4),
+                    "stage": str(gate.get("stage") or ""),
+                    "phase": str(gate.get("phase") or ""),
+                    "decision": str(gate.get("decision") or "allow"),
+                    "reason_code": str(gate.get("reason_code") or "OK"),
+                    "gate_id": str(gate.get("gate_id") or ""),
+                }
+    max_score = max((float(item.get("score", 0.0) or 0.0) for item in risk_map.values()), default=0.0)
+    dominant_risks = [key for key, item in risk_map.items() if float(item.get("score", 0.0) or 0.0) >= max(0.5, max_score)] if max_score else []
+
+    def gate_row(gate: dict[str, object]) -> dict[str, object]:
+        return {
+            "gate_id": gate.get("gate_id", ""),
+            "stage": gate.get("stage", ""),
+            "phase": gate.get("phase", ""),
+            "tool": gate.get("tool", ""),
+            "action": gate.get("action", ""),
+            "decision": gate.get("decision", ""),
+            "reason_code": gate.get("reason_code", ""),
+            "risk_score": gate.get("risk_score", 0.0),
+            "created_at": gate.get("created_at", ""),
+        }
+
+    gate_timeline = [gate_row(gate) for gate in gates[-80:]]
+    blocked_gate_rows = [row for row in gate_timeline if str(row.get("decision") or "") in {"block", "safe_stop", "require_human_approval"}]
+    blocked_tool_rows = [
+        {
+            "call_id": item.get("call_id", ""),
+            "stage": item.get("stage", ""),
+            "tool": item.get("tool", ""),
+            "status": item.get("status", ""),
+            "failure_code": item.get("failure_code", ""),
+            "guardian_decision": item.get("guardian_decision", ""),
+            "guardian_reason_code": item.get("guardian_reason_code", ""),
+            "created_at": item.get("created_at", ""),
+        }
+        for item in tool_records[-80:]
+        if str(item.get("status") or "") in {"blocked", "approval_required", "failed"}
+    ]
+    from utils.hardware_alert_lifecycle import is_active as hardware_alert_is_active
+    blocked_hardware_rows = [
+        {
+            "alert_id": item.get("alert_id", ""),
+            "stage": item.get("stage") or item.get("workspace") or "",
+            "device_class": item.get("device_class", ""),
+            "component": item.get("component", ""),
+            "status": item.get("status", ""),
+            "failure_code": item.get("failure_code", ""),
+            "severity": item.get("severity", ""),
+        }
+        for item in hardware_alerts[-80:]
+        if hardware_alert_is_active(item)
+    ]
+
+    severity_counts: dict[str, int] = {}
+    class_counts: dict[str, int] = {}
+    for incident in incidents:
+        severity = str(incident.get("severity") or "unknown")
+        risk_class = str(incident.get("risk_class") or incident.get("class") or "unknown")
+        severity_counts[severity] = severity_counts.get(severity, 0) + 1
+        class_counts[risk_class] = class_counts.get(risk_class, 0) + 1
+
+    approvals = _approval_events_for_run(requested_run_id or active_run_id) if (requested_run_id or active_run_id) else {"approvals": [], "pending": [], "resolved": []}
+    metadata_queue = [dict(item) for item in metadata.get("guardian_approval_queue", []) if isinstance(item, dict)] if isinstance(metadata.get("guardian_approval_queue"), list) else []
+    pending_ids = {str(item.get("approval_id") or "") for item in approvals.get("pending", []) if isinstance(item, dict)}
+    merged_pending = [dict(item) for item in approvals.get("pending", []) if isinstance(item, dict)]
+    for item in metadata_queue:
+        approval_id = str(item.get("approval_id") or "")
+        if approval_id and approval_id not in pending_ids and str(item.get("status") or "pending") == "pending":
+            merged_pending.append(item)
+            pending_ids.add(approval_id)
+
+    latest_gate = gates[-1] if gates else {}
+    latest_contract = contracts[-1] if contracts else metadata.get("latest_guardian_gate", {}).get("guardian_contract", {}) if isinstance(metadata.get("latest_guardian_gate"), dict) else {}
+    latest_decision = metadata.get("latest_guardian_gate_decision") if isinstance(metadata.get("latest_guardian_gate_decision"), dict) else latest_gate.get("guardian_decision", {}) if isinstance(latest_gate.get("guardian_decision"), dict) else {}
+    handoff_packets = [dict(item) for item in metadata.get("handoff_packets", []) if isinstance(item, dict)] if isinstance(metadata.get("handoff_packets"), list) else []
+
+    tool_counts: dict[str, int] = {}
+    for item in tool_records:
+        status = str(item.get("status") or "unknown")
+        tool_counts[status] = tool_counts.get(status, 0) + 1
+
+    budget_config = metadata.get("safety_budget") if isinstance(metadata.get("safety_budget"), dict) else {}
+    if not budget_config:
+        budget_config = metadata.get("risk_budget") if isinstance(metadata.get("risk_budget"), dict) else {}
+    loop_count = first_int(state.get("loop_count"), default=0)
+    max_loop_count = first_int(
+        budget_config.get("max_loop_count"),
+        budget_config.get("max_loops"),
+        objective.get("max_loop_count"),
+        objective.get("max_loops"),
+        default=TEST_MODE_LOOP_CYCLES if str(state.get("mode") or "").lower() == "test" else 1,
+    )
+    expected_print_time = first_number(
+        current_spec.get("expected_print_time_min"),
+        current_spec.get("print_time_min"),
+        budget_config.get("expected_print_time_min"),
+        default=0.0,
+    )
+    max_print_time = first_number(
+        budget_config.get("max_print_time_min"),
+        constraints.get("max_print_time_min"),
+        current_spec.get("max_print_time_min"),
+        default=120.0,
+    )
+    expected_load = first_number(
+        current_spec.get("target_load_n"),
+        current_spec.get("expected_load_n"),
+        current_spec.get("load_n"),
+        objective.get("target_load_n"),
+        default=0.0,
+    )
+    load_range = constraints.get("allowed_load_range_n") or constraints.get("load_range_n") or []
+    range_max_load = load_range[-1] if isinstance(load_range, list) and load_range else None
+    max_load = first_number(
+        budget_config.get("max_load_n"),
+        constraints.get("max_load_n"),
+        constraints.get("max_force_n"),
+        range_max_load,
+        default=0.0,
+    )
+    robot_rollout_count = count_tool_records("lerobot.rollout", "robot.pick_place")
+    max_robot_rollouts = first_int(budget_config.get("max_robot_live_rollouts"), budget_config.get("max_robot_rollouts"), default=3)
+    physical_print_count = count_tool_records("printer.start", "printer.auto_eject", "experiment.evaluate")
+    max_physical_prints = first_int(budget_config.get("max_physical_prints"), budget_config.get("max_print_jobs"), default=1)
+
+    def budget_item(resource: str, used: float | int | None, limit: float | int | None, unit: str) -> dict[str, object]:
+        used_value = float(used or 0.0)
+        limit_value = float(limit or 0.0)
+        ratio = (used_value / limit_value) if limit_value > 0 else 0.0
+        status_value = "exceeded" if limit_value > 0 and ratio > 1.0 else "near_limit" if limit_value > 0 and ratio >= 0.85 else "within_budget"
+        return {
+            "resource": resource,
+            "used": round(used_value, 4),
+            "limit": round(limit_value, 4),
+            "unit": unit,
+            "used_ratio": round(ratio, 4),
+            "status": status_value,
+        }
+
+    safety_budget_items = [
+        budget_item("loop_count", loop_count, max_loop_count, "cycles"),
+        budget_item("print_time", expected_print_time, max_print_time, "min"),
+        budget_item("load", expected_load, max_load, "N"),
+        budget_item("robot_live_rollouts", robot_rollout_count, max_robot_rollouts, "calls"),
+        budget_item("physical_prints", physical_print_count, max_physical_prints, "jobs"),
+    ]
+    safety_budget_status = "exceeded" if any(item["status"] == "exceeded" for item in safety_budget_items) else "near_limit" if any(item["status"] == "near_limit" for item in safety_budget_items) else "within_budget"
+    safety_budget = {
+        "schema": "guardian_safety_budget.v1",
+        "status": safety_budget_status,
+        "items": safety_budget_items,
+        "source": "run_metadata.safety_budget|current_experiment_spec.constraints|runtime_counts",
+    }
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    device_health = state.get("device_health", {}) if isinstance(state.get("device_health"), dict) else {}
+    heartbeat_rows: list[dict[str, object]] = []
+    for device_id, bridge_state in sorted(device_health.items()):
+        device_key = str(device_id)
+        latest_alert = next(
+            (
+                item
+                for item in reversed(hardware_alerts)
+                if str(item.get("device_class") or item.get("device_id") or item.get("workspace") or "").lower() == device_key.lower()
+            ),
+            {},
+        )
+        latest_tool = next(
+            (
+                item
+                for item in reversed(tool_records)
+                if device_key.lower() in str(item.get("tool") or item.get("stage") or "").lower()
+                or (device_key.lower() == "robot" and "lerobot" in tool_name(item))
+                or (device_key.lower() == "printer" and "printer" in tool_name(item))
+                or (device_key.lower() == "utm" and ("utm" in tool_name(item) or "pyautogui" in tool_name(item)))
+            ),
+            {},
+        )
+        status_text = str(bridge_state or "unknown")
+        alert_blocks = isinstance(latest_alert, dict) and bool(latest_alert.get("blocks_workflow"))
+        heartbeat_status = (
+            "blocked"
+            if alert_blocks or any(token in status_text.lower() for token in ("block", "critical", "failed", "error", "unhealthy"))
+            else "ready"
+            if status_text.lower() in {"ready", "ok", "healthy"}
+            else "review"
+        )
+        heartbeat_rows.append(
+            {
+                "device_id": device_key,
+                "bridge_state": status_text,
+                "heartbeat_status": heartbeat_status,
+                "last_heartbeat": str(latest_alert.get("created_at") or latest_tool.get("created_at") or now_iso) if isinstance(latest_alert, dict) else now_iso,
+                "last_command": str(latest_tool.get("tool") or latest_alert.get("tool") or latest_alert.get("component") or "runtime snapshot") if isinstance(latest_tool, dict) else "runtime snapshot",
+                "last_alert_id": str(latest_alert.get("alert_id") or "") if isinstance(latest_alert, dict) else "",
+            }
+        )
+    if not heartbeat_rows:
+        heartbeat_rows.append(
+            {
+                "device_id": "runtime",
+                "bridge_state": "unknown",
+                "heartbeat_status": "review",
+                "last_heartbeat": now_iso,
+                "last_command": "runtime snapshot",
+                "last_alert_id": "",
+            }
+        )
+
+    safe_stop_gates = [gate for gate in gates if str(gate.get("decision") or "") in {"safe_stop", "safe_stop_verified"}]
+    safe_stop_requested = bool(state.get("safe_stop_requested") or any(str(gate.get("decision") or "") == "safe_stop" for gate in safe_stop_gates))
+    explicit_safe_stop_verified = bool(metadata.get("safe_stop_verified") or metadata.get("safe_stop_confirmed"))
+    inferred_safe_stop_verified = bool(safe_stop_requested and not bool(snapshot.get("is_running")) and str(state.get("stage") or "").lower() in {"complete", "idle", "guardian", "error"})
+    safe_stop_verified = explicit_safe_stop_verified or inferred_safe_stop_verified or any(str(gate.get("decision") or "") == "safe_stop_verified" for gate in safe_stop_gates)
+    safe_stop_verification = {
+        "schema": "guardian_safe_stop_verification.v1",
+        "requested": safe_stop_requested,
+        "verified": safe_stop_verified,
+        "status": "verified" if safe_stop_requested and safe_stop_verified else "requested_unverified" if safe_stop_requested else "not_requested",
+        "latest_gate": gate_row(safe_stop_gates[-1]) if safe_stop_gates else {},
+        "verification_basis": "explicit_metadata" if explicit_safe_stop_verified else "controller_not_running" if inferred_safe_stop_verified else "guardian_gate" if safe_stop_verified else "none",
+    }
+
+    latest_contract_artifacts = latest_contract.get("artifact_refs", []) if isinstance(latest_contract, dict) and isinstance(latest_contract.get("artifact_refs"), list) else []
+    latest_contract_provenance = latest_contract.get("provenance_refs", []) if isinstance(latest_contract, dict) and isinstance(latest_contract.get("provenance_refs"), list) else []
+    evidence_checks = {
+        "guardian_gate_present": bool(latest_gate),
+        "contract_present": bool(latest_contract),
+        "artifact_refs_present": bool(latest_contract_artifacts),
+        "provenance_refs_present": bool(latest_contract_provenance),
+        "tool_or_incident_evidence_present": bool(tool_records or incidents or hardware_alerts),
+    }
+    evidence_score = sum(1 for value in evidence_checks.values() if value) / max(1, len(evidence_checks))
+    evidence_completeness = {
+        "schema": "guardian_evidence_completeness.v1",
+        "score": round(evidence_score, 4),
+        "status": "complete" if evidence_score >= 0.8 else "partial" if evidence_score >= 0.4 else "missing",
+        "checks": evidence_checks,
+        "artifact_ref_count": len(latest_contract_artifacts),
+        "provenance_ref_count": len(latest_contract_provenance),
+    }
+
+    open_incidents = [item for item in incidents if str(item.get("status") or "open").lower() not in {"resolved", "closed", "dismissed"}]
+    status = "safe_stop" if any(row.get("decision") == "safe_stop" for row in blocked_gate_rows) else "blocked" if blocked_gate_rows or blocked_tool_rows or blocked_hardware_rows else "approval_required" if merged_pending else "warning" if open_incidents or max_score >= 0.35 else "allow"
+    return {
+        "ok": True,
+        "schema": "guardian_status_report.v1",
+        "run_id": requested_run_id or active_run_id,
+        "experiment_id": state.get("experiment_id", ""),
+        "stage": state.get("stage", ""),
+        "status": status,
+        "summary": {
+            "risk_score": round(max_score, 4),
+            "dominant_risks": dominant_risks,
+            "gate_count": len(gates),
+            "incident_count": len(incidents),
+            "pending_approval_count": len(merged_pending),
+            "blocked_action_count": len(blocked_gate_rows) + len(blocked_tool_rows) + len(blocked_hardware_rows),
+            "tool_call_record_count": len(tool_records),
+            "safety_budget_status": safety_budget_status,
+            "safe_stop_status": safe_stop_verification["status"],
+            "evidence_completeness_status": evidence_completeness["status"],
+        },
+        "safety_budget": safety_budget,
+        "evidence_completeness": evidence_completeness,
+        "graph_wide_risk_map": list(risk_map.values()),
+        "gate_timeline": gate_timeline,
+        "blocked_actions": {
+            "gates": blocked_gate_rows[-40:],
+            "tool_calls": blocked_tool_rows[-40:],
+            "hardware_alerts": blocked_hardware_rows[-40:],
+        },
+        "approval_queue": {
+            "pending": merged_pending[-50:],
+            "resolved": [dict(item) for item in approvals.get("resolved", []) if isinstance(item, dict)][-50:],
+            "approvals": [dict(item) for item in approvals.get("approvals", []) if isinstance(item, dict)][-80:],
+        },
+        "incident_ledger": {
+            "records": incidents[-80:],
+            "severity_counts": severity_counts,
+            "class_counts": class_counts,
+        },
+        "policy_version_panel": {
+            "guardian_gate_schema": "guardian_gate_result.v1",
+            "contract_schema": "guardian_contract.v1",
+            "decision_schema": "guardian_decision.v1",
+            "incident_schema": "incident_record.v1",
+            "tool_call_schema": "tool_call_record.v1",
+            "source_doc": "system/runtime/guardian_graphwide_safety.md",
+        },
+        "device_data_integrity": {
+            "device_health": state.get("device_health", {}),
+            "live_device_heartbeat": heartbeat_rows,
+            "hardware_alert_count": len(hardware_alerts),
+            "tool_call_counts": tool_counts,
+            "latest_contract_ok_for_next_stage": latest_contract.get("ok_for_next_stage") if isinstance(latest_contract, dict) else None,
+            "latest_contract_ok_for_bo": latest_contract.get("ok_for_bo") if isinstance(latest_contract, dict) else None,
+            "data_related_incident_count": sum(1 for item in incidents if str(item.get("risk_class") or item.get("class") or "").lower() in {"data", "data_integrity"}),
+        },
+        "safe_stop_verification": safe_stop_verification,
+        "handoff_packet": {
+            "latest_guardian_gate": gate_row(latest_gate) if latest_gate else {},
+            "latest_guardian_decision": latest_decision if isinstance(latest_decision, dict) else {},
+            "latest_guardian_contract": latest_contract if isinstance(latest_contract, dict) else {},
+            "latest_handoff_packet": handoff_packets[-1] if handoff_packets else {},
+            "corrective_actions": corrective_actions[-40:],
+        },
+    }
+
+
+@app.get("/api/state")
+async def get_state(view: Literal["full", "display"] = "full") -> dict[str, object]:
+    """Return current controller state plus host/GPU resource telemetry."""
+    snapshot = controller.display_snapshot() if view == "display" else controller.snapshot()
+    controller_state = snapshot.get("state") if isinstance(snapshot.get("state"), dict) else {}
+    equipment_execution = _equipment_runtime_service().latest(
+        run_id=str(controller_state.get("run_id") or "")
+    )
+    snapshot["equipment_runtime"] = {
+        "execution": equipment_execution,
+        "projection": EquipmentRuntimeService.project(equipment_execution) if equipment_execution else None,
+    }
+    snapshot["system_resources"] = _system_resource_snapshot()
+    snapshot["guardian_status"] = _guardian_status_payload(snapshot=snapshot)
+    snapshot["runtime_ide_contract"] = _runtime_ide_contract_payload(snapshot)
+    return snapshot
+
+
+@app.get("/api/guardian/status")
+async def get_guardian_status(run_id: str | None = None) -> dict[str, object]:
+    """Return a Guardian graph-wide safety monitor/report payload."""
+    return _guardian_status_payload(run_id=run_id)
+
+
+@app.get("/api/runs/{run_id}/guardian/status")
+async def get_run_guardian_status(run_id: str) -> dict[str, object]:
+    """Return Guardian monitor/report payload for the requested run."""
+    return _guardian_status_payload(run_id=run_id)
+
+
+@app.get("/api/runtime/state")
+async def get_runtime_state_compat() -> dict[str, object]:
+    """Compatibility alias for the package-specified runtime state endpoint."""
+    snapshot = await get_state()
+    return {"ok": True, "compatibility": "atr_live_gui_package", **snapshot}
+
+
+@app.get("/api/runtime/agent-manifests")
+async def get_runtime_agent_manifests() -> dict[str, object]:
+    """Return graph/module/UI-derived agent manifests for Live GUI consumers."""
+    return _runtime_agent_manifests_payload()
+
+
+@app.get("/api/devices/state")
+async def get_devices_state_compat() -> dict[str, object]:
+    """Compatibility endpoint exposing device/resource state for Live GUI consumers."""
+    return _device_state_payload()
+
+
+@app.get("/api/bridges")
+async def get_runtime_bridge_registry() -> dict[str, object]:
+    """Return graph-backed device bridge manifests."""
+    return _runtime_bridge_registry_payload(PRIMARY_RUNTIME_GRAPH_ID)
+
+
+@app.get("/api/equipment/utm-runtime/status")
+async def get_utm_runtime_status() -> dict[str, object]:
+    """Return the managed UTM ROS Vision runtime process status."""
+    return _utm_runtime_bridge().status()
+
+
+@app.get("/api/vision/specimen-pose/status")
+async def get_specimen_pose_tracker_status() -> dict[str, object]:
+    """Return D455F one-shot specimen pose tracker lease and last-pose status."""
+    return await asyncio.to_thread(_specimen_pose_tracker_bridge().status)
+
+
+@app.post("/api/vision/specimen-pose/snapshot")
+async def post_specimen_pose_snapshot(payload: dict[str, object]) -> dict[str, object]:
+    """Run one specimen pose snapshot or deterministic test-mode virtual pose."""
+    return await asyncio.to_thread(_specimen_pose_tracker_bridge().snapshot, payload)
+
+
+@app.post("/api/vision/specimen-pose/release")
+async def post_specimen_pose_release(payload: dict[str, object]) -> dict[str, object]:
+    """Return D455F ownership to the VLA route after specimen pose tracking."""
+    return await asyncio.to_thread(_specimen_pose_tracker_bridge().release, payload)
+
+
+@app.post("/api/equipment/utm-runtime/start")
+async def start_utm_runtime() -> dict[str, object]:
+    """Start the managed UTM ROS Vision runtime."""
+    return _utm_runtime_bridge().start()
+
+
+@app.post("/api/equipment/utm-runtime/stop")
+async def stop_utm_runtime() -> dict[str, object]:
+    """Stop the managed UTM ROS Vision runtime."""
+    return _utm_runtime_bridge().stop()
+
+
+@app.post("/api/equipment/utm-runtime/probe")
+async def probe_utm_runtime() -> dict[str, object]:
+    """Probe ROS availability, cloned UTM files, topics, and graph evidence."""
+    return _utm_runtime_bridge().probe()
+
+
+@app.get("/api/equipment/utm-runtime/graph")
+async def get_utm_runtime_graph(previous_hash: str = "") -> dict[str, object]:
+    """Return expected UTM RQT-like graph plus actual ROS graph overlay."""
+    return await asyncio.to_thread(_utm_runtime_bridge().graph, previous_hash=previous_hash)
+
+
+@app.get("/api/equipment/utm-runtime/frame")
+async def get_utm_runtime_frame() -> dict[str, object]:
+    """Return UTM image frame availability metadata for GUI panels."""
+    return await asyncio.to_thread(_utm_runtime_bridge().frame)
+
+
+@app.get("/api/equipment/utm-runtime/frame-stream.mjpeg")
+async def get_utm_runtime_frame_stream(request: Request, topic: str = "", fps: float | None = None) -> StreamingResponse:
+    """Stream UTM image evidence as browser-consumable MJPEG at the configured GUI FPS."""
+    from fastapi.responses import RedirectResponse
+    if _local_monitor_client(request):
+        try:
+            url = await asyncio.to_thread(_utm_runtime_bridge().frame_stream_url, topic=topic, fps=fps)
+            if url:
+                return RedirectResponse(url, status_code=307, headers={"Cache-Control": "no-store"})
+            return Response(status_code=204)
+        except (OSError, ValueError, RuntimeError, TimeoutError):
+            # Preview worker startup failure may fall back, never affect capture.
+            pass
+    sentinel = object()
+    source = iter(_utm_runtime_bridge().frame_stream(topic=topic, fps=fps))
+
+    def next_chunk() -> bytes | object:
+        try:
+            return next(source)
+        except StopIteration:
+            return sentinel
+
+    async def iter_mjpeg() -> AsyncIterator[bytes]:
+        next_task: asyncio.Task[bytes | object] | None = None
+        try:
+            while not await request.is_disconnected():
+                next_task = asyncio.create_task(asyncio.to_thread(next_chunk))
+                chunk = await asyncio.shield(next_task)
+                next_task = None
+                if chunk is sentinel:
+                    break
+                yield chunk  # type: ignore[misc]
+                await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            return
+        finally:
+            if next_task is not None and not next_task.done():
+                try:
+                    await next_task
+                except Exception:
+                    pass
+            close = getattr(source, "close", None)
+            if callable(close):
+                close()
+
+    return StreamingResponse(
+        iter_mjpeg(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/api/equipment/utm-runtime/frame-stream/status")
+async def get_utm_runtime_frame_stream_status(
+    topic: str = "",
+    fps: float | None = None,
+    quality: int = 82,
+) -> dict[str, object]:
+    """Return rolling delivery statistics for the shared GUI MJPEG worker."""
+    return await asyncio.to_thread(_utm_runtime_bridge().frame_stream_status, topic=topic, fps=fps, quality=quality)
+
+
+@app.get("/api/equipment/utm-runtime/camera-config")
+async def get_utm_runtime_camera_config() -> dict[str, object]:
+    """Return persisted Camera settings used by the UTM Vision runtime."""
+    return _utm_runtime_bridge().camera_config()
+
+
+@app.post("/api/equipment/utm-runtime/camera-config")
+async def post_utm_runtime_camera_config(request: Request) -> dict[str, object]:
+    """Persist Camera settings without changing devices.yaml."""
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    return _utm_runtime_bridge().update_camera_config(payload if isinstance(payload, dict) else {})
+
+
+@app.get("/api/equipment/utm-runtime/camera/devices")
+async def get_utm_runtime_camera_devices() -> dict[str, object]:
+    """Return V4L2 Camera candidates discovered without opening streams."""
+    return _utm_runtime_bridge().discover_camera_devices()
+
+
+@app.post("/api/equipment/utm-runtime/camera/probe")
+async def post_utm_runtime_camera_probe() -> dict[str, object]:
+    """Run the pre-start Camera/UTM check and return config, device, graph, and frame evidence."""
+    bridge = _utm_runtime_bridge()
+    config = bridge.camera_config()
+    devices = bridge.discover_camera_devices()
+    runtime_status = bridge.status()
+    graph = bridge.graph()
+    diagnostics = dict(graph.get("diagnostics", {})) if isinstance(graph, dict) else {}
+    runtime_probe = dict(runtime_status)
+    runtime_probe.update(
+        {
+            "ok": bool(diagnostics.get("ros2_available") and diagnostics.get("workspace_found", True) and diagnostics.get("script_found", True)),
+            "tool": "utm.runtime.probe",
+            "diagnostics": diagnostics,
+            "graph_hash": graph.get("graph_hash", "") if isinstance(graph, dict) else "",
+            "failure_code": None,
+        }
+    )
+    if not diagnostics.get("ros2_available"):
+        runtime_probe["failure_code"] = "ROS2_NOT_INSTALLED"
+    elif diagnostics.get("script_found") is False:
+        runtime_probe["failure_code"] = "UTM_RUNTIME_SCRIPT_NOT_FOUND"
+    elif diagnostics.get("topic_seen") is False:
+        runtime_probe["failure_code"] = "UTM_TOPIC_NOT_READY"
+    if runtime_status.get("status") == "running":
+        frame = bridge.frame()
+    else:
+        frame = bridge.camera_direct_frame()
+    ok = bool(devices.get("ok")) and bool(runtime_probe.get("ok"))
+    if not bool(frame.get("ok")) and frame.get("failure_code"):
+        ok = False
+    return {
+        "ok": ok,
+        "tool": "utm.camera.pre_start_check",
+        "config": config,
+        "devices": devices,
+        "runtime_probe": runtime_probe,
+        "graph": graph,
+        "frame": frame,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.post("/api/equipment/utm-runtime/camera/cleanup")
+async def post_utm_runtime_camera_cleanup() -> dict[str, object]:
+    """Release stale UTM ROS processes and selected Camera device holders."""
+    return _utm_runtime_bridge().cleanup_ports()
+
+
+@app.post("/api/equipment/utm-runtime/camera/apply")
+async def post_utm_runtime_camera_apply(request: Request) -> dict[str, object]:
+    """Apply and persist the selected Camera profile for the UTM runtime."""
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    return _utm_runtime_bridge().update_camera_config(payload if isinstance(payload, dict) else {})
+
+
+@app.post("/api/equipment/utm-runtime/camera/calibrate/start")
+async def post_utm_runtime_camera_calibrate_start(request: Request) -> dict[str, object]:
+    """Start the ROS camera_calibration GUI for checkerboard calibration."""
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    return _utm_runtime_bridge().start_calibration(payload if isinstance(payload, dict) else {})
+
+
+@app.post("/api/equipment/utm-runtime/camera/calibrate/stop")
+async def post_utm_runtime_camera_calibrate_stop() -> dict[str, object]:
+    """Stop the ROS camera_calibration GUI."""
+    return _utm_runtime_bridge().stop_calibration()
+
+
+@app.get("/api/equipment/utm-runtime/camera/calibrate/status")
+async def get_utm_runtime_camera_calibrate_status() -> dict[str, object]:
+    """Return camera_calibration GUI process status."""
+    return _utm_runtime_bridge().calibration_status()
+
+
+@app.post("/api/bridges/{bridge_id}/actions")
+async def save_runtime_bridge_action_descriptor(bridge_id: str, req: RuntimeBridgeActionSaveRequest) -> dict[str, object]:
+    """Save a graph-backed bridge action descriptor without executing hardware."""
+    return _save_runtime_bridge_action_descriptor(bridge_id, req)
+
+
+@app.get("/api/agents")
+async def get_agents_compat() -> dict[str, object]:
+    """Compatibility endpoint listing Live GUI agent tabs and runtime aliases."""
+    snapshot = controller.snapshot()
+    state = snapshot.get("state", {}) if isinstance(snapshot.get("state"), dict) else {}
+    active_stage = str(state.get("stage") or "")
+    agents = []
+    for manifest in _runtime_agent_manifests_payload()["agents"]:
+        item = {"agent_id": manifest["id"], "label": manifest["label"],
+                "stage": manifest["stage"], "module_id": manifest["module_id"]}
+        agents.append({
+            **item,
+            "status": "running" if item["stage"] == active_stage and snapshot.get("is_running") else "idle",
+            "report_url": f"/api/agents/{item['agent_id']}/report",
+            "backend_trace_url": f"/api/agents/{item['agent_id']}/backend-trace",
+        })
+    return {"ok": True, "agents": agents, "active_stage": active_stage}
+
+
+@app.get("/api/agents/{agent_id}/report")
+async def get_agent_report_compat(agent_id: str, response: Response, run_id: str | None = None) -> dict[str, object]:
+    """Compatibility endpoint returning a structured agent report payload."""
+    response.headers['Cache-Control'] = 'no-store'
+    return {"ok": True, "report": _agent_report_payload(agent_id, run_id=run_id)}
+
+
+@app.get("/api/agents/{agent_id}/backend-trace")
+async def get_agent_backend_trace_compat(agent_id: str, run_id: str | None = None) -> dict[str, object]:
+    """Compatibility endpoint returning raw runtime trace events for one agent."""
+    definition, events = _events_for_agent(agent_id, run_id=run_id)
+    return {"ok": True, "agent": definition, "run_id": run_id or _current_run_id(), "events": events}
+
+
+@app.post("/api/agents/{agent_id}/message")
+async def post_agent_message_compat(agent_id: str, req: RuntimeAgentMessageRequest) -> dict[str, object]:
+    """Compatibility endpoint routing agent-targeted messages through Runtime Chat."""
+    definition = _agent_definition(agent_id)
+    constraints = dict(req.constraints)
+    constraints.update({
+        "live_chat_target": definition["agent_id"],
+        "live_chat_mode": req.mode,
+        "live_selected_agent": definition["agent_id"],
+        "compatibility_endpoint": f"/api/agents/{definition['agent_id']}/message",
+    })
+    return await controller.planning_message(
+        message=req.message,
+        goal=req.goal,
+        backend=req.backend,
+        constraints=constraints,
+        session_id=req.session_id,
+    )
+
+
+async def _emit_runtime_operator_event(req: RuntimeOperatorEventRequest, run_id: str | None = None) -> dict[str, object]:
+    """Record a frontend operator action as auditable runtime evidence."""
+    clean_event_type = re.sub(r"[^a-zA-Z0-9_.:-]+", "_", req.event_type.strip())[:160] or "operator.event"
+    payload = dict(req.payload)
+    payload.update({
+        "action": req.action or clean_event_type,
+        "agent_id": req.agent_id,
+        "agent": req.agent_id,
+        "node_id": req.node_id or req.agent_id,
+        "trace_id": req.trace_id,
+        "event_key": req.event_key,
+        "operator_source": "live_gui",
+        "status": "recorded" if req.level != "ERROR" else "failed",
+    })
+    event = await controller.emit_runtime_event(
+        event_type=clean_event_type,
+        message=req.message or f"Operator action recorded: {req.action or clean_event_type}",
+        payload=payload,
+        level=req.level,
+        run_id=run_id,
+    )
+    return {"ok": True, "event": event}
+
+
+@app.post("/api/runtime/operator-event")
+async def post_runtime_operator_event(req: RuntimeOperatorEventRequest) -> dict[str, object]:
+    """Record a Live GUI operator action against the current runtime session."""
+    return await _emit_runtime_operator_event(req)
+
+
+@app.post("/api/runs/{run_id}/operator-events")
+async def post_runtime_run_operator_event(run_id: str, req: RuntimeOperatorEventRequest) -> dict[str, object]:
+    """Record a Live GUI operator action against the addressed active run."""
+    _require_current_run(run_id)
+    return await _emit_runtime_operator_event(req, run_id=run_id)
+
+
+@app.post("/api/guardian/incidents/{incident_id}/notes")
+async def post_guardian_incident_note(incident_id: str, req: GuardianIncidentNoteRequest) -> dict[str, object]:
+    """Attach an operator note to a Guardian incident in the active run."""
+    return await _attach_guardian_incident_note(incident_id, req)
+
+
+@app.post("/api/runs/{run_id}/guardian/incidents/{incident_id}/notes")
+async def post_run_guardian_incident_note(run_id: str, incident_id: str, req: GuardianIncidentNoteRequest) -> dict[str, object]:
+    """Attach an operator note to a Guardian incident in the addressed active run."""
+    _require_current_run(run_id)
+    return await _attach_guardian_incident_note(incident_id, req, run_id=run_id)
+
+
+def _graph_config_items() -> list[tuple[str, Path, GraphConfig]]:
+    """Return all discoverable graph configs, with the main closed-loop graph first."""
+    items: list[tuple[str, Path, GraphConfig]] = []
+    for path in sorted(RUNTIME_GRAPH_CONFIG_ROOT.glob("*.yaml")):
+        try:
+            config = load_graph_config(path)
+        except Exception:
+            continue
+        items.append((config.id, path, config))
+    return sorted(items, key=lambda item: (item[0] != PRIMARY_RUNTIME_GRAPH_ID, item[0]))
+
+
+def _graph_config_path(graph_id: str) -> Path:
+    """Resolve one graph id to its config file."""
+    for item_id, path, _config in _graph_config_items():
+        if item_id == graph_id:
+            return path
+    raise HTTPException(status_code=404, detail=f"Unknown graph_id={graph_id}")
+
+
+def _graph_config_runtime_path(path: Path) -> str:
+    """Return a stable graph config path for runtime handoff payloads."""
+    try:
+        return path.resolve().relative_to(RUNTIME_PATHS.repository_root).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def _load_runtime_graph_config(graph_id: str) -> GraphConfig:
+    """Load one runtime graph config by graph id."""
+    return load_graph_config(_graph_config_path(graph_id))
+
+
+def _graph_version_store(graph_id: str = PRIMARY_RUNTIME_GRAPH_ID) -> GraphVersionStore:
+    """Return the file-backed graph version store for one graph config."""
+    return GraphVersionStore(
+        active_config_path=_graph_config_path(graph_id),
+        version_root=RUNTIME_GRAPH_VERSION_ROOT,
+    )
+
+
+def _module_config_store() -> ModuleConfigStore:
+    """Return the file-backed module config store."""
+    return ModuleConfigStore(
+        module_root=RUNTIME_MODULE_ROOT,
+        version_root=RUNTIME_MODULE_VERSION_ROOT,
+    )
+
+
+def _knowledge_store() -> JsonlKnowledgeStore:
+    """Return the file-backed Knowledge memory store."""
+    return JsonlKnowledgeStore(memory_root=KNOWLEDGE_MEMORY_ROOT, run_root=RUNTIME_PATHS.run_root)
+
+
+def _markdown_store():
+    from knowledge.markdown_runtime import store_for
+    return store_for(memory_root=KNOWLEDGE_MEMORY_ROOT, runtime_root=RUNTIME_PATHS.runtime_root)
+
+
+def _knowledge_graph_backend():
+    """Return optional Knowledge graph backend from environment.
+
+    Neo4j is optional. If disabled or unavailable with fail-open enabled, the
+    backend returns disabled/JSON fallback status and does not break runtime APIs.
+    """
+    return graph_backend_from_env(RUNTIME_PATHS.repository_root, paths=RUNTIME_PATHS)
+
+
+def _knowledge_service() -> KnowledgeService:
+    """Return the shared durable Knowledge service for API and CLI parity."""
+    return KnowledgeService(RUNTIME_PATHS.repository_root, backend=NullGraphBackend(status="retired"), paths=RUNTIME_PATHS)
+
+
+def _manual_knowledge_service() -> ManualKnowledgeService:
+    """Return source-separated, citation-preserving manual retrieval."""
+    return ManualKnowledgeService(project_root=RUNTIME_PATHS.repository_root,
+        manual_data_root=RUNTIME_PATHS.memory_root / "knowledge/manual_rag",
+        registry_path=RUNTIME_PATHS.system_root / "knowledge/manuals/registry.yaml")
+
+
+def _manual_knowledge_context(
+    query: str,
+    *,
+    purpose: str,
+    product_hint: str = "",
+    version_hint: str = "",
+    top_k: int = 6,
+) -> dict[str, Any]:
+    from mcp_tools.source_tools import retired_manual_context
+    return retired_manual_context(query, purpose=purpose)
+
+
+def _knowledge_reconciliation_worker() -> KnowledgeReconciliationWorker:
+    """Knowledge graph reconciliation is retired; never create a worker."""
+    raise HTTPException(status_code=410, detail="Knowledge graph reconciliation retired")
+
+
+def _legacy_knowledge_reconciliation_worker() -> KnowledgeReconciliationWorker:
+    global _KNOWLEDGE_RECONCILIATION_SERVICE
+    global _KNOWLEDGE_RECONCILIATION_WORKER
+    global _KNOWLEDGE_RECONCILIATION_KNOWLEDGE_SERVICE
+    if _KNOWLEDGE_RECONCILIATION_WORKER is None:
+        knowledge_service = KnowledgeService.from_env(RUNTIME_PATHS.repository_root, paths=RUNTIME_PATHS)
+        reconciliation = KnowledgeReconciliationService(
+            project_root=RUNTIME_PATHS.repository_root,
+            knowledge_service=knowledge_service,
+            agent_context=controller._deps.agent_context,
+            store=RelationStore(RUNTIME_PATHS.memory_root / "knowledge/reconciliation"),
+        )
+        _KNOWLEDGE_RECONCILIATION_KNOWLEDGE_SERVICE = knowledge_service
+        _KNOWLEDGE_RECONCILIATION_SERVICE = reconciliation
+        _KNOWLEDGE_RECONCILIATION_WORKER = KnowledgeReconciliationWorker(reconciliation)
+    return _KNOWLEDGE_RECONCILIATION_WORKER
+
+
+def _knowledge_reconciliation_service() -> KnowledgeReconciliationService:
+    """Return the service owned by the shared app worker."""
+    worker = _knowledge_reconciliation_worker()
+    return worker.service
+
+
+def _knowledge_relation_summary() -> dict[str, object]:
+    """Compatibility status for old snapshots; no graph worker or disk scan."""
+    return {"examined": 0, "proposed": 0, "auto_approved": 0, "pending": 0,
+            "rejected_deferred": 0, "worker_status": "retired", "worker_running": False,
+            "review_url": "/knowledge"}
+
+
+def _legacy_knowledge_relation_summary() -> dict[str, object]:
+    defaults: dict[str, object] = {
+        "examined": 0,
+        "proposed": 0,
+        "auto_approved": 0,
+        "pending": 0,
+        "rejected_deferred": 0,
+        "worker_status": "unavailable",
+        "worker_running": False,
+        "review_url": "/knowledge#relations",
+    }
+    try:
+        worker = _knowledge_reconciliation_worker()
+        store = worker.service.store
+        stats = store.stats()
+        decisions = store.list_decisions(limit=2000)
+        automatic = sum(
+            1
+            for item in decisions
+            if str(item.get("decision_source") or "") == "automatic"
+            and str(item.get("decision") or "") in {"approved", "revised_approved"}
+        )
+        worker_state = worker.status()
+        return {
+            "examined": int(stats.get("examined_work", 0)),
+            "proposed": int(stats.get("proposed", 0)),
+            "auto_approved": automatic,
+            "pending": int(stats.get("pending", 0)),
+            "rejected_deferred": int(stats.get("rejected", 0)) + int(stats.get("deferred", 0)),
+            "worker_status": str(worker_state.get("status") or "idle"),
+            "worker_running": bool(worker_state.get("running", False)),
+            "review_url": "/knowledge#relations",
+        }
+    except Exception as exc:
+        return {**defaults, "error": str(exc)[:500]}
+
+
+def _graph_config_payload(graph_id: str = PRIMARY_RUNTIME_GRAPH_ID) -> dict[str, object]:
+    """Return one config-driven LangGraph definition as JSON-safe data."""
+    config = _load_runtime_graph_config(graph_id)
+    return config.model_dump(mode="json")
+
+
+def _runtime_ide_contract_payload(snapshot: dict[str, Any] | None = None) -> dict[str, object]:
+    """Expose the actual runtime graph/module/bridge contract consumed by Runtime IDE."""
+    snapshot = snapshot or {}
+    state = snapshot.get("state", {}) if isinstance(snapshot.get("state"), dict) else {}
+    run_metadata = state.get("run_metadata", {}) if isinstance(state.get("run_metadata"), dict) else {}
+    try:
+        config = _load_runtime_graph_config(PRIMARY_RUNTIME_GRAPH_ID)
+        graph_payload = config.model_dump(mode="json")
+        graph_metadata = graph_payload.get("metadata", {}) if isinstance(graph_payload.get("metadata"), dict) else {}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "graph_id": PRIMARY_RUNTIME_GRAPH_ID}
+
+    module_contracts: list[dict[str, object]] = []
+    for module_path in sorted(RUNTIME_MODULE_ROOT.glob("*/module.yaml")):
+        try:
+            item = _module_list_item(module_path)
+            module_payload = _module_config_payload(str(item.get("id") or module_path.parent.name))
+        except Exception as exc:
+            module_contracts.append({"module_id": module_path.parent.name, "error": str(exc), "path": str(module_path)})
+            continue
+        module = module_payload.get("module", {}) if isinstance(module_payload.get("module"), dict) else {}
+        metadata = module.get("metadata") if isinstance(module.get("metadata"), dict) else {}
+        module_contracts.append({
+            "module_id": str(module.get("id") or item.get("id") or module_path.parent.name),
+            "label": str(module.get("label") or item.get("label") or module_path.parent.name),
+            "handler": str(module.get("handler") or item.get("handler") or ""),
+            "category": item.get("category", _module_category(module)),
+            "llm_role": str(module.get("llm_role") or ""),
+            "tools": list(module.get("tools") or []),
+            "runtime_contract": module.get("runtime_contract", {}) if isinstance(module.get("runtime_contract"), dict) else {},
+            "device_bridge_contracts": module.get("device_bridge_contracts", []) if isinstance(module.get("device_bridge_contracts"), list) else [],
+            "output_contracts": module.get("output_contracts", []) if isinstance(module.get("output_contracts"), list) else [],
+            "io_contract": module.get("io_contract", {}) if isinstance(module.get("io_contract"), dict) else {},
+            "safety": module.get("safety", {}) if isinstance(module.get("safety"), dict) else {},
+            "source_path": str(metadata.get("python_source_path") or metadata.get("source_path") or ""),
+            "path": str(module_path),
+        })
+
+    supervisor_evidence_keys = [
+        "latest_mission_contract",
+        "latest_orchestration_plan",
+        "latest_orchestrator_parallel_checks",
+        "latest_orchestrator_followup",
+        "orchestrator_decision_register",
+        "latest_orchestrator_handoff",
+        "latest_loop_reflection",
+    ]
+    supervisor_evidence = {key: run_metadata.get(key) for key in supervisor_evidence_keys if key in run_metadata}
+    bridge_health = state.get("device_health", {}) if isinstance(state.get("device_health"), dict) else {}
+    normalized_bridges = _normalized_bridge_manifests(graph_metadata, bridge_health)
+
+    return {
+        "ok": True,
+        "graph_id": graph_payload.get("id", PRIMARY_RUNTIME_GRAPH_ID),
+        "graph_version": graph_payload.get("version", ""),
+        "runtime_planes": graph_metadata.get("runtime_planes", []),
+        "device_bridges": normalized_bridges,
+        "runtime_contract_map": graph_metadata.get("runtime_contract_map", {}),
+        "module_contracts": module_contracts,
+        "supervisor_evidence": supervisor_evidence,
+        "device_health": bridge_health,
+        "active_stage": state.get("stage", ""),
+        "run_id": snapshot.get("run_id") or state.get("run_id") or _current_run_id(),
+        "source_endpoints": ["/api/graphs/atr_closed_loop", "/api/modules", "/api/runtime/agent-manifests", "/api/bridges", "/api/state", "/api/devices/state", "/api/guardian/status"],
+    }
+
+
+def _agent_manifest_short(agent_id: str, label: str = "") -> str:
+    """Return the stable Live GUI short code for one manifest agent."""
+    mapping = {
+        "objective": "OBJ",
+        "orchestrator": "ORC",
+        "design": "DSN",
+        "specimen": "SPC",
+        "vision": "VIS",
+        "manipulation": "MAN",
+        "equipment": "EQP",
+        "analysis": "ANL",
+        "knowledge": "KNW",
+        "bo": "BO",
+        "guardian": "GRD",
+    }
+    clean = str(agent_id or "").strip().lower()
+    if clean in mapping:
+        return mapping[clean]
+    text = re.sub(r"[^A-Za-z0-9]+", "", str(label or agent_id or "AGT")).upper()
+    return (text[:3] or "AGT")
+
+
+def _agent_manifest_icon_path(agent_id: str) -> str:
+    """Return the default Live GUI icon path for one manifest agent."""
+    mapping = {
+        "objective": "objective.svg",
+        "orchestrator": "orchestrator.svg",
+        "design": "design_agent.svg",
+        "specimen": "specimen_agent.svg",
+        "vision": "vision_agent.svg",
+        "manipulation": "manipulation_agent.svg",
+        "equipment": "equipment_agent.svg",
+        "analysis": "analysis_agent.svg",
+        "knowledge": "knowledge_agent.svg",
+        "bo": "bo_agent.svg",
+        "guardian": "guardian_agent.svg",
+    }
+    filename = mapping.get(str(agent_id or "").strip().lower(), "artifact.svg")
+    return f"/static/live_gui_icons/{filename}"
+
+
+def _module_ui_payload(module_id: str, *, module_root: Path | None = None) -> tuple[dict[str, Any], str]:
+    """Read optional module-local ui.yaml descriptor without requiring it to exist."""
+    if not module_id or module_id == "objective":
+        return {}, ""
+    try:
+        safe_module = ModuleConfigStore.safe_module_id(module_id)
+    except ValueError:
+        return {}, ""
+    ui_path = (module_root or RUNTIME_MODULE_ROOT) / safe_module / "ui.yaml"
+    if not ui_path.exists():
+        return {}, ""
+    try:
+        raw = read_yaml(ui_path) or {}
+    except (OSError, yaml.YAMLError):
+        return {}, str(ui_path)
+    ui = raw.get("ui", raw) if isinstance(raw, dict) else {}
+    return _normalize_module_ui_descriptor(ui if isinstance(ui, dict) else {}), str(ui_path)
+
+
+_UI_DESCRIPTOR_CHART_ALIASES = {
+    "mini_bar_chart": "mini_bar_chart",
+    "mini-bars": "mini_bar_chart",
+    "mini_bars": "mini_bar_chart",
+    "bar_chart": "mini_bar_chart",
+    "bar": "mini_bar_chart",
+    "scatter_plot": "scatter_plot",
+    "scatter": "scatter_plot",
+    "xy_scatter": "scatter_plot",
+    "line_chart": "line_chart",
+    "line": "line_chart",
+    "sparkline": "line_chart",
+    "trend_line": "line_chart",
+    "table": "table",
+    "data_table": "table",
+    "descriptor_table": "table",
+    "heatmap": "heatmap",
+    "matrix": "heatmap",
+    "cell_heatmap": "heatmap",
+    "compound_chart": "compound_chart",
+    "compound": "compound_chart",
+    "chart_grid": "compound_chart",
+    "dashboard_grid": "compound_chart",
+    "panel_grid": "compound_chart",
+}
+_UI_DESCRIPTOR_ACTION_KINDS = {"link", "navigation", "workspace", "api"}
+_UI_DESCRIPTOR_PHYSICAL_ACTION_KINDS = {"device", "physical", "hardware", "actuator"}
+_UI_DESCRIPTOR_SAFE_ROUTES = (
+    "/",
+    "/live",
+    "/planning",
+    "/ide",
+    "/module-management",
+    "/printer",
+    "/lerobot",
+    "/bo",
+    "/equipment/windows",
+)
+
+
+def _safe_ui_descriptor_navigation_url(value: object) -> tuple[str, str]:
+    """Return a safe internal GUI route or a stable block reason."""
+    url = str(value or "").strip()
+    if not url:
+        return "", "empty_url_not_allowed"
+    if not url.startswith("/") or url.startswith("//") or re.search(r"[\x00-\x1f]", url):
+        return url, "external_url_not_allowed"
+    if re.match(r"^/api/", url, flags=re.IGNORECASE):
+        return url, "api_endpoint_not_allowed_in_ui_descriptor"
+    for prefix in _UI_DESCRIPTOR_SAFE_ROUTES:
+        if url == prefix or url.startswith(f"{prefix}?") or url.startswith(f"{prefix}#"):
+            return url, ""
+    return url, "route_not_allowlisted"
+
+
+def _safe_ui_descriptor_api_endpoint_url(value: object, *, method: str = "GET") -> tuple[str, str]:
+    """Return a safe internal API route for the declared method or a stable block reason."""
+    url = str(value or "").strip()
+    if not url:
+        return "", "empty_url_not_allowed"
+    if not url.startswith("/api/") or url.startswith("//") or re.search(r"[\x00-\x1f]", url):
+        return url, "api_endpoint_not_allowed_in_ui_descriptor"
+    route_path = urlparse(url).path
+    desired_method = str(method or "GET").strip().upper()
+    for route in app.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        if desired_method not in route.methods:
+            continue
+        if route.path_regex.match(route_path):
+            return url, ""
+    return url, "api_endpoint_not_found_or_method_not_allowed"
+
+
+def _safe_ui_descriptor_api_url(value: object) -> tuple[str, str]:
+    """Return a safe read-only GET API route or a stable block reason."""
+    return _safe_ui_descriptor_api_endpoint_url(value, method="GET")
+
+
+def _infer_ui_descriptor_handoff_workspace(api_url: str) -> str:
+    """Infer a safe workspace route for API actions that must not run from cards."""
+    route_path = urlparse(str(api_url or "").strip()).path
+    mapping = (
+        ("/api/equipment/windows", "/equipment/windows"),
+        ("/api/printer", "/printer"),
+        ("/api/lerobot", "/lerobot"),
+        ("/api/bo", "/bo"),
+        ("/api/modules", "/module-management"),
+        ("/api/graphs", "/ide"),
+        ("/api/bridges", "/ide"),
+    )
+    for prefix, workspace in mapping:
+        if route_path.startswith(prefix):
+            return workspace
+    return ""
+
+
+def _coerce_ui_descriptor_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value == 1
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+_UI_DESCRIPTOR_ALLOWED_SPANS = {3, 4, 5, 6, 7, 8, 9, 12}
+_UI_DESCRIPTOR_DENSITIES = {"normal", "compact", "dense", "comfortable"}
+_UI_DESCRIPTOR_PRIORITIES = {"normal", "low", "high", "critical"}
+_UI_DESCRIPTOR_MOBILE_BEHAVIORS = {"stack", "compact", "hide", "scroll"}
+_UI_DESCRIPTOR_RENDERER_IDS = {
+    "descriptor",
+    "generic",
+    "module",
+    "objective_reference",
+    "orchestrator_reference",
+    "design_reference",
+    "specimen_reference",
+    "vision_reference",
+    "manipulation_reference",
+    "equipment_reference",
+    "analysis_reference",
+    "knowledge_reference",
+    "bo_reference",
+    "guardian_reference",
+}
+
+
+def _coerce_ui_descriptor_choice(value: object, allowed: set[str], default: str) -> str:
+    clean = str(value or "").strip().lower().replace("-", "_")
+    return clean if clean in allowed else default
+
+
+def _coerce_ui_descriptor_span(value: object, default: int) -> int:
+    try:
+        span = int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        span = default
+    return span if span in _UI_DESCRIPTOR_ALLOWED_SPANS else default
+
+
+def _coerce_ui_descriptor_renderer_id(value: object, default: str = "descriptor") -> tuple[str, str]:
+    raw = str(value or "").strip().lower().replace("-", "_")
+    clean = re.sub(r"[^a-z0-9_:.]+", "_", raw)[:80].strip("_")
+    if not clean:
+        return default, ""
+    if clean in _UI_DESCRIPTOR_RENDERER_IDS:
+        return clean, ""
+    return default, f"unsupported_renderer_id:{clean}"
+
+
+def _normalize_ui_descriptor_renderer(ui: dict[str, Any]) -> dict[str, Any]:
+    """Normalize optional custom renderer ids without granting execution rights."""
+    raw = ui.get("renderer")
+    dashboard_raw: object = None
+    report_raw: object = None
+    fallback_raw: object = None
+    declared = False
+    if isinstance(raw, dict):
+        dashboard_raw = raw.get("dashboard") or raw.get("dashboard_renderer") or raw.get("dashboardRenderer")
+        report_raw = raw.get("report") or raw.get("report_renderer") or raw.get("reportRenderer")
+        fallback_raw = raw.get("fallback") or raw.get("fallback_renderer") or raw.get("fallbackRenderer") or "descriptor"
+        declared = any(value is not None for value in (dashboard_raw, report_raw, fallback_raw))
+    else:
+        dashboard_raw = raw or ui.get("custom_renderer") or ui.get("customRenderer") or ui.get("dashboard_renderer") or ui.get("dashboardRenderer")
+        report_raw = ui.get("report_renderer") or ui.get("reportRenderer") or dashboard_raw
+        fallback_raw = "descriptor"
+        declared = dashboard_raw is not None or report_raw is not None
+    if not declared:
+        return {}
+
+    dashboard, dashboard_reason = _coerce_ui_descriptor_renderer_id(dashboard_raw, "descriptor")
+    report, report_reason = _coerce_ui_descriptor_renderer_id(report_raw, dashboard)
+    fallback, fallback_reason = _coerce_ui_descriptor_renderer_id(fallback_raw, "descriptor")
+    reasons = [reason for reason in (dashboard_reason, report_reason, fallback_reason) if reason]
+    return {
+        "dashboard": dashboard,
+        "report": report,
+        "fallback": fallback,
+        "supported": not reasons,
+        "execution_scope": "presentation_only",
+        "blocked_reason": ";".join(reasons),
+    }
+
+
+def _normalize_ui_descriptor_layout_intent(item: dict[str, Any], *, default_span: int) -> dict[str, Any]:
+    """Normalize presentation-only layout intent for descriptor cards/sections."""
+    has_layout = any(
+        key in item
+        for key in ("span", "density", "priority", "mobile_behavior", "mobileBehavior", "layout_intent", "layoutIntent")
+    )
+    raw_intent = item.get("layout_intent") if isinstance(item.get("layout_intent"), dict) else {}
+    if not raw_intent and isinstance(item.get("layoutIntent"), dict):
+        raw_intent = item.get("layoutIntent") or {}
+    if raw_intent:
+        has_layout = True
+    if not has_layout:
+        return item
+
+    span = _coerce_ui_descriptor_span(raw_intent.get("span", item.get("span")), default_span)
+    density = _coerce_ui_descriptor_choice(raw_intent.get("density", item.get("density")), _UI_DESCRIPTOR_DENSITIES, "normal")
+    priority = _coerce_ui_descriptor_choice(raw_intent.get("priority", item.get("priority")), _UI_DESCRIPTOR_PRIORITIES, "normal")
+    mobile_behavior = _coerce_ui_descriptor_choice(
+        raw_intent.get("mobile_behavior", raw_intent.get("mobileBehavior", item.get("mobile_behavior", item.get("mobileBehavior")))),
+        _UI_DESCRIPTOR_MOBILE_BEHAVIORS,
+        "stack",
+    )
+    item["span"] = span
+    item["density"] = density
+    item["priority"] = priority
+    item["mobile_behavior"] = mobile_behavior
+    item["layout_intent"] = {
+        "span": span,
+        "density": density,
+        "priority": priority,
+        "mobile_behavior": mobile_behavior,
+    }
+    item.pop("layoutIntent", None)
+    item.pop("mobileBehavior", None)
+    return item
+
+
+def _normalize_ui_descriptor_chart(chart: object, *, _depth: int = 0) -> dict[str, Any]:
+    """Normalize a presentation-only chart descriptor without adding execution rights."""
+    if not isinstance(chart, dict):
+        return {}
+    normalized = copy.deepcopy(chart)
+    raw_type = str(normalized.get("type") or normalized.get("chart") or "").strip().lower()
+    render_mode = _UI_DESCRIPTOR_CHART_ALIASES.get(raw_type)
+    if not render_mode:
+        normalized["type"] = raw_type or "unknown"
+        normalized["supported"] = False
+        normalized["render_mode"] = "unsupported"
+        normalized["blocked_reason"] = "unsupported_chart_type"
+        return normalized
+    normalized["type"] = render_mode
+    normalized["supported"] = True
+    normalized["render_mode"] = render_mode
+    if render_mode == "compound_chart":
+        panels = normalized.get("panels")
+        if not isinstance(panels, list):
+            panels = normalized.get("items")
+        clean_panels: list[dict[str, Any]] = []
+        if isinstance(panels, list):
+            for index, panel_item in enumerate(panels):
+                if not isinstance(panel_item, dict):
+                    continue
+                panel = copy.deepcopy(panel_item)
+                panel_id = str(panel.get("id") or panel.get("key") or f"panel_{index + 1}").strip()
+                panel["id"] = re.sub(r"[^a-zA-Z0-9_.:-]+", "_", panel_id)[:80] or f"panel_{index + 1}"
+                panel.setdefault("title", str(panel.get("label") or panel["id"]).replace("_", " ").title())
+                child_chart = panel.get("chart") if isinstance(panel.get("chart"), dict) else {}
+                panel["chart"] = (
+                    _normalize_ui_descriptor_chart(child_chart, _depth=_depth + 1)
+                    if _depth < 2
+                    else {
+                        "type": "unknown",
+                        "supported": False,
+                        "render_mode": "unsupported",
+                        "blocked_reason": "compound_chart_nesting_limit",
+                    }
+                )
+                clean_panels.append(panel)
+        normalized["panels"] = clean_panels
+        layout = str(normalized.get("layout") or "").strip().lower()
+        normalized["layout"] = layout if layout in {"one_column", "two_column", "three_column", "compact"} else "two_column"
+        normalized.setdefault("limit", 6)
+        return normalized
+    if render_mode == "scatter_plot":
+        points = normalized.get("points")
+        clean_points: list[dict[str, Any]] = []
+        if isinstance(points, list):
+            for index, point in enumerate(points):
+                if not isinstance(point, dict):
+                    continue
+                row = copy.deepcopy(point)
+                row.setdefault("label", str(row.get("id") or f"point {index + 1}"))
+                if "x" not in row:
+                    row["x"] = row.get("x_selector", row.get("selector_x"))
+                if "y" not in row:
+                    row["y"] = row.get("y_selector", row.get("selector_y"))
+                if "value" not in row:
+                    row["value"] = row.get("value_selector", row.get("y"))
+                row.setdefault("tone", normalized.get("tone", "info"))
+                clean_points.append(row)
+        normalized["points"] = clean_points
+        normalized.setdefault("x_label", "x")
+        normalized.setdefault("y_label", "y")
+        return normalized
+    if render_mode == "line_chart":
+        points = normalized.get("points")
+        if not isinstance(points, list):
+            points = normalized.get("items")
+        clean_points: list[dict[str, Any]] = []
+        if isinstance(points, list):
+            for index, point in enumerate(points):
+                if not isinstance(point, dict):
+                    continue
+                row = copy.deepcopy(point)
+                row.setdefault("label", str(row.get("id") or f"point {index + 1}"))
+                if "value" not in row:
+                    row["value"] = row.get("value_selector", row.get("selector"))
+                row.setdefault("tone", normalized.get("tone", "info"))
+                clean_points.append(row)
+        normalized["points"] = clean_points
+        normalized.setdefault("x_label", "step")
+        normalized.setdefault("y_label", "value")
+        return normalized
+    if render_mode == "table":
+        columns = normalized.get("columns")
+        clean_columns: list[dict[str, Any]] = []
+        if isinstance(columns, list):
+            for index, column in enumerate(columns):
+                if not isinstance(column, dict):
+                    continue
+                col = copy.deepcopy(column)
+                col_id = str(col.get("id") or col.get("key") or f"column_{index + 1}").strip()
+                col["id"] = re.sub(r"[^a-zA-Z0-9_.:-]+", "_", col_id)[:80] or f"column_{index + 1}"
+                col.setdefault("label", str(col.get("title") or col["id"]).replace("_", " ").title())
+                if "selector" not in col and "value_selector" in col:
+                    col["selector"] = col.get("value_selector")
+                clean_columns.append(col)
+        rows = normalized.get("rows")
+        if not isinstance(rows, list):
+            rows = normalized.get("items")
+        clean_rows: list[dict[str, Any]] = []
+        if isinstance(rows, list):
+            for index, row_item in enumerate(rows):
+                if not isinstance(row_item, dict):
+                    continue
+                row = copy.deepcopy(row_item)
+                row.setdefault("id", str(row.get("label") or f"row_{index + 1}"))
+                row.setdefault("label", str(row.get("title") or row.get("id") or f"row {index + 1}"))
+                clean_rows.append(row)
+        normalized["columns"] = clean_columns
+        normalized["rows"] = clean_rows
+        normalized.setdefault("limit", 12)
+        return normalized
+    if render_mode == "heatmap":
+        cells = normalized.get("cells")
+        clean_cells: list[dict[str, Any]] = []
+        if isinstance(cells, list):
+            for index, cell_item in enumerate(cells):
+                if not isinstance(cell_item, dict):
+                    continue
+                cell = copy.deepcopy(cell_item)
+                cell.setdefault("row", str(cell.get("y") or cell.get("row_id") or f"row_{index + 1}"))
+                cell.setdefault("column", str(cell.get("x") or cell.get("column_id") or f"column_{index + 1}"))
+                if "value" not in cell:
+                    cell["value"] = cell.get("value_selector", cell.get("selector"))
+                cell.setdefault("tone", normalized.get("tone", "info"))
+                clean_cells.append(cell)
+        normalized["cells"] = clean_cells
+        normalized.setdefault("x_label", "column")
+        normalized.setdefault("y_label", "row")
+        normalized.setdefault("limit", 48)
+        return normalized
+    items = normalized.get("items")
+    clean_items: list[dict[str, Any]] = []
+    if isinstance(items, list):
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            row = copy.deepcopy(item)
+            row.setdefault("label", str(row.get("id") or f"item {index + 1}"))
+            if "value" not in row:
+                if "value_selector" in row:
+                    row["value"] = row.get("value_selector")
+                elif "selector" in row:
+                    row["value"] = row.get("selector")
+            if "max" not in row and "max_selector" in row:
+                row["max"] = row.get("max_selector")
+            row.setdefault("tone", normalized.get("tone", "info"))
+            clean_items.append(row)
+    normalized["items"] = clean_items
+    return normalized
+
+
+def _normalize_ui_descriptor_actions(actions: object) -> list[dict[str, Any]]:
+    """Annotate descriptor actions so backend and frontend share the same safety boundary."""
+    normalized: list[dict[str, Any]] = []
+    if not isinstance(actions, list):
+        return normalized
+    for index, action in enumerate(actions):
+        if not isinstance(action, dict):
+            continue
+        item = copy.deepcopy(action)
+        item.setdefault("id", f"action_{index + 1}")
+        item.setdefault("label", str(item.get("title") or item.get("id") or f"Action {index + 1}"))
+        kind = str(item.get("kind") or "link").strip().lower()
+        item["kind"] = kind
+        method = str(item.get("method") or "GET").strip().upper()
+        item["method"] = method
+        item["read_only"] = _coerce_ui_descriptor_bool(item.get("read_only"))
+        item["requires_confirmation"] = _coerce_ui_descriptor_bool(item.get("requires_confirmation"))
+        if kind in _UI_DESCRIPTOR_PHYSICAL_ACTION_KINDS:
+            raw_url = str(item.get("url") or item.get("href") or item.get("route") or item.get("path") or "").strip()
+            if raw_url.startswith("/") and not raw_url.startswith("//") and not re.search(r"[\x00-\x1f]", raw_url):
+                item["url"] = raw_url
+            item["safe_navigation"] = False
+            item["live_card_runnable"] = False
+            item["handoff_required"] = False
+            item["handoff_workspace"] = ""
+            item["execution_scope"] = "blocked"
+            item["blocked_reason"] = "physical_device_action_requires_bridge_workspace"
+            normalized.append(item)
+            continue
+        if kind == "api":
+            url, block_reason = _safe_ui_descriptor_api_endpoint_url(
+                item.get("url") or item.get("href") or item.get("route") or item.get("path"),
+                method=method,
+            )
+            if url:
+                item["url"] = url
+            handoff_workspace_raw = (
+                item.get("handoff_workspace")
+                or item.get("workspace")
+                or _infer_ui_descriptor_handoff_workspace(url)
+            )
+            handoff_workspace, workspace_block_reason = _safe_ui_descriptor_navigation_url(handoff_workspace_raw)
+            callable_read_only = (
+                not block_reason
+                and method == "GET"
+                and item["read_only"]
+                and not item["requires_confirmation"]
+            )
+            needs_handoff = (
+                not block_reason
+                and not callable_read_only
+                and bool(handoff_workspace)
+                and not workspace_block_reason
+            )
+            if callable_read_only:
+                item["safe_navigation"] = False
+                item["live_card_runnable"] = True
+                item["handoff_required"] = False
+                item["handoff_workspace"] = ""
+                item["execution_scope"] = "read_only_api"
+                item["blocked_reason"] = ""
+            elif needs_handoff:
+                item["safe_navigation"] = False
+                item["live_card_runnable"] = False
+                item["handoff_required"] = True
+                item["handoff_workspace"] = handoff_workspace
+                item["execution_scope"] = "workspace_handoff"
+                item["blocked_reason"] = "workspace_handoff_required"
+            else:
+                if workspace_block_reason and not block_reason and handoff_workspace_raw:
+                    block_reason = f"workspace_handoff_{workspace_block_reason}"
+                elif method != "GET" and not block_reason:
+                    block_reason = "api_action_must_be_get"
+                elif not item["read_only"] and not block_reason:
+                    block_reason = "api_action_must_be_read_only"
+                elif item["requires_confirmation"] and not block_reason:
+                    block_reason = "api_action_confirmation_not_allowed"
+                item["safe_navigation"] = False
+                item["live_card_runnable"] = False
+                item["handoff_required"] = False
+                item["handoff_workspace"] = ""
+                item["execution_scope"] = "blocked"
+                item["blocked_reason"] = block_reason or "api_action_not_runnable"
+            normalized.append(item)
+            continue
+        url, block_reason = _safe_ui_descriptor_navigation_url(
+            item.get("url") or item.get("href") or item.get("route") or item.get("path")
+        )
+        if url:
+            item["url"] = url
+        if kind not in _UI_DESCRIPTOR_ACTION_KINDS:
+            block_reason = "unsupported_action_kind"
+        if block_reason:
+            item["safe_navigation"] = False
+            item["live_card_runnable"] = False
+            item["execution_scope"] = "blocked"
+            item["blocked_reason"] = block_reason
+        else:
+            item["safe_navigation"] = True
+            item["live_card_runnable"] = False
+            item["execution_scope"] = "navigation_only"
+            item["blocked_reason"] = ""
+        normalized.append(item)
+    return normalized
+
+
+def _normalize_module_ui_descriptor(ui: dict[str, Any]) -> dict[str, Any]:
+    """Normalize module-local UI metadata while keeping it presentation-only."""
+    normalized = copy.deepcopy(ui) if isinstance(ui, dict) else {}
+    renderer = _normalize_ui_descriptor_renderer(normalized)
+    if renderer:
+        normalized["renderer"] = renderer
+    for legacy_key in ("custom_renderer", "customRenderer", "dashboard_renderer", "dashboardRenderer", "report_renderer", "reportRenderer"):
+        normalized.pop(legacy_key, None)
+    for collection_key in ("cards", "report_sections"):
+        collection = normalized.get(collection_key)
+        if not isinstance(collection, list):
+            continue
+        clean_collection: list[dict[str, Any]] = []
+        for descriptor in collection:
+            if not isinstance(descriptor, dict):
+                continue
+            item = copy.deepcopy(descriptor)
+            item = _normalize_ui_descriptor_layout_intent(
+                item,
+                default_span=4 if collection_key == "cards" else 6,
+            )
+            if "chart" in item:
+                item["chart"] = _normalize_ui_descriptor_chart(item.get("chart"))
+            if "actions" in item:
+                item["actions"] = _normalize_ui_descriptor_actions(item.get("actions"))
+            clean_collection.append(item)
+        normalized[collection_key] = clean_collection
+    return normalized
+
+
+def _module_ui_path(module_id: str) -> Path:
+    """Return the module-local ui.yaml path after validating the module id."""
+    safe_module = ModuleConfigStore.safe_module_id(module_id)
+    module_path = RUNTIME_MODULE_ROOT / safe_module / "module.yaml"
+    if not module_path.exists():
+        raise HTTPException(status_code=404, detail=f"Unknown module_id={module_id}")
+    return RUNTIME_MODULE_ROOT / safe_module / "ui.yaml"
+
+
+def _module_payload_by_id(module_root: Path | None = None) -> dict[str, dict[str, Any]]:
+    """Return active module payloads keyed by module id."""
+    modules: dict[str, dict[str, Any]] = {}
+    for module_path in sorted((module_root or RUNTIME_MODULE_ROOT).glob("*/module.yaml")):
+        try:
+            raw = read_yaml(module_path) or {}
+        except (OSError, yaml.YAMLError):
+            continue
+        module = raw.get("module", raw) if isinstance(raw, dict) else {}
+        if not isinstance(module, dict):
+            continue
+        module_id = str(module.get("id") or module_path.parent.name).strip()
+        if module_id:
+            modules[module_id] = module
+    return modules
+
+
+def _module_attached_to_primary_graph(module_id: str, module: dict[str, Any]) -> bool:
+    """Return whether a module is attached to the primary executable graph."""
+    graph_binding = module.get("graph") if isinstance(module.get("graph"), dict) else {}
+    if graph_binding.get("attached") is False:
+        return False
+    try:
+        config = _load_runtime_graph_config(PRIMARY_RUNTIME_GRAPH_ID)
+    except Exception:
+        return bool(graph_binding.get("attached"))
+    safe_module_id = ModuleConfigStore.safe_module_id(module_id)
+    for node in config.nodes:
+        if _module_id_from_graph_node_module_id(node.module_id) == safe_module_id:
+            return True
+    return bool(graph_binding.get("attached"))
+
+
+def _module_management_runtime_effect() -> dict[str, object]:
+    """Describe what module-management load/unload changes and does not change."""
+    return {
+        "scope": "management_workspace",
+        "changes_graph_config": False,
+        "changes_runtime_execution": False,
+        "requires_validate_dry_run_save_for_activation": True,
+    }
+
+
+def _module_declared_output_contracts(module: dict[str, Any]) -> list[str]:
+    """Return output contract identifiers declared by module.yaml."""
+    outputs: list[str] = []
+
+    def add(value: object) -> None:
+        if isinstance(value, str):
+            clean = value.strip()
+            if clean and clean not in outputs:
+                outputs.append(clean)
+        elif isinstance(value, list):
+            for entry in value:
+                add(entry)
+
+    add(module.get("output_contracts"))
+    io_contract = module.get("io_contract") if isinstance(module.get("io_contract"), dict) else {}
+    add(io_contract.get("output"))
+    return outputs
+
+
+def _module_supervisor_policy_gate(module: dict[str, Any]) -> dict[str, object]:
+    """Check whether supervisor_policy required outputs are declared by the module."""
+    policy = module.get("supervisor_policy") if isinstance(module.get("supervisor_policy"), dict) else {}
+    required_outputs = []
+    if isinstance(policy.get("required_outputs"), list):
+        for item in policy.get("required_outputs", []):
+            clean = str(item or "").strip()
+            if clean and clean not in required_outputs:
+                required_outputs.append(clean)
+    declared_outputs = _module_declared_output_contracts(module)
+    missing_outputs = [item for item in required_outputs if item not in declared_outputs]
+    return {
+        "present": bool(policy),
+        "required_outputs": required_outputs,
+        "declared_outputs": declared_outputs,
+        "missing_outputs": missing_outputs,
+        "ok": not missing_outputs,
+    }
+
+
+def _module_activation_status(
+    *,
+    status: str,
+    contract_ready: bool,
+    graph_attached: bool,
+    validation_errors: list[str],
+    executable_count: int,
+    ready_for_live_activation: bool,
+) -> str:
+    """Return a compact lifecycle label without changing runtime activation."""
+    if ready_for_live_activation:
+        return "active_graph_attached"
+    if status == "draft" and not graph_attached:
+        return "draft_unattached"
+    if not contract_ready:
+        return "contract_incomplete"
+    if not graph_attached:
+        return "contract_ready_unattached"
+    if validation_errors:
+        return "validation_blocked"
+    if executable_count < 1:
+        return "dry_run_blocked"
+    return "inactive"
+
+
+def _module_management_lifecycle(module_id: str, payload: dict[str, Any]) -> dict[str, object]:
+    """Summarize module execution lifecycle state for GUI/CUI parity."""
+    normalized = ModuleConfigStore.normalize_payload(dict(payload))
+    module = normalized.get("module", {}) if isinstance(normalized, dict) else {}
+    if not isinstance(module, dict):
+        module = {}
+    metadata = module.get("metadata") if isinstance(module.get("metadata"), dict) else {}
+    execution = module.get("execution") if isinstance(module.get("execution"), dict) else {}
+    status = str(module.get("status") or metadata.get("status") or "active")
+    enabled = bool(module.get("enabled", status != "draft"))
+    handler = str(module.get("handler") or "").strip()
+    pending_registration = bool(metadata.get("pending_handler_registration"))
+    graph_attached = _module_attached_to_primary_graph(module_id, module)
+    validation_errors = _validate_module_payload(module_id, normalized)
+    dry_run = _module_dry_run_evidence(module_id, normalized)
+    summary = dry_run.get("summary") if isinstance(dry_run.get("summary"), dict) else {}
+    executable_count = int(summary.get("executable_count") or 0)
+    execution_capability = str(execution.get("capability") or "")
+    supervisor_policy_gate = _module_supervisor_policy_gate(module)
+    contract_ready = (
+        status != "draft"
+        and enabled
+        and bool(handler)
+        and handler != "runtime.step_complete"
+        and execution_capability != "ui_only"
+        and not pending_registration
+    )
+    activation_requirements = [
+        {
+            "id": "edit_module_contract",
+            "label": "Edit module contract",
+            "ok": contract_ready,
+            "detail": "enabled non-draft module with an allowlisted executable handler",
+        },
+        {
+            "id": "attach_graph_node",
+            "label": "Attach graph node",
+            "ok": graph_attached,
+            "detail": "active graph references this module",
+        },
+        {
+            "id": "validate_module",
+            "label": "Validate module",
+            "ok": not validation_errors,
+            "detail": "module schema and handler/tool references are valid",
+        },
+        {
+            "id": "module_dry_run_executable",
+            "label": "Dry-run executable path",
+            "ok": executable_count > 0,
+            "detail": "module dry-run has at least one executable step",
+        },
+    ]
+    if supervisor_policy_gate["present"]:
+        missing_outputs = supervisor_policy_gate.get("missing_outputs", [])
+        detail = (
+            "required outputs declared in module output contracts"
+            if not missing_outputs
+            else f"missing supervisor required outputs: {', '.join(str(item) for item in missing_outputs)}"
+        )
+        activation_requirements.append(
+            {
+                "id": "supervisor_policy_outputs",
+                "label": "Supervisor policy outputs",
+                "ok": bool(supervisor_policy_gate["ok"]),
+                "detail": detail,
+            }
+        )
+    ready_for_live_activation = all(bool(item["ok"]) for item in activation_requirements)
+    next_required_action = next((str(item["id"]) for item in activation_requirements if not item["ok"]), "none")
+    return {
+        "module_status": status,
+        "enabled": enabled,
+        "execution_capability": str(execution.get("capability") or ""),
+        "handler": handler,
+        "pending_handler_registration": pending_registration,
+        "management_loaded": module_id in _RUNTIME_MODULE_MANAGEMENT_LOADED,
+        "graph_attached": graph_attached,
+        "executable_count": executable_count,
+        "validation_errors": validation_errors,
+        "activation_requirements": activation_requirements,
+        "ready_for_live_activation": ready_for_live_activation,
+        "next_required_action": next_required_action,
+        "supervisor_policy_gate": supervisor_policy_gate,
+        "activation_status": _module_activation_status(
+            status=status,
+            contract_ready=contract_ready,
+            graph_attached=graph_attached,
+            validation_errors=validation_errors,
+            executable_count=executable_count,
+            ready_for_live_activation=ready_for_live_activation,
+        ),
+        "dry_run_summary": summary,
+    }
+
+
+def _runtime_agent_manifests_payload(graph_id: str | None = None, *, include_unattached: bool = False) -> dict[str, object]:
+    """Merge graph, module, and optional UI descriptors into Live GUI agent manifests."""
+    from agents.core.orchestrator.capabilities import OwnerCatalog
+
+    if graph_id is None:
+        catalog = controller._planning_setup_catalog()
+        config = catalog.graph_config
+    else:
+        config = _load_runtime_graph_config(graph_id)
+        catalog = OwnerCatalog(controller._deps.agent_registry, config,
+                               graph_root=RUNTIME_MODULE_ROOT.parent).snapshot()
+    bindings = catalog.bindings()
+    # Presentation/generated adapters are graph modules too, even though they
+    # do not register an agent.* owner in the capability catalog.
+    active_modules = {_module_id_from_graph_node_module_id(node.module_id) for node in config.nodes}
+    bindings_by_node = {row["node_id"]: row for row in bindings if row["role"] != "pre_execution"}
+    module_root = catalog.graph_root / "modules"
+    modules = _module_payload_by_id(module_root)
+    nodes_by_stage = {str(node.stage): node for node in config.nodes if node.stage}
+    nodes_by_module: dict[str, Any] = {}
+    for node in config.nodes:
+        module_id = _module_id_from_graph_node_module_id(node.module_id)
+        if module_id and module_id not in nodes_by_module:
+            nodes_by_module[module_id] = node
+
+    manifests: list[dict[str, object]] = []
+    seen_modules: set[str] = set()
+    seen_agents: set[str] = set()
+
+    def build_manifest(agent_id: str, label: str, stage: str, module_id: str, order: int,
+                       owner_binding: dict | None = None) -> dict[str, object]:
+        module = modules.get(module_id, {}) if module_id and module_id != "objective" else {}
+        ui, ui_path = _module_ui_payload(module_id, module_root=module_root)
+        node = nodes_by_module.get(module_id) or nodes_by_stage.get(stage)
+        if owner_binding is not None:
+            node = next((value for value in config.nodes if value.id == owner_binding["node_id"]), node)
+        if agent_id not in {"objective", "orchestrator"} and node:
+            order = next(index for index, value in enumerate(config.nodes) if value.id == node.id) + 2
+        metadata = module.get("metadata") if isinstance(module.get("metadata"), dict) else {}
+        execution = module.get("execution") if isinstance(module.get("execution"), dict) else {}
+        safety = module.get("safety") if isinstance(module.get("safety"), dict) else {}
+        runtime_contract = module.get("runtime_contract") if isinstance(module.get("runtime_contract"), dict) else {}
+        binding = owner_binding if owner_binding is not None else (bindings_by_node.get(node.id, {}) if node else {})
+        handler = str(binding.get("handler") or module.get("handler") or (node.handler if node else "") or "runtime.step_complete")
+        status = str(module.get("status") or metadata.get("status") or "active")
+        if agent_id == "objective":
+            capability = "ui_only"
+            kind = "ui_only"
+            enabled = True
+        else:
+            capability = str(execution.get("capability") or "")
+            if not capability:
+                capability = "generated_adapter" if handler == GENERATED_MODULE_HANDLER_ID else "allowlisted_agent" if handler.startswith("agent.") else "ui_only"
+            kind = str(module.get("kind") or (node.kind if node else "") or ("sidecar" if agent_id == "orchestrator" else "agent"))
+            enabled = bool(module.get("enabled", status != "draft"))
+        manifest_label = str(ui.get("label") or module.get("label") or label or module_id or agent_id)
+        short = str(ui.get("short") or _agent_manifest_short(agent_id, manifest_label))
+        icon = str(ui.get("icon") or _agent_manifest_icon_path(agent_id))
+        chat = ui.get("chat") if isinstance(ui.get("chat"), dict) else runtime_contract.get("chat_policy") if isinstance(runtime_contract.get("chat_policy"), dict) else {}
+        installed = _installed_agent_module(module_id)
+        return {
+            "id": agent_id,
+            "label": manifest_label,
+            "short": short,
+            "stage": stage,
+            "module_id": module_id,
+            "handler": handler,
+            "kind": kind,
+            "enabled": enabled,
+            "status": status,
+            "category": _module_category(module) if module else ("ui" if agent_id == "objective" else "runtime"),
+            "execution_capability": capability,
+            "icon": short[:1] or "A",
+            "iconPath": icon,
+            "chat": chat,
+            "cards": ui.get("cards", []) if isinstance(ui.get("cards"), list) else [],
+            "report_sections": ui.get("report_sections", []) if isinstance(ui.get("report_sections"), list) else [],
+            "renderer": ui.get("renderer", {}) if isinstance(ui.get("renderer"), dict) else {},
+            "bridge_refs": module.get("device_bridge_contracts", []) if isinstance(module.get("device_bridge_contracts"), list) else [],
+            "tools": module.get("tools", []) if isinstance(module.get("tools"), list) else [],
+            "output_contracts": module.get("output_contracts", []) if isinstance(module.get("output_contracts"), list) else [],
+            "io_contract": module.get("io_contract", {}) if isinstance(module.get("io_contract"), dict) else {},
+            "runtime_contract": runtime_contract,
+            "implementation": installed.describe() if installed else None,
+            "activation": {"source": "applied_graph", "included": bool(binding) or module_id in active_modules or agent_id in {"objective", "orchestrator"},
+                           "owner": binding.get("owner", ""), "role": binding.get("role", "core")},
+            "safety": safety,
+            "editable": bool(module.get("editable", True)) if module else False,
+            "graph_node_id": node.id if node else "",
+            "graph_node_kind": node.kind if node else "",
+            "graph_stage": node.stage if node else stage,
+            "graph_position": node.position if node else {},
+            "module_path": str(module_root / module_id / "module.yaml") if module_id and module_id != "objective" else "",
+            "ui_path": ui_path,
+            "source": "graph_module_ui_manifest",
+            "order": order,
+        }
+
+    for order, item in enumerate(LIVE_AGENT_DEFINITIONS):
+        agent_id = str(item.get("agent_id") or item.get("module_id") or "").strip()
+        module_id = str(item.get("module_id") or agent_id).strip()
+        if agent_id not in {"objective", "orchestrator"} and module_id not in active_modules:
+            continue
+        manifest = build_manifest(
+            agent_id=agent_id,
+            label=str(item.get("label") or agent_id),
+            stage=str(item.get("stage") or agent_id),
+            module_id=module_id,
+            order=order,
+        )
+        manifests.append(manifest)
+        seen_agents.add(agent_id)
+        if module_id and module_id != "objective":
+            seen_modules.add(module_id)
+
+    for module_id, module in sorted(modules.items()):
+        if module_id in seen_modules or (module_id not in active_modules and not include_unattached):
+            continue
+        agent_id = module_id
+        node = nodes_by_module.get(module_id)
+        stage = str(node.stage or module_id) if node else module_id
+        manifest = build_manifest(
+            agent_id=agent_id,
+            label=str(module.get("label") or module_id),
+            stage=stage,
+            module_id=module_id,
+            order=next((index for index, value in enumerate(config.nodes) if value.id == node.id), len(manifests)) if node else len(manifests),
+        )
+        manifest["id"] = agent_id if agent_id not in seen_agents else f"{agent_id}_module"
+        manifests.append(manifest)
+        seen_agents.add(str(manifest["id"]))
+
+    # Pre-execution owners can be admitted by another module without owning a
+    # standalone node. Their installed frontend must follow that same binding.
+    represented_owners = {str(item["handler"]).removeprefix("agent.") for item in manifests}
+    for binding in bindings:
+        installed = controller._deps.agent_registry.module_for_agent(binding["owner"])
+        if installed is None or binding["owner"] in represented_owners:
+            continue
+        module_id = installed.module_id
+        agent_id = module_id if module_id not in seen_agents else f"{module_id}_owner"
+        manifests.append(build_manifest(agent_id, module_id, module_id,
+                                        module_id, len(manifests), owner_binding=binding))
+        represented_owners.add(binding["owner"])
+        seen_agents.add(agent_id)
+
+    categories: dict[str, int] = {}
+    for item in manifests:
+        category = str(item.get("category") or "runtime")
+        categories[category] = categories.get(category, 0) + 1
+    return {
+        "ok": True,
+        "graph_id": config.id,
+        "graph_version": config.version,
+        "agents": sorted(manifests, key=lambda item: item["order"]),
+        "count": len(manifests),
+        "categories": categories,
+        "source_endpoints": ["/api/graphs/atr_closed_loop", "/api/modules", "/api/runtime/agent-manifests"],
+    }
+
+
+def _bridge_workspace_path(workspace: str, bridge_id: str = "") -> str:
+    """Normalize legacy workspace aliases to the current GUI routes."""
+    clean = str(workspace or "").strip()
+    aliases = {
+        "/windows-equipment": "/equipment/windows",
+    }
+    if clean in aliases:
+        return aliases[clean]
+    if clean:
+        return clean
+    defaults = {
+        "windows_pyautogui_bridge": "/equipment/windows",
+        "lerobot_bridge": "/lerobot",
+        "camera_utm_bridge": "/lerobot",
+        "prusa_bridge": "/printer",
+    }
+    return defaults.get(str(bridge_id or "").strip(), "")
+
+
+def _bridge_endpoint_defaults(bridge_id: str, workspace: str) -> tuple[str, str]:
+    """Return read-only health and preflight endpoints for one known bridge."""
+    mapping = {
+        "prusa_bridge": ("/api/printer/status", "/api/printer/spc-readiness"),
+        "lerobot_bridge": ("/api/lerobot/config", "/api/lerobot/profiles/validate"),
+        "windows_pyautogui_bridge": ("/api/equipment/windows/readiness", "/api/equipment/windows/live-preflight"),
+        "camera_utm_bridge": ("/api/lerobot/config", "/api/lerobot/camera/test"),
+    }
+    return mapping.get(str(bridge_id or "").strip(), ("/api/devices/state", workspace or "/api/devices/state"))
+
+
+def _bridge_evidence_defaults(bridge_id: str, tools: list[str]) -> list[str]:
+    """Return default evidence contracts for graph-declared bridges."""
+    mapping = {
+        "prusa_bridge": ["printer_prepare.v1", "printer_runtime.v1", "slicer_artifact.v1"],
+        "lerobot_bridge": ["robot_task_result.v1", "lerobot_session.v1", "camera_capture.v1"],
+        "windows_pyautogui_bridge": ["equipment_result.v1", "utm_data_ready.v1", "screen_evidence.v1"],
+        "camera_utm_bridge": ["camera_capture.v1", "vision_signal.v1", "utm_result.v1"],
+    }
+    defaults = list(mapping.get(str(bridge_id or "").strip(), []))
+    for tool in tools:
+        clean = str(tool or "").strip()
+        if not clean:
+            continue
+        contract = f"tool:{clean}"
+        if contract not in defaults:
+            defaults.append(contract)
+    return defaults
+
+
+def _normalize_bridge_action(
+    action: dict[str, Any],
+    *,
+    workspace: str,
+    source: str = "graph.metadata.device_bridges.actions",
+) -> dict[str, object]:
+    """Normalize graph-supplied bridge action metadata for GUI consumers."""
+    action_id = str(action.get("id") or action.get("action") or "").strip() or "action"
+    endpoint = str(action.get("endpoint") or action.get("url") or workspace or "").strip()
+    method = str(action.get("method") or "GET").strip().upper() or "GET"
+    kind = str(action.get("kind") or ("navigation" if endpoint and not endpoint.startswith("/api/") else "api")).strip()
+    read_only = bool(action.get("read_only", method == "GET" and not bool(action.get("requires_confirmation"))))
+    requires_confirmation = bool(action.get("requires_confirmation", False))
+    live_card_runnable = (
+        action_id == "open_workspace"
+        or (read_only and method == "GET" and endpoint.startswith("/api/"))
+    )
+    handoff_required = not live_card_runnable
+    return {
+        "id": action_id,
+        "label": str(action.get("label") or action_id.replace("_", " ").title()),
+        "kind": kind,
+        "method": method,
+        "endpoint": endpoint,
+        "requires_confirmation": requires_confirmation,
+        "read_only": read_only,
+        "tool": str(action.get("tool") or ""),
+        "mode_support": action.get("mode_support", ["test", "live"]) if isinstance(action.get("mode_support", ["test", "live"]), list) else ["test", "live"],
+        "source": source,
+        "live_card_runnable": live_card_runnable,
+        "handoff_required": handoff_required,
+        "handoff_workspace": workspace if handoff_required else "",
+        "blocked_reason": "workspace_handoff_required" if handoff_required else "",
+    }
+
+
+def _clean_bridge_action_descriptor(action: dict[str, Any], *, workspace: str) -> dict[str, Any]:
+    """Validate and normalize an editable bridge action descriptor for graph metadata."""
+    action_id = re.sub(r"[^a-zA-Z0-9_.:-]+", "_", str(action.get("id") or action.get("action") or "").strip())[:80]
+    if not action_id:
+        raise HTTPException(status_code=400, detail="Bridge action id is required.")
+    label = str(action.get("label") or action_id.replace("_", " ").title()).strip()[:120]
+    method = str(action.get("method") or "GET").strip().upper()
+    if method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+        raise HTTPException(status_code=400, detail=f"Unsupported bridge action method={method}")
+    endpoint = str(action.get("endpoint") or action.get("url") or "").strip()
+    if not endpoint:
+        endpoint = workspace
+    if not endpoint.startswith("/"):
+        raise HTTPException(status_code=400, detail="Bridge action endpoint must be a local absolute path.")
+    kind = str(action.get("kind") or ("api" if endpoint.startswith("/api/") else "navigation")).strip().lower()
+    if kind not in {"api", "navigation", "workspace"}:
+        raise HTTPException(status_code=400, detail=f"Unsupported bridge action kind={kind}")
+    if kind == "api" and not endpoint.startswith("/api/"):
+        raise HTTPException(status_code=400, detail="API bridge actions must target an /api/ endpoint.")
+    if kind in {"navigation", "workspace"} and method != "GET":
+        raise HTTPException(status_code=400, detail="Navigation bridge actions must use GET.")
+    requires_confirmation = bool(action.get("requires_confirmation", method != "GET"))
+    read_only = bool(action.get("read_only", method == "GET" and not requires_confirmation))
+    mode_support = action.get("mode_support", ["test", "live"])
+    if not isinstance(mode_support, list):
+        mode_support = ["test", "live"]
+    clean_modes = []
+    for mode in mode_support:
+        clean_mode = str(mode or "").strip()
+        if clean_mode and clean_mode not in clean_modes:
+            clean_modes.append(clean_mode)
+    if not clean_modes:
+        clean_modes = ["test", "live"]
+    descriptor: dict[str, Any] = {
+        "id": action_id,
+        "label": label or action_id,
+        "kind": kind,
+        "method": method,
+        "endpoint": endpoint,
+        "requires_confirmation": requires_confirmation,
+        "read_only": read_only,
+        "mode_support": clean_modes,
+    }
+    tool = str(action.get("tool") or "").strip()
+    if tool:
+        descriptor["tool"] = tool
+    return descriptor
+
+
+def _save_runtime_bridge_action_descriptor(bridge_id: str, req: RuntimeBridgeActionSaveRequest) -> dict[str, object]:
+    """Persist one editable bridge action descriptor into active graph metadata."""
+    if controller.snapshot().get("is_running"):
+        raise HTTPException(status_code=409, detail="Cannot modify bridge descriptors while a run is active.")
+    graph_id = str(req.graph_id or PRIMARY_RUNTIME_GRAPH_ID).strip() or PRIMARY_RUNTIME_GRAPH_ID
+    config = _load_runtime_graph_config(graph_id)
+    payload = config.model_dump(mode="json")
+    metadata = payload.setdefault("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+        payload["metadata"] = metadata
+    bridges = metadata.get("device_bridges")
+    if not isinstance(bridges, list):
+        bridges = []
+        metadata["device_bridges"] = bridges
+
+    clean_bridge_id = str(bridge_id or "").strip()
+    target_bridge: dict[str, Any] | None = None
+    for item in bridges:
+        if isinstance(item, dict) and str(item.get("id") or "").strip() == clean_bridge_id:
+            target_bridge = item
+            break
+    if target_bridge is None:
+        raise HTTPException(status_code=404, detail=f"Unknown bridge_id={bridge_id}")
+
+    workspace = _bridge_workspace_path(str(target_bridge.get("workspace") or ""), clean_bridge_id)
+    descriptor = _clean_bridge_action_descriptor(dict(req.action), workspace=workspace)
+    actions = target_bridge.get("actions")
+    if not isinstance(actions, list):
+        actions = []
+        target_bridge["actions"] = actions
+    replaced = False
+    for index, item in enumerate(actions):
+        if isinstance(item, dict) and str(item.get("id") or item.get("action") or "").strip() == descriptor["id"]:
+            actions[index] = descriptor
+            replaced = True
+            break
+    if not replaced:
+        actions.append(descriptor)
+
+    try:
+        updated_config = GraphConfig.model_validate(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid graph metadata after bridge action save: {exc}") from exc
+
+    compiler = _runtime_graph_compiler(updated_config)
+    errors = compiler.validate()
+    if errors:
+        raise HTTPException(status_code=400, detail={"message": "Graph validation failed after bridge action save.", "errors": errors})
+
+    version = _graph_version_store(graph_id).save_version(
+        graph_id,
+        updated_config.model_dump(mode="json"),
+        reason=req.reason or "runtime_bridge_action_save",
+        author=req.author or "operator",
+    )
+    _graph_version_store(graph_id).write_active(updated_config.model_dump(mode="json"))
+    normalized_bridges = _normalized_bridge_manifests(updated_config.metadata if isinstance(updated_config.metadata, dict) else {}, {})
+    normalized_bridge = next((item for item in normalized_bridges if item.get("id") == clean_bridge_id), {})
+    normalized_action = next(
+        (
+            action
+            for action in normalized_bridge.get("actions", [])  # type: ignore[union-attr]
+            if isinstance(action, dict) and action.get("id") == descriptor["id"]
+        ),
+        _normalize_bridge_action(descriptor, workspace=workspace),
+    )
+    return {
+        "ok": True,
+        "graph_id": graph_id,
+        "bridge_id": clean_bridge_id,
+        "action": normalized_action,
+        "bridge": normalized_bridge,
+        "version": version,
+        "execution_scope": "descriptor_only",
+        "message": "Bridge action descriptor saved. Hardware execution remains owned by the bridge workspace and Guardian/device gates.",
+    }
+
+
+def _bridge_action_defaults(bridge_id: str, *, workspace: str, health_endpoint: str, preflight_endpoint: str) -> list[dict[str, object]]:
+    """Return a standard action set when graph metadata does not declare one."""
+    return [
+        _normalize_bridge_action(
+            {
+                "id": "open_workspace",
+                "label": "Open Workspace",
+                "kind": "navigation",
+                "method": "GET",
+                "endpoint": workspace,
+                "read_only": True,
+            },
+            workspace=workspace,
+            source="backend.standard_bridge_action",
+        ),
+        _normalize_bridge_action(
+            {
+                "id": "health_check",
+                "label": "Health Check",
+                "kind": "api",
+                "method": "GET",
+                "endpoint": health_endpoint,
+                "read_only": True,
+            },
+            workspace=workspace,
+            source="backend.standard_bridge_action",
+        ),
+        _normalize_bridge_action(
+            {
+                "id": "preflight",
+                "label": "Preflight",
+                "kind": "api",
+                "method": "POST" if preflight_endpoint.startswith("/api/") and bridge_id in {"lerobot_bridge", "windows_pyautogui_bridge", "camera_utm_bridge"} else "GET",
+                "endpoint": preflight_endpoint,
+                "read_only": bridge_id not in {"lerobot_bridge", "windows_pyautogui_bridge", "camera_utm_bridge"},
+            },
+            workspace=workspace,
+            source="backend.standard_bridge_action",
+        ),
+    ]
+
+
+def _normalized_bridge_manifests(metadata: dict[str, Any], health: dict[str, Any] | None = None) -> list[dict[str, object]]:
+    """Normalize graph bridge metadata into the shared GUI/IDE registry shape."""
+    bridges = metadata.get("device_bridges") if isinstance(metadata.get("device_bridges"), list) else []
+    health = health if isinstance(health, dict) else {}
+    normalized: list[dict[str, object]] = []
+    for index, item in enumerate(bridges):
+        bridge = item if isinstance(item, dict) else {}
+        bridge_id = str(bridge.get("id") or f"bridge_{index + 1}").strip()
+        if not bridge_id:
+            continue
+        workspace = _bridge_workspace_path(str(bridge.get("workspace") or ""), bridge_id)
+        tools = bridge.get("tools", []) if isinstance(bridge.get("tools"), list) else []
+        health_default, preflight_default = _bridge_endpoint_defaults(bridge_id, workspace)
+        health_endpoint = str(bridge.get("health_endpoint") or health_default)
+        preflight_endpoint = str(bridge.get("preflight_endpoint") or preflight_default)
+        raw_actions = bridge.get("actions", []) if isinstance(bridge.get("actions"), list) else []
+        actions = [
+            _normalize_bridge_action(action, workspace=workspace, source="graph.metadata.device_bridges.actions")
+            for action in raw_actions
+            if isinstance(action, dict)
+        ]
+        if not actions:
+            actions = _bridge_action_defaults(
+                bridge_id,
+                workspace=workspace,
+                health_endpoint=health_endpoint,
+                preflight_endpoint=preflight_endpoint,
+            )
+        evidence_contracts = bridge.get("evidence_contracts", []) if isinstance(bridge.get("evidence_contracts"), list) else []
+        if not evidence_contracts:
+            evidence_contracts = _bridge_evidence_defaults(bridge_id, [str(tool) for tool in tools])
+        normalized.append(
+            {
+                "id": bridge_id,
+                "label": str(bridge.get("label") or bridge_id),
+                "workspace": workspace,
+                "tools": tools,
+                "config": str(bridge.get("config") or ""),
+                "live_boundary": str(bridge.get("live_boundary") or ""),
+                "health_endpoint": health_endpoint,
+                "preflight_endpoint": preflight_endpoint,
+                "actions": actions,
+                "custom_action_count": len(raw_actions),
+                "live_card_runnable_action_count": sum(1 for action in actions if action.get("live_card_runnable")),
+                "evidence_contracts": evidence_contracts,
+                "health": health.get(bridge_id, {}) if isinstance(health, dict) else {},
+                "source": "graph.metadata.device_bridges",
+                "order": index,
+            }
+        )
+    return normalized
+
+
+def _runtime_bridge_registry_payload(graph_id: str = PRIMARY_RUNTIME_GRAPH_ID) -> dict[str, object]:
+    """Return device bridge manifests derived from the active graph metadata."""
+    config = _load_runtime_graph_config(graph_id)
+    metadata = config.metadata if isinstance(config.metadata, dict) else {}
+    device_state = _device_state_payload()
+    health = device_state.get("health", {}) if isinstance(device_state.get("health"), dict) else {}
+    normalized = _normalized_bridge_manifests(metadata, health)
+    return {
+        "ok": True,
+        "graph_id": config.id,
+        "graph_version": config.version,
+        "bridges": normalized,
+        "count": len(normalized),
+        "source_endpoints": ["/api/graphs/atr_closed_loop", "/api/bridges", "/api/devices/state"],
+    }
+
+
+def _graph_config_digest(config: GraphConfig) -> str:
+    """Return a stable digest for dry-run gating against the active graph payload."""
+    payload = json.dumps(config.model_dump(mode="json"), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _graph_version_evidence(graph_id: str, config: GraphConfig) -> dict[str, object]:
+    """Return traceable graph version/hash evidence for run and event payloads."""
+    graph_hash = _graph_config_digest(config)
+    matched_version: dict[str, object] = {}
+    for item in _graph_version_store(graph_id).list_versions(graph_id):
+        version_id = str(item.get("version_id") or "")
+        if not version_id:
+            continue
+        try:
+            version = _graph_version_store(graph_id).read_version(graph_id, version_id)
+            version_graph = GraphConfig.model_validate(version.get("graph") or {})
+        except Exception:
+            continue
+        if _graph_config_digest(version_graph) == graph_hash:
+            matched_version = version
+            break
+    metadata = matched_version.get("metadata") if isinstance(matched_version.get("metadata"), dict) else {}
+    return {
+        "graph_id": graph_id,
+        "graph_hash": graph_hash,
+        "graph_version": str(matched_version.get("version_id") or metadata.get("version_id") or "active"),
+        "graph_version_id": str(matched_version.get("version_id") or metadata.get("version_id") or ""),
+        "graph_version_path": str(matched_version.get("path") or ""),
+        "graph_version_created_at": str(metadata.get("created_at") or ""),
+        "graph_version_author": str(metadata.get("author") or ""),
+        "graph_version_reason": str(metadata.get("reason") or ""),
+    }
+
+
+def _record_graph_dry_run(
+    *,
+    config: GraphConfig,
+    options: RuntimeGraphDryRunRequest,
+    sequence: list[dict[str, object]],
+    compiled_graph: dict[str, object],
+) -> dict[str, object]:
+    """Store the latest successful active-config dry-run evidence for live run gates."""
+    record = {
+        "graph_id": config.id,
+        "digest": _graph_config_digest(config),
+        "dry_run_at": datetime.now(timezone.utc).isoformat(),
+        "start_stage": options.start_stage,
+        "max_steps": options.max_steps,
+        "step_count": len(sequence),
+        "compiled_graph": compiled_graph,
+        "live_gate_recorded": True,
+    }
+    _RUNTIME_GRAPH_DRY_RUN_RECORDS[config.id] = record
+    return record
+
+
+def _graph_dry_run_evidence(
+    *,
+    config: GraphConfig,
+    compiled_graph: dict[str, object],
+    options: RuntimeGraphDryRunRequest | None = None,
+    record_live_gate: bool = False,
+) -> dict[str, object]:
+    """Build non-device graph dry-run evidence, optionally recording the live gate."""
+    run_options = options or RuntimeGraphDryRunRequest(start_stage="idle", max_steps=24)
+    sequence = _graph_dry_run_sequence(config, max_steps=run_options.max_steps, start_stage=run_options.start_stage)
+    if record_live_gate:
+        dry_run_record = _record_graph_dry_run(
+            config=config,
+            options=run_options,
+            sequence=sequence,
+            compiled_graph=compiled_graph,
+        )
+    else:
+        dry_run_record = {
+            "graph_id": config.id,
+            "digest": _graph_config_digest(config),
+            "dry_run_at": datetime.now(timezone.utc).isoformat(),
+            "start_stage": run_options.start_stage,
+            "max_steps": run_options.max_steps,
+            "step_count": len(sequence),
+            "compiled_graph": compiled_graph,
+            "draft": True,
+            "live_gate_recorded": False,
+        }
+    return {
+        "ok": True,
+        "graph_id": config.id,
+        "errors": [],
+        "start_stage": run_options.start_stage,
+        "sequence": sequence,
+        "compiled_graph": compiled_graph,
+        "dry_run_record": dry_run_record,
+    }
+
+
+def _graph_live_dry_run_gate(config: GraphConfig) -> tuple[bool, dict[str, object]]:
+    """Return whether the active graph has a matching dry-run record for live execution."""
+    record = _RUNTIME_GRAPH_DRY_RUN_RECORDS.get(config.id, {})
+    if not record:
+        return False, {}
+    return record.get("digest") == _graph_config_digest(config), record
+
+
+def _graph_list_item(config: GraphConfig, path: Path) -> dict[str, object]:
+    """Return one graph list entry for Runtime IDE selection."""
+    metadata = config.metadata if isinstance(config.metadata, dict) else {}
+    return {
+        "id": config.id,
+        "name": config.name,
+        "version": config.version,
+        "path": str(path),
+        "primary": config.id == PRIMARY_RUNTIME_GRAPH_ID,
+        "workspace": metadata.get("workspace", ""),
+        "template": metadata.get("template", config.id != PRIMARY_RUNTIME_GRAPH_ID),
+        "executable_from_runtime_ide": bool(
+            metadata.get("executable_from_runtime_ide", config.id == PRIMARY_RUNTIME_GRAPH_ID)
+        ),
+        "node_count": len(config.nodes),
+        "transition_count": len(config.transitions),
+    }
+
+
+def _module_config_payload(module_id: str) -> dict[str, object]:
+    """Read one allowlisted module config by id."""
+    safe_module = module_id.strip().replace("/", "_").replace("..", "_")
+    module_path = RUNTIME_MODULE_ROOT / safe_module / "module.yaml"
+    if not module_path.exists():
+        raise HTTPException(status_code=404, detail=f"Unknown module_id={module_id}")
+    raw = read_yaml(module_path) or {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _module_category(module: dict[str, Any]) -> str:
+    """Return an operator-facing module category for catalog grouping."""
+    metadata = module.get("metadata") if isinstance(module.get("metadata"), dict) else {}
+    explicit = str(module.get("category") or metadata.get("category") or "").strip()
+    if explicit:
+        return explicit
+    module_id = str(module.get("id") or "").strip().lower()
+    id_categories = {
+        "orchestrator": "orchestration",
+        "design": "design",
+        "specimen": "fabrication",
+        "specimen_making": "fabrication",
+        "vision": "vision",
+        "manipulation": "manipulation",
+        "equipment": "equipment",
+        "analysis": "analysis",
+        "bo": "optimization",
+        "knowledge": "knowledge",
+        "guardian": "guardian",
+    }
+    if module_id in id_categories:
+        return id_categories[module_id]
+    handler = str(module.get("handler") or "")
+    tools = module.get("tools") if isinstance(module.get("tools"), list) else []
+    if any(str(tool).startswith("printer.") or str(tool).startswith("geometry.") for tool in tools):
+        return "fabrication"
+    if any(str(tool).startswith("lerobot.") or str(tool).startswith("robot.") for tool in tools):
+        return "robotics"
+    if any(str(tool).startswith("equipment.") or str(tool).startswith("utm.") for tool in tools):
+        return "lab-equipment"
+    if any(str(tool).startswith("experiment.") for tool in tools):
+        return "analysis-optimization"
+    return "runtime"
+
+
+def _module_list_item(path: Path) -> dict[str, object]:
+    """Return one catalog item for Runtime IDE module listing."""
+    try:
+        raw = read_yaml(path) or {}
+    except (OSError, yaml.YAMLError):
+        raw = {}
+    module = raw.get("module", {}) if isinstance(raw, dict) else {}
+    module = module if isinstance(module, dict) else {}
+    metadata = module.get("metadata") if isinstance(module.get("metadata"), dict) else {}
+    internal_graph = module.get("internal_graph") if isinstance(module.get("internal_graph"), list) else []
+    pre_execution = module.get("pre_execution") if isinstance(module.get("pre_execution"), list) else []
+    tools = module.get("tools") if isinstance(module.get("tools"), list) else []
+    return {
+        "id": module.get("id", path.parent.name),
+        "label": module.get("label", path.parent.name),
+        "handler": module.get("handler", ""),
+        "status": module.get("status", "active"),
+        "enabled": bool(module.get("enabled", True)),
+        "category": _module_category(module),
+        "path": str(path),
+        "tools": tools,
+        "tool_count": len(tools),
+        "pre_execution_count": len(pre_execution),
+        "internal_graph_count": len(internal_graph),
+        "source_path": metadata.get("python_source_path", ""),
+        "source_filename": metadata.get("source_filename", ""),
+        "pending_handler_registration": bool(metadata.get("pending_handler_registration", False)),
+        "generated_adapter_approved": bool(metadata.get("generated_adapter_approved", False)),
+        "generated_adapter_handler_id": metadata.get("generated_adapter_handler_id", ""),
+        "generated_adapter_path": metadata.get("transformed_python_source_path") or metadata.get("transformed_source_path") or "",
+        "runtime_contract": module.get("runtime_contract", {}) if isinstance(module.get("runtime_contract"), dict) else {},
+        "device_bridge_contracts": module.get("device_bridge_contracts", []) if isinstance(module.get("device_bridge_contracts"), list) else [],
+        "output_contracts": module.get("output_contracts", []) if isinstance(module.get("output_contracts"), list) else [],
+        "io_contract": module.get("io_contract", {}) if isinstance(module.get("io_contract"), dict) else {},
+    }
+
+
+def _runtime_module_template_payload(template_kind: str, req: RuntimeModuleTemplateRequest, safe_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build an inactive draft module template plus its optional ui.yaml payload."""
+    kind = str(template_kind or "agent").strip().lower().replace("_", "-")
+    if kind not in {"agent", "ui-only", "bridge"}:
+        raise HTTPException(status_code=400, detail=f"Unsupported module template kind={template_kind}")
+    category = _module_designer_category(req.category or ("runtime" if kind == "ui-only" else kind))
+    intended_capability = "bridge" if kind == "bridge" else "allowlisted_agent" if kind == "agent" else "ui_only"
+    created_at = datetime.now(timezone.utc).isoformat()
+    label = str(req.label or safe_id).strip() or safe_id
+    short = _agent_manifest_short(safe_id, label)
+    notes = str(req.notes or "Inactive draft module template. Configure contracts, UI descriptors, graph attachment, and validation before enabling.").strip()
+    payload: dict[str, Any] = {
+        "module": {
+            "id": safe_id,
+            "label": label,
+            "status": "draft",
+            "enabled": False,
+            "handler": "runtime.step_complete",
+            "llm_role": "",
+            "editable": True,
+            "kind": "ui_only" if kind == "ui-only" else kind,
+            "category": category,
+            "metadata": {
+                "created_from": f"runtime_ide_{kind}_template",
+                "created_at": created_at,
+                "author": req.author,
+                "pending_handler_registration": True,
+                "generated_adapter_approved": False,
+                "generated_adapter_handler_id": GENERATED_MODULE_HANDLER_ID,
+                "template_kind": kind,
+                "draft_preview_only": True,
+            },
+            "execution": {
+                "capability": "ui_only",
+                "intended_capability": intended_capability,
+                "active": False,
+            },
+            "graph": {
+                "attached": False,
+                "stage": None,
+                "node_id": None,
+            },
+            "safety": {
+                "live_requires_validation": True,
+                "dry_run_supported": True,
+                "requires_human_approval": True,
+            },
+            "tools": [],
+            "pre_execution": [],
+            "internal_graph": [
+                {"id": "01_define_contract", "label": "Define IO Contract", "kind": "draft_step"},
+                {"id": "02_configure_ui", "label": "Configure UI Descriptor", "kind": "draft_step"},
+                {"id": "03_attach_graph_after_validation", "label": "Attach Graph After Validation", "kind": "draft_step"},
+            ],
+            "io_contract": {
+                "input": "Draft only; not connected to OrchestratorState.",
+                "output": "Draft only; no AgentResult emitted until enabled.",
+            },
+            "output_contracts": [],
+            "runtime_contract": {
+                "draft_preview_only": True,
+                "execution_blocked_until_graph_attached": True,
+            },
+            "device_bridge_contracts": [],
+            "ui": {
+                "cards": [],
+                "report_sections": [],
+            },
+            "notes": notes,
+        }
+    }
+    ui_payload: dict[str, Any] = {
+        "ui": {
+            "icon": _agent_manifest_icon_path(safe_id),
+            "short": short,
+            "report_title": label,
+            "chat": {"mode": "open_on_demand"},
+            "cards": [],
+            "report_sections": [],
+            "empty_state": f"{label} is an inactive draft. Configure UI and graph attachment before enabling.",
+        }
+    }
+    return payload, ui_payload
+
+
+def _safe_source_filename(filename: str) -> str:
+    """Return a safe Python source filename for module designer uploads."""
+    clean = Path(str(filename or "handler.py")).name.strip() or "handler.py"
+    safe = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in clean)
+    if not safe.endswith(".py"):
+        safe += ".py"
+    return safe
+
+
+def _extract_json_object(text: str) -> dict[str, Any]:
+    """Extract the first JSON object from an LLM response."""
+    clean = str(text or "").strip()
+    if not clean:
+        raise ValueError("empty LLM response")
+    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", clean, re.DOTALL | re.IGNORECASE)
+    if fence:
+        clean = fence.group(1).strip()
+    else:
+        start = clean.find("{")
+        end = clean.rfind("}")
+        if start >= 0 and end > start:
+            clean = clean[start : end + 1]
+    data = json.loads(clean)
+    if not isinstance(data, dict):
+        raise ValueError("LLM response JSON must be an object")
+    return data
+
+
+def _module_designer_category(value: str) -> str:
+    """Normalize LLM/user category names for catalog grouping."""
+    clean = re.sub(r"[^a-z0-9_-]+", "-", str(value or "").strip().lower()).strip("-")
+    aliases = {
+        "3dp": "fabrication",
+        "printer": "fabrication",
+        "printing": "fabrication",
+        "robot": "manipulation",
+        "robotics": "manipulation",
+        "lab-equipment": "equipment",
+        "lab": "equipment",
+        "bo": "optimization",
+        "mbo": "optimization",
+        "safety": "guardian",
+    }
+    return aliases.get(clean, clean or "custom")
+
+
+def _registered_tool_names() -> set[str]:
+    """Return tool registry names without letting registry failures break module design."""
+    try:
+        return set(controller._deps.agent_context.tools.list_tools())
+    except Exception:
+        return set()
+
+
+def _safe_step_id(value: str, fallback: str) -> str:
+    """Return a module-step-safe id."""
+    clean = re.sub(r"[^A-Za-z0-9_-]+", "_", str(value or "").strip()).strip("_")
+    return clean or fallback
+
+
+def _normalize_designer_steps(
+    raw_steps: Any,
+    *,
+    default_handler: str,
+    handler_registry: set[str],
+) -> list[dict[str, object]]:
+    """Normalize LLM-generated internal steps into ModuleStep-compatible dictionaries."""
+    if not isinstance(raw_steps, list):
+        raw_steps = []
+    steps: list[dict[str, object]] = []
+    for index, item in enumerate(raw_steps[:8], start=1):
+        if not isinstance(item, dict):
+            continue
+        step_id = _safe_step_id(str(item.get("id") or item.get("name") or ""), f"step_{index:02d}")
+        label = str(item.get("label") or item.get("name") or step_id).strip() or step_id
+        kind = str(item.get("kind") or "internal_step").strip() or "internal_step"
+        step: dict[str, object] = {"id": step_id, "label": label, "kind": kind}
+        handler = str(item.get("handler") or "").strip()
+        if handler and handler in handler_registry:
+            step["handler"] = handler
+        steps.append(step)
+    if steps:
+        return steps
+    return [
+        {"id": "01_review_inputs", "label": "Review Inputs", "kind": "internal_step"},
+        {"id": "02_execute_protocol_adapter", "label": "Execute Protocol Adapter", "kind": "internal_step", "handler": default_handler},
+        {"id": "03_emit_agent_result", "label": "Emit AgentResult", "kind": "internal_step"},
+    ]
+
+
+def _module_designer_system_prompt() -> str:
+    """Return the fixed system prompt used by the Module Designer model."""
+    return (
+        "You are the AX4LAB Runtime IDE Module Designer. Convert one uploaded Python module "
+        "into an AX4LAB internal module adapter. Return only strict JSON. "
+        "The generated file must respect the AX4LAB communication contract: async run(state: "
+        "OrchestratorState, ctx: AgentContext) -> AgentResult, no top-level side effects, no "
+        "hardware/network action during import, structured errors, and all tool/device work routed "
+        "through ctx.tools or existing allowlisted handlers. Classify the module category. "
+        "Do not invent unregistered handler ids; if execution needs new Python registration, keep "
+        "handler as runtime.step_complete and explain pending_handler_registration in notes."
+    )
+
+
+def _module_designer_user_prompt(
+    *,
+    req: RuntimeModuleCreateRequest,
+    safe_id: str,
+    source_excerpt: str,
+    source_truncated: bool,
+    handler_names: list[str],
+    tool_names: list[str],
+) -> str:
+    """Build the bounded prompt for Python-to-AX4LAB module conversion."""
+    return json.dumps(
+        {
+            "task": "convert_python_file_to_atr_internal_module",
+            "module_id": safe_id,
+            "requested_label": req.label,
+            "requested_category": req.category,
+            "requested_handler": req.handler,
+            "requested_llm_role": req.llm_role,
+            "operator_notes": req.notes,
+            "source_filename": req.source_filename,
+            "source_truncated_for_prompt": source_truncated,
+            "atr_protocol_contract": {
+                "adapter_signature": "async run(state: OrchestratorState, ctx: AgentContext) -> AgentResult",
+                "return_type": "agents.base_agent.AgentResult",
+                "state_type": "orchestrator.state.OrchestratorState",
+                "tool_access": "ctx.tools.call(tool_name, payload)",
+                "no_import_side_effects": True,
+                "output_rule": "AgentResult.data must be JSON-serializable and merge-safe",
+            },
+            "allowed_handlers": handler_names[:64],
+            "registered_tools": tool_names[:160],
+            "required_json_schema": {
+                "label": "short operator label",
+                "category": "one of orchestration/design/fabrication/vision/manipulation/equipment/analysis/optimization/knowledge/guardian/runtime/custom or a concise custom slug",
+                "handler": "one allowed handler id, usually runtime.step_complete unless an existing agent handler is appropriate",
+                "llm_role": "optional task route hint",
+                "tools": ["registered tool names only"],
+                "internal_graph": [{"id": "01_step", "label": "Step label", "kind": "internal_step", "handler": "optional allowed handler"}],
+                "notes": "operator-facing transformation summary",
+                "transformed_source": "complete Python source for the AX4LAB adapter file",
+            },
+            "uploaded_python_source": source_excerpt,
+        },
+        ensure_ascii=False,
+    )
+
+
+async def _transform_module_source_with_model(req: RuntimeModuleCreateRequest, safe_id: str) -> dict[str, Any]:
+    """Use the active inference backend to transform uploaded Python into AX4LAB module JSON."""
+    source_text = str(req.source_text or "")
+    if not source_text.strip():
+        raise HTTPException(status_code=400, detail="Module Designer requires a Python source file.")
+
+    source_limit = 7200
+    source_excerpt = source_text[:source_limit]
+    source_truncated = len(source_text) > source_limit
+    handlers = sorted(_runtime_graph_handler_registry().names())
+    tools = sorted(_registered_tool_names())
+    ctx = controller._deps.agent_context
+    active_router = ctx.model_routers.get(ctx.active_backend, ctx.model_router)
+    active_selection = active_router.select("module_designer")
+    requested_model = str(req.transform_model or "").strip() or os.getenv(
+        "AUTONOMOUS_MODULE_DESIGNER_MODEL",
+        "",
+    ).strip()
+    model = requested_model or active_selection.primary
+    active_backend = ctx.primary_backends.get(ctx.active_backend) or ctx.primary_backend
+    attempts: list[tuple[str, Any, str, str]] = []
+    fallback_backend_name = ctx.backend_fallbacks.get(ctx.active_backend, "")
+    backend_fallback_attempt: tuple[str, Any, str, str] | None = None
+    if fallback_backend_name and fallback_backend_name != ctx.active_backend:
+        fallback_router = ctx.model_routers.get(fallback_backend_name, ctx.model_router)
+        fallback_selection = fallback_router.select("module_designer")
+        backend_fallback_attempt = (
+            fallback_backend_name,
+            ctx.fallback_backends.get(ctx.active_backend, ctx.fallback_backend),
+            fallback_selection.primary,
+            f"{fallback_selection.role}:backend_fallback",
+        )
+    api_key_primary = fallback_backend_name == "openai" and backend_fallback_attempt is not None
+    if api_key_primary:
+        attempts.append(backend_fallback_attempt)
+
+    attempts.append((ctx.active_backend, active_backend, model, active_selection.role))
+    if (
+        not requested_model
+        and active_selection.fallback
+        and active_selection.fallback != active_selection.primary
+    ):
+        attempts.append(
+            (
+                ctx.active_backend,
+                active_backend,
+                active_selection.fallback,
+                f"{active_selection.role}:model_fallback",
+            )
+        )
+    if backend_fallback_attempt is not None and not api_key_primary:
+        attempts.append(backend_fallback_attempt)
+
+    last_error: Exception | None = None
+    response = None
+    used_model = model
+    for _backend_name, backend, attempt_model, role in attempts:
+        prepare_model = getattr(backend, "prepare_model", None)
+        if prepare_model is not None:
+            await prepare_model(attempt_model)
+        try:
+            response = await backend.complete(
+                model=attempt_model,
+                system_prompt=_module_designer_system_prompt(),
+                user_prompt=_module_designer_user_prompt(
+                    req=req,
+                    safe_id=safe_id,
+                    source_excerpt=source_excerpt,
+                    source_truncated=source_truncated,
+                    handler_names=handlers,
+                    tool_names=tools,
+                ),
+                metadata={"task_type": "module_designer", "role": role, "max_tokens": 1400},
+            )
+            if not str(response.text or "").strip():
+                raise RuntimeError(f"empty LLM response from backend={_backend_name} model={attempt_model}")
+            used_model = attempt_model
+            break
+        except Exception as exc:
+            last_error = exc
+    if response is None:
+        raise HTTPException(status_code=502, detail=f"Module Designer model transform failed: {last_error}") from last_error
+
+    try:
+        payload = _extract_json_object(response.text)
+    except Exception as exc:
+        snippet = response.text[:1200] if response.text else ""
+        raise HTTPException(status_code=502, detail=f"Module Designer model returned invalid module JSON: {exc}; response={snippet}") from exc
+
+    transformed_source = str(payload.get("transformed_source") or "").strip()
+    if not transformed_source:
+        raise HTTPException(status_code=502, detail="Module Designer model response did not include transformed_source.")
+    payload["_used_model"] = used_model
+    payload["_model"] = response.model
+    payload["_source_truncated_for_prompt"] = source_truncated
+    return payload
+
+
+def _module_id_from_graph_node_module_id(module_id: str | None) -> str:
+    """Normalize a graph node module reference such as modules/design to design."""
+    if not module_id:
+        return ""
+    return Path(str(module_id).strip()).name
+
+
+def _module_runtime_summary(module_id: str) -> dict[str, object]:
+    """Return the editable module runtime metadata exposed by dry-run APIs."""
+    if not module_id:
+        return {}
+    try:
+        payload = _module_config_payload(module_id)
+    except HTTPException:
+        return {"module_id": module_id, "missing": True}
+    normalized = ModuleConfigStore.normalize_payload(dict(payload))
+    module = normalized.get("module", {}) if isinstance(normalized, dict) else {}
+    if not isinstance(module, dict):
+        return {"module_id": module_id, "missing": True}
+    try:
+        module = ModuleConfig.model_validate(module).model_dump(mode="json", exclude_none=True, by_alias=True)
+    except Exception as exc:
+        return {"module_id": module_id, "schema_error": str(exc)}
+    sequence = _module_dry_run_sequence(module_id, {"module": module})
+    pre_execution = [item for item in sequence if item.get("phase") == "pre_execution"]
+    internal_graph = [item for item in sequence if item.get("phase") == "internal_graph"]
+    return {
+        "module_id": module.get("id", module_id),
+        "label": module.get("label", ""),
+        "handler": module.get("handler", ""),
+        "effective_handler": module.get("handler", ""),
+        "llm_role": module.get("llm_role", ""),
+        "tool_count": len(module.get("tools", [])) if isinstance(module.get("tools"), list) else 0,
+        "pre_execution_count": len(pre_execution),
+        "internal_graph_count": len(internal_graph),
+        "sequence": sequence,
+        "runtime_contract": module.get("runtime_contract", {}) if isinstance(module.get("runtime_contract"), dict) else {},
+        "device_bridge_contracts": module.get("device_bridge_contracts", []) if isinstance(module.get("device_bridge_contracts"), list) else [],
+        "output_contracts": module.get("output_contracts", []) if isinstance(module.get("output_contracts"), list) else [],
+        "io_contract": module.get("io_contract", {}) if isinstance(module.get("io_contract"), dict) else {},
+        "safety": module.get("safety", {}) if isinstance(module.get("safety"), dict) else {},
+    }
+
+
+def _validate_module_payload(module_id: str, payload: dict[str, Any]) -> list[str]:
+    """Validate editable module config without executing Python source."""
+    errors: list[str] = []
+    normalized = ModuleConfigStore.normalize_payload(dict(payload))
+    module = normalized.get("module", {}) if isinstance(normalized, dict) else {}
+    if not isinstance(module, dict):
+        return ["module payload must contain an object"]
+    try:
+        ModuleConfig.model_validate(module)
+    except Exception as exc:
+        errors.append(f"module schema validation failed: {exc}")
+    if module.get("id") != module_id:
+        errors.append(f"module_id path/body mismatch: {module_id} != {module.get('id')}")
+    if module.get("owner_plan") is not None:
+        installed = _installed_agent_module(module_id)
+        owner = (
+            controller._deps.agent_registry.get_installed(installed.agent_name)
+            if installed is not None else None
+        )
+        validate_declaration = getattr(owner, "validate_plan_declaration", None)
+        if not callable(validate_declaration):
+            errors.append(f"owner_plan is unsupported for module: {module_id}")
+        else:
+            try:
+                validate_declaration(copy.deepcopy(module["owner_plan"]), controller._state)
+            except (TypeError, ValueError) as exc:
+                errors.append(f"owner_plan validation failed: {exc}")
+    execution_graph = module.get("execution_graph")
+    installed_owner = controller._deps.agent_registry.get_module(module_id)
+    catalog = _module_execution_catalog(module_id)
+    if catalog is not None and execution_graph is None:
+        errors.append(f"execution_graph is required for migrated module: {module_id}")
+    elif execution_graph is not None:
+        if catalog is None:
+            errors.append(f"execution_graph is unsupported for module: {module_id}")
+        elif isinstance(execution_graph, dict):
+            try:
+                from agents.execution_graph import compile_execution_graph
+
+                compile_execution_graph(execution_graph, catalog)
+            except Exception as exc:
+                errors.append(f"execution_graph validation failed: {exc}")
+        else:
+            errors.append("execution_graph must be an object")
+    handler_registry = _runtime_graph_handler_registry().names()
+    handler = str(module.get("handler", ""))
+    if handler not in handler_registry:
+        errors.append(f"unregistered handler: {handler}")
+    migrated_handler = (
+        f"agent.{installed_owner.agent_name}" if installed_owner is not None
+        else f"agent.{controller._deps.orchestrator_agent_name}" if module_id == "orchestrator" else None
+    )
+    if execution_graph is not None and migrated_handler is not None and handler != migrated_handler:
+        errors.append(f"handler must remain {migrated_handler} while execution_graph is configured")
+    llm_role = module.get("llm_role", "")
+    if llm_role is not None and not isinstance(llm_role, str):
+        errors.append("llm_role must be a string")
+    llm = module.get("llm", {})
+    if llm and not isinstance(llm, dict):
+        errors.append("llm must be an object")
+    elif isinstance(llm, dict):
+        for key in ("backend", "model", "primary", "fallback"):
+            if key in llm and not isinstance(llm[key], str):
+                errors.append(f"llm.{key} must be a string")
+        for key in ("temperature", "top_p"):
+            if key in llm and not isinstance(llm[key], int | float):
+                errors.append(f"llm.{key} must be numeric")
+        if "max_tokens" in llm and (not isinstance(llm["max_tokens"], int) or int(llm["max_tokens"]) < 1):
+            errors.append("llm.max_tokens must be a positive integer")
+    timeout = module.get("timeout_s")
+    if timeout is not None and (not isinstance(timeout, int | float) or float(timeout) < 0):
+        errors.append("timeout_s must be a non-negative number")
+    retry = module.get("retry", {})
+    if retry and not isinstance(retry, dict):
+        errors.append("retry must be an object")
+    elif isinstance(retry, dict):
+        max_attempts = retry.get("max_attempts")
+        if max_attempts is not None and (not isinstance(max_attempts, int) or not 0 <= max_attempts <= 10):
+            errors.append("retry.max_attempts must be an integer between 0 and 10")
+        backoff_s = retry.get("backoff_s")
+        if backoff_s is not None and (not isinstance(backoff_s, int | float) or float(backoff_s) < 0):
+            errors.append("retry.backoff_s must be a non-negative number")
+    prompt = module.get("prompt", {})
+    if prompt and not isinstance(prompt, (dict, str)):
+        errors.append("prompt must be an object or string")
+    elif isinstance(prompt, dict):
+        for key in ("path", "system", "developer", "user_template"):
+            if key in prompt and not isinstance(prompt[key], str):
+                errors.append(f"prompt.{key} must be a string")
+    pre_execution = module.get("pre_execution", [])
+    if pre_execution and not isinstance(pre_execution, list):
+        errors.append("pre_execution must be a list")
+    elif isinstance(pre_execution, list):
+        pre_ids = [str(step.get("id", "")) for step in pre_execution if isinstance(step, dict)]
+        for index, step in enumerate(pre_execution, start=1):
+            if not isinstance(step, dict):
+                errors.append(f"pre_execution contains non-object step at {index}")
+                continue
+            if not str(step.get("id", "")).strip():
+                errors.append(f"pre_execution step at {index} must have id")
+            handler_id = str(step.get("handler") or "").strip()
+            if not handler_id:
+                errors.append(f"pre_execution step at {index} must have handler")
+            elif handler_id not in handler_registry:
+                errors.append(f"unregistered pre_execution handler at {index}: {handler_id}")
+            if "enabled" in step and not isinstance(step["enabled"], bool):
+                errors.append(f"pre_execution.enabled at {index} must be boolean")
+            for key in ("output_key", "event_type", "label", "kind"):
+                if key in step and not isinstance(step[key], str):
+                    errors.append(f"pre_execution.{key} at {index} must be a string")
+        for step_id in sorted({step_id for step_id in pre_ids if step_id and pre_ids.count(step_id) > 1}):
+            errors.append(f"duplicate pre_execution step id: {step_id}")
+    internal_graph = module.get("internal_graph", [])
+    if not isinstance(internal_graph, list):
+        errors.append("internal_graph must be a list")
+    else:
+        if isinstance(module.get("execution_graph"), dict) and internal_graph:
+            errors.append("internal_graph must be empty when execution_graph is configured")
+        step_ids = [str(step.get("id", "")) for step in internal_graph if isinstance(step, dict)]
+        missing_id_count = sum(1 for step_id in step_ids if not step_id.strip())
+        if missing_id_count:
+            errors.append(f"internal_graph contains {missing_id_count} step(s) without id")
+        malformed_step_count = sum(1 for step in internal_graph if not isinstance(step, dict))
+        if malformed_step_count:
+            errors.append(f"internal_graph contains {malformed_step_count} non-object step(s)")
+        duplicates = sorted({step_id for step_id in step_ids if step_id and step_ids.count(step_id) > 1})
+        for step_id in duplicates:
+            errors.append(f"duplicate internal_graph step id: {step_id}")
+        for index, step in enumerate(internal_graph, start=1):
+            if not isinstance(step, dict):
+                continue
+            step_handler = step.get("handler")
+            if step_handler and str(step_handler) not in handler_registry:
+                errors.append(f"unregistered internal_graph step handler at {index}: {step_handler}")
+    safety = module.get("safety", {})
+    if safety and not isinstance(safety, dict):
+        errors.append("safety must be an object")
+    elif isinstance(safety, dict):
+        for key in ("live_requires_validation", "dry_run_supported", "requires_human_approval"):
+            if key in safety and not isinstance(safety[key], bool):
+                errors.append(f"safety.{key} must be boolean")
+    registered_tools: set[str] = set()
+    try:
+        registered_tools = set(controller._deps.agent_context.tools.list_tools())
+    except Exception:
+        registered_tools = set()
+    tools = module.get("tools", [])
+    if tools and not isinstance(tools, list):
+        errors.append("tools must be a list")
+    elif isinstance(tools, list):
+        for index, tool in enumerate(tools, start=1):
+            if not isinstance(tool, str) or not tool.strip():
+                errors.append(f"tools[{index}] must be a non-empty string")
+                continue
+            if registered_tools and tool.strip() not in registered_tools:
+                errors.append(f"unregistered tool: {tool.strip()}")
+    return errors
+
+
+def _module_execution_catalog(module_id: str):
+    """Return a code-owned operation catalog for explicitly migrated modules."""
+    installed = _installed_agent_module(module_id)
+    if installed is not None:
+        agent = controller._deps.agent_registry.get_installed(installed.agent_name)
+        catalog = getattr(agent, "execution_catalog", None)
+        if callable(catalog):
+            return catalog()
+    if module_id == "orchestrator":
+        from agents.core.orchestrator.execution import orchestrator_execution_catalog
+
+        agent = controller._deps.agent_registry.get_installed(controller._deps.orchestrator_agent_name)
+        return orchestrator_execution_catalog(agent, context=None, handlers=None)
+    return None
+
+
+def _compiled_module_execution_graph(module_id: str, module: dict[str, Any]):
+    """Compile a detached module graph for validation or structural preview."""
+    graph = module.get("execution_graph")
+    catalog = _module_execution_catalog(module_id)
+    if not isinstance(graph, dict) or catalog is None:
+        return None
+    from agents.execution_graph import compile_execution_graph
+
+    return compile_execution_graph(graph, catalog)
+
+
+def _execution_graph_paths(compiled) -> list[dict[str, Any]]:
+    """Enumerate all acyclic outcome paths without invoking owner functions."""
+    if compiled is None:
+        return []
+    paths: list[dict[str, Any]] = []
+
+    def walk(node_id: str, nodes: list[str], edges: list[dict[str, str]]) -> None:
+        if node_id in compiled.terminals:
+            paths.append({"nodes": nodes, "edges": edges, "terminal": node_id})
+            return
+        for edge in compiled.edges:
+            if edge.source == node_id:
+                walk(edge.target, [*nodes, edge.target], [*edges, edge.describe()])
+
+    walk(compiled.entry, [compiled.entry], [])
+    return paths
+
+
+def _module_dry_run_sequence(module_id: str, payload: dict[str, Any] | None = None) -> list[dict[str, object]]:
+    """Return the configured internal module step order without executing handlers/tools."""
+    module_payload = payload or _module_config_payload(module_id)
+    normalized = ModuleConfigStore.normalize_payload(dict(module_payload))
+    module = normalized.get("module", {}) if isinstance(normalized, dict) else {}
+    if not isinstance(module, dict):
+        return []
+    try:
+        module = ModuleConfig.model_validate(module).model_dump(mode="json", exclude_none=True)
+    except Exception:
+        return []
+    module_status = str(module.get("status") or "").strip().lower()
+    execution = module.get("execution") if isinstance(module.get("execution"), dict) else {}
+    graph_binding = module.get("graph") if isinstance(module.get("graph"), dict) else {}
+    is_draft = module_status == "draft" or module.get("enabled") is False or execution.get("active") is False or graph_binding.get("attached") is False
+    internal_graph = module.get("internal_graph", [])
+    if not isinstance(internal_graph, list):
+        return []
+    sequence: list[dict[str, object]] = []
+    pre_execution = module.get("pre_execution", []) if isinstance(module, dict) else []
+    if isinstance(pre_execution, list):
+        for index, step in enumerate(pre_execution, start=1):
+            item = step if isinstance(step, dict) else {}
+            if item.get("enabled", True) is False:
+                continue
+            handler = str(item.get("handler") or "").strip()
+            sequence.append(
+                {
+                    "step": len(sequence) + 1,
+                    "id": item.get("id", f"pre_step_{index}"),
+                    "label": item.get("label", item.get("id", f"pre_step_{index}")),
+                    "handler": handler,
+                    "kind": item.get("kind", "pre_stage"),
+                    "phase": "pre_execution",
+                    "handler_configured": bool(handler),
+                    "executable": (not is_draft) and handler.startswith("agent."),
+                    "module_status": module_status or "active",
+                    "draft": is_draft,
+                }
+            )
+    compiled = _compiled_module_execution_graph(module_id, module)
+    paths = _execution_graph_paths(compiled)
+    if compiled is not None and paths:
+        nodes = {node.id: node for node in compiled.nodes}
+        for node_id in paths[0]["nodes"]:
+            node = nodes[node_id]
+            sequence.append(
+                {
+                    "step": len(sequence) + 1,
+                    "id": node.id,
+                    "label": node.label,
+                    "handler": node.handler,
+                    "kind": "execution_node",
+                    "phase": "execution_graph",
+                    "handler_configured": True,
+                    "executable": not is_draft,
+                    "module_status": module_status or "active",
+                    "draft": is_draft,
+                    "area": node.area,
+                }
+            )
+        return sequence
+    for index, step in enumerate(internal_graph, start=1):
+        item = step if isinstance(step, dict) else {}
+        configured_handler = str(item.get("handler") or "").strip()
+        display_handler = configured_handler or str(module.get("handler", ""))
+        sequence.append(
+            {
+                "step": len(sequence) + 1,
+                "id": item.get("id", f"step_{index}"),
+                "label": item.get("label", item.get("id", f"step_{index}")),
+                "handler": display_handler,
+                "kind": item.get("kind", "internal_step"),
+                "phase": "internal_graph",
+                "handler_configured": bool(configured_handler),
+                "executable": (not is_draft) and configured_handler.startswith("agent."),
+                "module_status": module_status or "active",
+                "draft": is_draft,
+            }
+        )
+    return sequence
+
+
+def _module_dry_run_summary(sequence: list[dict[str, object]]) -> dict[str, object]:
+    """Summarize draft module dry-run sequence for operator evidence panels."""
+    pre = [item for item in sequence if item.get("phase") == "pre_execution"]
+    internal = [item for item in sequence if item.get("phase") == "internal_graph"]
+    execution_nodes = [item for item in sequence if item.get("phase") == "execution_graph"]
+    executable = [item for item in sequence if item.get("executable")]
+    checkpoints = [item for item in sequence if not item.get("executable")]
+    handlers = sorted({str(item.get("handler") or "") for item in sequence if item.get("handler")})
+    draft = any(bool(item.get("draft")) for item in sequence)
+    return {
+        "step_count": len(sequence),
+        "pre_execution_count": len(pre),
+        "internal_graph_count": len(internal),
+        "execution_graph_count": len(execution_nodes),
+        "executable_count": len(executable),
+        "checkpoint_count": len(checkpoints),
+        "draft": draft,
+        "handler_count": len(handlers),
+        "handlers": handlers,
+        "ordered_step_ids": [str(item.get("id") or "") for item in sequence],
+        "first_step_id": str(sequence[0].get("id") or "") if sequence else "",
+        "last_step_id": str(sequence[-1].get("id") or "") if sequence else "",
+    }
+
+
+def _module_dry_run_evidence(module_id: str, payload: dict[str, Any]) -> dict[str, object]:
+    """Build an honest structural preview without invoking owner functions."""
+    sequence = _module_dry_run_sequence(module_id, payload)
+    normalized = ModuleConfigStore.normalize_payload(dict(payload))
+    module = normalized.get("module", {}) if isinstance(normalized, dict) else {}
+    compiled = _compiled_module_execution_graph(module_id, module) if isinstance(module, dict) else None
+    return {
+        "ok": True,
+        "module_id": module_id,
+        "mode": "structural_preview",
+        "executes_owner_functions": False,
+        "graph_revision": compiled.revision if compiled is not None else "",
+        "paths": _execution_graph_paths(compiled),
+        "sequence": sequence,
+        "summary": _module_dry_run_summary(sequence),
+    }
+
+
+def _safe_run_dir(run_id: str) -> Path:
+    """Resolve a run directory under run_root without allowing path traversal."""
+    safe = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "-" for ch in run_id).strip(".-")
+    if not safe:
+        raise HTTPException(status_code=400, detail="run_id cannot be empty")
+    root = controller._deps.run_root.resolve()
+    run_dir = (root / safe).resolve()
+    try:
+        run_dir.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="run_id escapes run root") from exc
+    return run_dir
+
+
+def _safe_run_artifact_path(run_id: str, artifact_path: str) -> Path:
+    """Resolve one artifact path under a safe run directory."""
+    run_dir = _safe_run_dir(run_id)
+    artifact = (run_dir / artifact_path).resolve()
+    try:
+        artifact.relative_to(run_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="artifact path escapes run directory") from exc
+    if not artifact.exists() or not artifact.is_file():
+        raise HTTPException(status_code=404, detail="Run artifact not found")
+    return artifact
+
+
+def _artifact_preview_kind(path: Path) -> str:
+    """Classify artifact preview behavior for Runtime IDE."""
+    suffix = path.suffix.lower()
+    if suffix in {".svg", ".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+        return "image"
+    if suffix in {".json", ".md", ".txt", ".csv", ".log", ".yaml", ".yml", ".gcode"}:
+        return "text"
+    if suffix in {".stl"}:
+        return "mesh"
+    return "download"
+
+
+def _current_run_id() -> str:
+    """Return current controller run id."""
+    return str(controller._state.run_id or "")
+
+
+def _artifact_items_for_run(run_id: str) -> tuple[Path, list[dict[str, object]]]:
+    """Return run artifacts with both native and package-compatibility ids."""
+    run_dir = _safe_run_dir(run_id)
+    if not run_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Unknown run_id={run_id}")
+    artifacts: list[dict[str, object]] = []
+    from utils.agent_artifact_archive import list_executions
+    executions = {
+        str(Path(entry["manifest_path"]).parent): entry for entry in list_executions(run_dir)
+    }
+    for item in sorted(run_dir.rglob("*")):
+        if not item.is_file() or not item.resolve().is_relative_to(run_dir.resolve()):
+            continue
+        if item.name.startswith(".") and item.name.endswith(".tmp"):
+            continue
+        rel = item.relative_to(run_dir).as_posix()
+        parts = Path(rel).parts
+        owner = executions.get(Path(*parts[:5]).as_posix(), {}) if len(parts) >= 6 else {}
+        if not owner and len(parts) == 4 and parts[:2] == ("runtime", "loops") and re.fullmatch(r"loop-\d+", parts[2]):
+            owner = {"loop_index": int(parts[2][5:]) - 1, "loop_number": int(parts[2][5:]), "agent": "orchestrator_agent"}
+        encoded_rel = quote(rel, safe="/")
+        artifact_id = f"{run_id}::{quote(rel, safe='')}"
+        preview_kind = _artifact_preview_kind(item)
+        artifacts.append(
+            {
+                "artifact_id": artifact_id,
+                "run_id": run_id,
+                "path": rel,
+                "name": item.name,
+                "suffix": item.suffix,
+                "size_bytes": item.stat().st_size,
+                "kind": "artifact",
+                "preview_kind": preview_kind,
+                "previewable": preview_kind in {"image", "text"},
+                "url": f"/api/runs/{run_id}/artifact-file/{encoded_rel}",
+                "download_url": f"/api/runs/{run_id}/artifact-file/{encoded_rel}?download=1",
+                "compat_url": f"/api/artifacts/{quote(artifact_id, safe='')}",
+                "loop_index": owner.get("loop_index"),
+                "loop_number": owner.get("loop_number"),
+                "agent": owner.get("agent"),
+                "attempt_index": owner.get("attempt_index"),
+                "execution_id": owner.get("execution_id"),
+                "specimen_id": owner.get("specimen_id"),
+                "archive_status": owner.get("archive_status", "legacy"),
+            }
+        )
+    return run_dir, artifacts
+
+
+def _attach_bo_artifact_urls(visualization: dict[str, Any], run_id: str) -> dict[str, Any]:
+    """Attach the current step's server-rendered Matplotlib artifacts."""
+    if not visualization or not run_id:
+        return visualization
+    step = int(visualization.get("step") or 0)
+    suffixes = {
+        ".png": "png_url",
+        ".svg": "svg_url",
+        ".csv": "csv_url",
+    }
+    expected = f"_bo_step_{step:03d}_posterior"
+    try:
+        _, items = _artifact_items_for_run(run_id)
+    except (HTTPException, OSError, ValueError):
+        return visualization
+    matched: dict[str, str] = {}
+    for item in reversed(items):
+        path = str(item.get("path") or "")
+        path_suffix = Path(path).suffix.lower()
+        key = suffixes.get(path_suffix)
+        stem = Path(path).stem
+        if path_suffix == ".png" and stem.endswith(expected + "_2d"):
+            key = "surface_2d_url"
+        elif path_suffix == ".png" and stem.endswith(expected + "_3d"):
+            key = "surface_3d_url"
+        elif not stem.endswith(expected):
+            continue
+        if key and key not in matched:
+            matched[key] = str(item.get("url") or "")
+    if not matched:
+        return visualization
+    enriched = dict(visualization)
+    enriched["artifacts"] = {**dict(visualization.get("artifacts") or {}), **matched}
+    return enriched
+
+
+def _attach_lhs_artifact_urls(visualization: dict[str, Any], run_id: str) -> dict[str, Any]:
+    """Attach the current LHS step's dedicated publication artifacts."""
+    if not visualization or not run_id:
+        return visualization
+    from experiments.lhs_progress import progress_fingerprint
+    revision = progress_fingerprint(visualization)
+    step = int(visualization.get("step") or 0)
+    suffixes = {".png": "png_url", ".svg": "svg_url", ".csv": "csv_url", ".json": "json_url"}
+    expected = f"_lhs_design_step_{step:03d}"
+    try:
+        _, items = _artifact_items_for_run(run_id)
+    except (HTTPException, OSError, ValueError):
+        return visualization
+    matched: dict[str, str] = {}
+    for item in reversed(items):
+        path = str(item.get("path") or "")
+        key = suffixes.get(Path(path).suffix.lower())
+        if key and expected in Path(path).stem and key not in matched:
+            url = str(item.get("url") or "")
+            matched[key] = f"{url}{'&' if '?' in url else '?'}v={revision}" if url else ""
+    if not matched:
+        return visualization
+    enriched = dict(visualization)
+    enriched["artifacts"] = {**dict(visualization.get("artifacts") or {}), **matched}
+    return enriched
+
+
+def _parse_artifact_id(artifact_id: str, run_id: str | None = None) -> tuple[str, str]:
+    """Decode a package-compatibility artifact id into run id and artifact path."""
+    raw = unquote(str(artifact_id or "").strip())
+    if "::" in raw:
+        decoded_run_id, encoded_path = raw.split("::", 1)
+        return decoded_run_id, unquote(encoded_path)
+    if ":" in raw and is_run_id(raw.split(":", 1)[0]):
+        decoded_run_id, encoded_path = raw.split(":", 1)
+        return decoded_run_id, unquote(encoded_path)
+    if "/" in raw and is_run_id(raw.split("/", 1)[0]):
+        decoded_run_id, artifact_path = raw.split("/", 1)
+        return decoded_run_id, artifact_path
+    return run_id or _current_run_id(), raw
+
+
+def _agent_definition(agent_id: str, *, include_inactive: bool = False) -> dict[str, str]:
+    """Return one Live GUI agent definition by canonical id or module/stage alias."""
+    normalized = str(agent_id or "").strip().lower().replace("-", "_")
+    definitions = [{"agent_id": item["id"], "label": item["label"], "stage": item["stage"],
+                    "module_id": item["module_id"], "handler": item["handler"]} for item in _runtime_agent_manifests_payload()["agents"]]
+    if include_inactive:
+        definitions.extend(LIVE_AGENT_DEFINITIONS)
+        definitions.extend({"agent_id": module.module_id, "label": module.module_id,
+                            "stage": module.module_id, "module_id": module.module_id,
+                            "handler": f"agent.{module.agent_name}"}
+                           for module in controller._deps.agent_registry.modules())
+    for item in definitions:
+        aliases = {item["agent_id"], item["stage"], item["module_id"]}
+        if normalized in aliases:
+            return item
+    raise HTTPException(status_code=404, detail=f"Unknown agent_id={agent_id}")
+
+
+def _event_payload(event: dict[str, Any]) -> dict[str, Any]:
+    """Return event payload as a dict."""
+    payload = event.get("payload")
+    return payload if isinstance(payload, dict) else {}
+
+
+def _event_matches_agent(event: dict[str, Any], definition: dict[str, str]) -> bool:
+    """Match a runtime event to a Live GUI agent without relying on one backend shape."""
+    payload = _event_payload(event)
+    tokens = {
+        str(event.get("agent") or "").lower(),
+        str(event.get("agent_id") or "").lower(),
+        str(event.get("node_id") or "").lower(),
+        str(event.get("module_id") or "").lower(),
+        str(event.get("timestamp_stage") or "").lower(),
+        str(payload.get("agent") or "").lower(),
+        str(payload.get("agent_id") or "").lower(),
+        str(payload.get("node_id") or "").lower(),
+        str(payload.get("module_id") or "").lower(),
+        str(payload.get("stage") or "").lower(),
+    }
+    aliases = {definition["agent_id"], definition["stage"], definition["module_id"]}
+    if tokens.intersection(aliases):
+        return True
+    event_type = str(event.get("event_type") or event.get("type") or "").lower()
+    message = str(event.get("message") or "").lower()
+    return definition["agent_id"] in event_type or definition["agent_id"] in message
+
+
+def _events_for_agent(agent_id: str, run_id: str | None = None) -> tuple[dict[str, str], list[dict[str, Any]]]:
+    """Return recent runtime events filtered for one Live GUI agent."""
+    definition = _agent_definition(agent_id, include_inactive=bool(run_id))
+    events = controller.recent_events()
+    if run_id:
+        events = [event for event in events if str(event.get("run_id") or "") == run_id]
+    return definition, [event for event in events if _event_matches_agent(event, definition)]
+
+
+def _agent_report_payload(agent_id: str, run_id: str | None = None) -> dict[str, object]:
+    """Build a lightweight academic-report payload for compatibility consumers."""
+    definition, events = _events_for_agent(agent_id, run_id=run_id)
+    from app.report_snapshot import report_snapshot
+    installed = _installed_agent_module(definition["module_id"])
+    # Reports need the transcript page, not another complete planning projection.
+    planning_snapshot = controller.planning_messages_page()
+    snapshot = report_snapshot(controller, definition, installed)
+    state = snapshot.get("state", {}) if isinstance(snapshot.get("state"), dict) else {}
+    messages = [msg for msg in planning_snapshot.get("messages", []) if isinstance(msg, dict)]
+    role_aliases = {definition["agent_id"], definition["stage"], definition["module_id"]}
+    agent_messages = [msg for msg in messages if str(msg.get("role") or "").lower() in role_aliases]
+    warning_events = [event for event in events if str(event.get("level") or event.get("severity") or "").lower() in {"warning", "error", "critical"}]
+    status = "running" if str(state.get("stage") or "") == definition["stage"] and snapshot.get("is_running") else "idle"
+    if warning_events:
+        status = "warning"
+    if events and str(events[-1].get("level") or "").lower() == "error":
+        status = "error"
+    summary = events[-1].get("message") if events else f"No runtime events recorded for {definition['label']} yet."
+    role_specific = dict(LIVE_AGENT_REPORT_PROFILES.get(definition["agent_id"], {
+        "title": f"{definition['label']} Runtime Role",
+        "summary": f"Runtime evidence and follow-up context for {definition['label']}.",
+        "focus_rows": [],
+        "checklist": ["Review messages", "Inspect backend trace", "Confirm next action"],
+    }))
+    metadata = state.get("run_metadata", {}) if isinstance(state.get("run_metadata"), dict) else {}
+    agent_payload = metadata.get(f"{definition['stage']}_agent_payload") if isinstance(metadata.get(f"{definition['stage']}_agent_payload"), dict) else {}
+    module_sections = {}
+    report_decisions: list[object] = []
+    report_metrics: dict[str, object] = {}
+    if definition["agent_id"] == "orchestrator":
+        followups = [dict(item) for item in metadata.get("orchestrator_followups", []) if isinstance(item, dict)] if isinstance(metadata.get("orchestrator_followups"), list) else []
+        decisions = [dict(item) for item in metadata.get("orchestrator_decision_register", []) if isinstance(item, dict)] if isinstance(metadata.get("orchestrator_decision_register"), list) else []
+        handoffs = [dict(item) for item in metadata.get("orchestrator_handoff_packets", []) if isinstance(item, dict)] if isinstance(metadata.get("orchestrator_handoff_packets"), list) else []
+        reflections = [dict(item) for item in metadata.get("loop_reflections", []) if isinstance(item, dict)] if isinstance(metadata.get("loop_reflections"), list) else []
+        latest_followup = metadata.get("latest_orchestrator_followup") if isinstance(metadata.get("latest_orchestrator_followup"), dict) else (followups[-1] if followups else {})
+        latest_handoff = metadata.get("latest_orchestrator_handoff") if isinstance(metadata.get("latest_orchestrator_handoff"), dict) else (handoffs[-1] if handoffs else {})
+        parallel_batches = [dict(item) for item in metadata.get("orchestrator_parallel_checks", []) if isinstance(item, dict)] if isinstance(metadata.get("orchestrator_parallel_checks"), list) else []
+        latest_parallel_checks = metadata.get("latest_orchestrator_parallel_checks") if isinstance(metadata.get("latest_orchestrator_parallel_checks"), dict) else (parallel_batches[-1] if parallel_batches else {})
+        latest_reflection = metadata.get("latest_loop_reflection") if isinstance(metadata.get("latest_loop_reflection"), dict) else (reflections[-1] if reflections else {})
+        latest_mission_contract = metadata.get("latest_mission_contract") if isinstance(metadata.get("latest_mission_contract"), dict) else metadata.get("mission_contract") if isinstance(metadata.get("mission_contract"), dict) else {}
+        latest_orchestration_plan = metadata.get("latest_orchestration_plan") if isinstance(metadata.get("latest_orchestration_plan"), dict) else {}
+        latest_control_plane = metadata.get("latest_orchestrator_control_plane") if isinstance(metadata.get("latest_orchestrator_control_plane"), dict) else {}
+        if not latest_mission_contract or not latest_orchestration_plan:
+            try:
+                report_state = OrchestratorState.model_validate(state)
+                latest_mission_contract = latest_mission_contract or build_mission_contract(state=report_state)
+                latest_orchestration_plan = latest_orchestration_plan or build_orchestration_plan(state=report_state)
+            except Exception:
+                pass
+        if not latest_control_plane:
+            try:
+                report_state = OrchestratorState.model_validate(state)
+                latest_control_plane = build_orchestrator_control_plane_snapshot(
+                    state=report_state,
+                    mission_contract=latest_mission_contract,
+                    orchestration_plan=latest_orchestration_plan,
+                )
+            except Exception:
+                latest_control_plane = {}
+        role_specific.update(
+            {
+                "title": "Orchestration Supervisor / Follow-up Control",
+                "summary": "Mission contract, graph route, context handoff registry, intermediate follow-up opinions, decision register, Guardian/operator coordination, and loop reflection.",
+                "orchestrator_control_plane": latest_control_plane,
+                "mission_contract": latest_mission_contract or {
+                    "run_id": state.get("run_id", ""),
+                    "mode": state.get("mode", ""),
+                    "stage": state.get("stage", ""),
+                    "active_goal": state.get("active_goal", ""),
+                    "current_specimen_id": (state.get("current_experiment_spec") or {}).get("specimen_id") if isinstance(state.get("current_experiment_spec"), dict) else "",
+                    "loop_count": state.get("loop_count", 0),
+                },
+                "orchestration_plan": latest_orchestration_plan,
+                "route_map": {
+                    "active_graph": latest_orchestration_plan.get("graph_id") or metadata.get("active_graph_id", "atr_closed_loop"),
+                    "current_stage": latest_orchestration_plan.get("current_stage") or state.get("stage", ""),
+                    "route": latest_orchestration_plan.get("route", []),
+                    "parallelizable_checks": latest_orchestration_plan.get("parallelizable_checks", []),
+                    "serial_physical_actions": latest_orchestration_plan.get("serial_physical_actions", []),
+                    "expected_artifacts": latest_orchestration_plan.get("expected_artifacts", []),
+                    "latest_handoff_to": latest_handoff.get("to_stage", ""),
+                    "latest_handoff_from": latest_handoff.get("from_stage", ""),
+                },
+                "followup_timeline": followups[-20:],
+                "handoff_registry": handoffs[-20:],
+                "decision_register": decisions[-30:],
+                "parallel_check_batches": parallel_batches[-20:],
+                "latest_parallel_checks": latest_parallel_checks,
+                "loop_reflections": reflections[-10:],
+                "open_questions": [item for item in followups[-20:] if item.get("requires_response")],
+                "latest_followup": latest_followup,
+                "latest_loop_reflection": latest_reflection,
+                "run_health": {
+                    "followup_count": len(followups),
+                    "decision_count": len(decisions),
+                    "handoff_count": len(handoffs),
+                    "parallel_check_batch_count": len(parallel_batches),
+                    "latest_parallel_check_status": latest_parallel_checks.get("status", "not_run") if latest_parallel_checks else "not_run",
+                    "reflection_count": len(reflections),
+                    "warning_followup_count": sum(1 for item in followups if item.get("concerns")),
+                },
+            }
+        )
+        report_decisions = decisions
+        report_metrics = role_specific["run_health"]
+    if installed is not None and installed.project_report is not None:
+        role_specific.update(installed.describe().get("report_profile", {}))
+        # Request-only context preserves owner observation precedence without a new store.
+        projection_metadata = {**metadata, "_projection_state": state}
+        if definition["agent_id"] == "bo" and state.get("run_id"):
+            projection_metadata["_objective_status"] = _objective_service().status(run_id=state["run_id"])
+            projection_metadata["_objective_registry"] = _objective_service().registry
+        if definition["agent_id"] == "knowledge":
+            projection_metadata["_relation_reconciliation"] = _knowledge_relation_summary()
+        projection = installed.project_report(projection_metadata, agent_payload)
+        role_specific.update(projection["role_specific"])
+        report_decisions = projection["decisions"]
+        report_metrics = projection["metrics"]
+        module_sections = {key: value for key, value in projection.items()
+                           if key not in {"role_specific", "decisions", "metrics"}}
+    knowledge_report = module_sections.get("knowledge_report")
+    process_steps = [
+        {
+            "timestamp": event.get("ts") or event.get("timestamp") or "",
+            "event_type": event.get("event_type") or event.get("type") or "runtime.event",
+            "message": event.get("message") or "",
+            "node_id": event.get("node_id") or _event_payload(event).get("node_id") or "",
+            "trace_id": event.get("trace_id") or _event_payload(event).get("trace_id") or "",
+        }
+        for event in events[-20:]
+    ]
+    tool_calls = [
+        {
+            "timestamp": event.get("ts") or event.get("timestamp") or "",
+            "event_type": event.get("event_type") or event.get("type") or "tool",
+            "message": event.get("message") or "",
+            "payload": _event_payload(event),
+        }
+        for event in events[-50:]
+        if "tool" in str(event.get("event_type") or event.get("type") or "").lower()
+        or bool(_event_payload(event).get("tool_calls"))
+        or bool(_event_payload(event).get("tool_call"))
+    ]
+    artifacts = []
+    for event in events[-50:]:
+        payload = _event_payload(event)
+        artifact_ids = event.get("artifact_ids") or payload.get("artifact_ids") or payload.get("artifacts") or []
+        if isinstance(artifact_ids, (str, bytes)):
+            artifact_ids = [artifact_ids]
+        if isinstance(artifact_ids, list):
+            for artifact_id in artifact_ids:
+                artifacts.append({
+                    "artifact_id": str(artifact_id),
+                    "event_id": str(event.get("event_id") or event.get("id") or ""),
+                    "event_type": str(event.get("event_type") or event.get("type") or ""),
+                })
+    next_action = "Inspect backend trace, answer pending questions, or continue the active run." if events else "Wait for runtime activity."
+    return {
+        "agent_id": definition["agent_id"],
+        "label": definition["label"],
+        "run_id": run_id or _current_run_id(),
+        "status": status,
+        "summary": summary,
+        "role_specific": role_specific,
+        "inputs": agent_messages[-12:],
+        "decisions": report_decisions,
+        "metrics": report_metrics,
+        "process_steps": process_steps,
+        "tool_calls": tool_calls,
+        "artifacts": artifacts,
+        "warnings": warning_events[-12:],
+        "handoff": {
+            "current_stage": str(state.get("stage") or ""),
+            "agent_stage": definition["stage"],
+            "next_action": next_action,
+        },
+        "next_action": next_action,
+        "sections": {
+            "overview": summary,
+            "role_specific": role_specific,
+            "specimen_agent_report": None,
+            "fabrication_report": None,
+            "vision_agent_report": None,
+            "vision_report": None,
+            **module_sections,
+            "knowledge_report": knowledge_report if definition["agent_id"] == "knowledge" else None,
+            "metrics": report_metrics,
+            "messages": agent_messages[-12:],
+            "events": events[-50:],
+            "process_steps": process_steps,
+            "tool_calls": tool_calls,
+            "artifacts": artifacts,
+            "warnings": warning_events[-12:],
+            "handoff": {
+                "current_stage": str(state.get("stage") or ""),
+                "agent_stage": definition["stage"],
+                "next_action": next_action,
+            },
+            "next_action": next_action,
+        },
+        "backend_refs": {
+            "trace_id": str(events[-1].get("trace_id") or _event_payload(events[-1]).get("trace_id") or "") if events else "",
+            "node_id": str(events[-1].get("node_id") or "") if events else definition["stage"],
+            "graph_version": str(events[-1].get("graph_version") or "") if events else "",
+        },
+    }
+
+
+def _device_state_payload() -> dict[str, object]:
+    """Build package-compatible device state from controller health and resources."""
+    snapshot = controller.display_snapshot()
+    state = snapshot.get("state", {}) if isinstance(snapshot.get("state"), dict) else {}
+    health = state.get("device_health", {}) if isinstance(state.get("device_health"), dict) else {}
+    resources = _system_resource_snapshot()
+    devices: list[dict[str, object]] = []
+    for device_id, bridge_state in sorted(health.items()):
+        status = str(bridge_state or "unknown")
+        devices.append({
+            "device_id": str(device_id),
+            "name": str(device_id).replace("_", " ").title(),
+            "bridge_state": status,
+            "last_command": "runtime snapshot",
+            "last_heartbeat": datetime.now(timezone.utc).isoformat(),
+            "safe_state": "unsafe/review" if status.lower() in {"error", "failed", "unsafe"} else "safe/ready",
+            "status": status,
+        })
+    devices.append({
+        "device_id": "gpu",
+        "name": "GPU / vLLM",
+        "bridge_state": resources.get("gpu", {}).get("status", "unknown") if isinstance(resources.get("gpu"), dict) else "unknown",
+        "last_command": "resource telemetry",
+        "last_heartbeat": resources.get("updated_at", ""),
+        "safe_state": "resource monitor",
+        "status": resources.get("gpu", {}).get("status", "unknown") if isinstance(resources.get("gpu"), dict) else "unknown",
+        "payload": resources.get("gpu", {}),
+    })
+    try:
+        runtime_contract = _runtime_ide_contract_payload(snapshot)
+        bridge_contracts = runtime_contract.get("device_bridges", []) if isinstance(runtime_contract, dict) else []
+    except Exception:
+        bridge_contracts = []
+    return {
+        "ok": True,
+        "run_id": _current_run_id(),
+        "devices": devices,
+        "bridge_contracts": bridge_contracts,
+        "system_resources": resources,
+    }
+
+
+def _require_current_run(run_id: str) -> None:
+    """Ensure a mutating run command targets the active run."""
+    current = _current_run_id()
+    if run_id != current:
+        raise HTTPException(status_code=404, detail=f"Unknown active run_id={run_id}")
+
+
+def _approval_id_from_event(event: dict[str, Any]) -> str:
+    """Return the stable approval id associated with one approval event."""
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    return str(payload.get("approval_id") or payload.get("id") or event.get("event_id") or "")
+
+
+async def _attach_guardian_incident_note(incident_id: str, req: GuardianIncidentNoteRequest, *, run_id: str | None = None) -> dict[str, object]:
+    """Attach an operator note to one Guardian incident and emit auditable evidence."""
+    clean_incident_id = str(incident_id or "").strip()
+    if not clean_incident_id:
+        raise HTTPException(status_code=400, detail="incident_id cannot be empty")
+    note_text = str(req.note or "").strip()
+    if not note_text:
+        raise HTTPException(status_code=400, detail="note cannot be empty")
+    effective_run_id = run_id or _current_run_id()
+    note_record = {
+        "schema": "guardian_incident_note.v1",
+        "note_id": make_event_id().replace("evt-", "guardian-note-", 1),
+        "incident_id": clean_incident_id,
+        "run_id": effective_run_id,
+        "operator": req.operator or "operator",
+        "source": req.source or "live_gui",
+        "note": note_text,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    metadata = controller._state.run_metadata
+    notes = metadata.setdefault("guardian_incident_notes", [])
+    if not isinstance(notes, list):
+        notes = []
+        metadata["guardian_incident_notes"] = notes
+    notes.append(note_record)
+    del notes[:-200]
+
+    matched = False
+    incidents = metadata.get("incident_records") if isinstance(metadata.get("incident_records"), list) else []
+    for incident in incidents:
+        if not isinstance(incident, dict):
+            continue
+        if str(incident.get("incident_id") or incident.get("id") or "") != clean_incident_id:
+            continue
+        incident_notes = incident.setdefault("operator_notes", [])
+        if not isinstance(incident_notes, list):
+            incident_notes = []
+            incident["operator_notes"] = incident_notes
+        incident_notes.append(note_record)
+        incident["last_operator_note_at"] = note_record["created_at"]
+        matched = True
+        break
+
+    try:
+        controller._append_guardian_event(note_record)
+    except Exception:
+        pass
+    event = await controller.emit_runtime_event(
+        event_type="operator.guardian.incident_note_attached",
+        message=f"Guardian incident note attached: {clean_incident_id}",
+        payload={
+            "agent": "guardian_agent",
+            "agent_id": "guardian",
+            "node_id": "guardian",
+            "status": "recorded",
+            "incident_id": clean_incident_id,
+            "note_id": note_record["note_id"],
+            "matched_incident": matched,
+            "guardian_incident_note": note_record,
+        },
+        level="INFO",
+        run_id=effective_run_id,
+    )
+    return {"ok": True, "matched_incident": matched, "note": note_record, "event": event}
+
+
+def _approval_events_for_run(run_id: str) -> dict[str, list[dict[str, object]]]:
+    """Build pending/resolved approval queues from buffered runtime events."""
+    events = [event for event in controller.recent_events() if event.get("run_id") == run_id]
+    requested: list[dict[str, Any]] = []
+    resolved: dict[str, dict[str, Any]] = {}
+    for event in events:
+        event_type = str(event.get("type") or event.get("event_type") or "")
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        is_request = (
+            event_type == "approval.requested"
+            or bool(payload.get("requires_human_approval"))
+            or bool(payload.get("requires_approval"))
+            or str(payload.get("status") or "") == "waiting_approval"
+        )
+        if is_request:
+            requested.append(event)
+        if event_type == "approval.resolved":
+            approval_id = _approval_id_from_event(event)
+            if approval_id:
+                resolved[approval_id] = event
+    approvals: list[dict[str, object]] = []
+    for event in requested:
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        approval_id = _approval_id_from_event(event)
+        resolved_event = resolved.get(approval_id)
+        approvals.append(
+            {
+                "approval_id": approval_id,
+                "status": "resolved" if resolved_event else "pending",
+                "title": payload.get("title") or event.get("message") or "Approval required",
+                "reason": payload.get("reason") or payload.get("failure_code") or "",
+                "stage": payload.get("stage") or event.get("timestamp_stage") or event.get("node_id") or "",
+                "safety_class": payload.get("safety_class", "operator_review"),
+                "request_event_id": event.get("event_id", ""),
+                "requested_at": event.get("ts") or event.get("timestamp") or "",
+                "resolved_event_id": resolved_event.get("event_id", "") if resolved_event else "",
+                "resolved_at": resolved_event.get("ts", "") if resolved_event else "",
+                "decision": (resolved_event.get("payload", {}) if isinstance(resolved_event, dict) else {}).get("decision", "") if resolved_event else "",
+                "operator": (resolved_event.get("payload", {}) if isinstance(resolved_event, dict) else {}).get("operator", "") if resolved_event else "",
+                "payload": payload,
+            }
+        )
+    pending = [item for item in approvals if item["status"] == "pending"]
+    resolved_items = [item for item in approvals if item["status"] == "resolved"]
+    return {"approvals": approvals, "pending": pending, "resolved": resolved_items}
+
+
+def _runtime_graph_handler_registry() -> HandlerRegistry:
+    """Build the Runtime IDE handler allowlist from registered runtime agents."""
+    registry = HandlerRegistry()
+
+    async def _noop(runtime_state: dict[str, object]) -> dict[str, object]:
+        return runtime_state
+
+    for handler_id in {"runtime.dispatch", "runtime.idle", "runtime.terminal", "runtime.step_complete", GENERATED_MODULE_HANDLER_ID}:
+        registry.register(handler_id, _noop)
+    for agent_name in controller._deps.agent_registry.names():
+        registry.register(f"agent.{agent_name}", _noop)
+    return registry
+
+
+def _runtime_module_ids() -> set[str]:
+    """Return module ids available to graph/module validation."""
+    ids: set[str] = set()
+    for path in RUNTIME_MODULE_ROOT.glob("*/module.yaml"):
+        try:
+            raw = read_yaml(path) or {}
+        except (OSError, yaml.YAMLError):
+            ids.add(path.parent.name)
+            continue
+        module = raw.get("module", raw) if isinstance(raw, dict) else {}
+        if isinstance(module, dict):
+            ids.add(str(module.get("id") or path.parent.name))
+        else:
+            ids.add(path.parent.name)
+    return ids
+
+
+def _runtime_graph_compiler(config: GraphConfig) -> ATRLangGraphCompiler:
+    """Build a compiler with current handler and module allowlists."""
+    return ATRLangGraphCompiler(config, _runtime_graph_handler_registry(), module_ids=_runtime_module_ids())
+
+
+def _package_service():
+    """Inject installed metadata and existing validation; never load device settings."""
+    from device_bridges.module_discovery import discover_bridge_modules
+    from packages.service import PackageService, installed_agent_packages
+
+    def validate_graph(payload):
+        config = GraphConfig.model_validate(payload)
+        compiler = _runtime_graph_compiler(config)
+        errors = compiler.validate()
+        if not errors:
+            compiler.compile()
+        return errors
+
+    return PackageService(
+        agent_packages=installed_agent_packages(
+            module.describe() for module in controller._deps.agent_registry.modules()),
+        bridge_modules=[module.describe() for module in discover_bridge_modules()],
+        installed_handlers=_runtime_graph_handler_registry().names(),
+        installed_module_ids=_runtime_module_ids(),
+        validate_graph=validate_graph, validate_module=_validate_module_payload,
+    )
+
+
+from packages.api import make_packages_router
+
+app.include_router(make_packages_router(_package_service))
+
+
+async def _emit_graph_validation_failed(
+    *,
+    graph_id: str,
+    action: str,
+    errors: list[str],
+) -> None:
+    """Emit a standard Runtime IDE graph validation failure event."""
+    await controller.emit_runtime_event(
+        event_type="graph.validation_failed",
+        message=f"Runtime graph {graph_id} validation failed during {action}.",
+        level="ERROR",
+        payload={
+            "graph_id": graph_id,
+            "node_id": "runtime_ide",
+            "status": "failed",
+            "action": action,
+            "errors": list(errors),
+        },
+    )
+
+
+async def _emit_graph_compiled(
+    *,
+    graph_id: str,
+    action: str,
+    compiled_graph: dict[str, object],
+    graph_evidence: dict[str, object] | None = None,
+) -> None:
+    """Emit a standard Runtime IDE graph compiled event."""
+    await controller.emit_runtime_event(
+        event_type="graph.compiled",
+        message=f"Runtime graph {graph_id} compiled for {action}.",
+        payload={
+            "graph_id": graph_id,
+            "node_id": "runtime_ide",
+            "status": "compiled",
+            "action": action,
+            "compiled_graph": compiled_graph,
+            **dict(graph_evidence or {}),
+        },
+    )
+
+
+def _graph_dry_run_sequence(
+    config: GraphConfig,
+    max_steps: int = 24,
+    *,
+    start_stage: str = "idle",
+) -> list[dict[str, object]]:
+    """Simulate configured stage transitions without calling agents or device tools."""
+    stage = start_stage or "idle"
+    if stage not in config.stage_dispatch and stage not in config.terminal_stages:
+        raise HTTPException(status_code=400, detail=f"Unknown dry-run start_stage={stage}")
+    sequence: list[dict[str, object]] = []
+    seen: set[str] = set()
+    nodes_by_id = {node.id: node for node in config.nodes}
+    for step_index in range(max_steps):
+        node_id = config.node_for_stage(stage)
+        node = nodes_by_id.get(node_id or "")
+        module_id = _module_id_from_graph_node_module_id(node.module_id if node else None)
+        module_runtime = _module_runtime_summary(module_id) if module_id else {}
+        graph_handler = str(node.handler) if node else ""
+        module_handler = str(module_runtime.get("handler") or "") if module_runtime else ""
+        effective_handler = module_handler or graph_handler
+        transition_candidates = config.transition_candidates(stage)
+        next_stage = config.next_stage(stage, guardian_decision="continue", state_metadata={})
+        selected_transition = next((candidate for candidate in transition_candidates if str(candidate.get("to_stage")) == next_stage), {})
+        sequence.append(
+            {
+                "step": step_index + 1,
+                "stage": stage,
+                "node_id": node_id,
+                "node_label": node.label if node else "",
+                "node_kind": node.kind if node else "",
+                "graph_handler": graph_handler,
+                "module_id": module_id,
+                "module_handler": module_handler,
+                "effective_handler": effective_handler,
+                "module_runtime": module_runtime,
+                "next_stage": next_stage,
+                "transition_candidates": transition_candidates,
+                "selected_transition": selected_transition,
+            }
+        )
+        if stage == "guardian" and next_stage == "design":
+            break
+        if next_stage in config.terminal_stages:
+            break
+        if next_stage in seen:
+            break
+        seen.add(stage)
+        stage = next_stage
+    return sequence
+
+
+@app.get("/api/graphs")
+async def get_runtime_graphs() -> dict[str, object]:
+    """List runtime graph configs exposed to the GUI/IDE."""
+    graphs = [_graph_list_item(config, path) for _graph_id, path, config in _graph_config_items()]
+    return {"ok": True, "active_graph_id": PRIMARY_RUNTIME_GRAPH_ID, "graphs": graphs}
+
+
+@app.get("/api/graphs/{graph_id}")
+async def get_runtime_graph(graph_id: str) -> dict[str, object]:
+    """Return one runtime graph config."""
+    return {"ok": True, "graph": _graph_config_payload(graph_id)}
+
+
+@app.get("/api/handlers")
+async def get_runtime_handlers() -> dict[str, object]:
+    """Return allowlisted graph handler ids and runtime-call metadata."""
+    registry = _runtime_graph_handler_registry()
+    return {"ok": True, "handlers": registry.names(), "handler_metadata": registry.metadata_all()}
+
+
+@app.get("/api/tools")
+async def get_runtime_tools() -> dict[str, object]:
+    """Return registered ToolRegistry names for module allowlist editing."""
+    tools = sorted(_registered_tool_names())
+    return {"ok": True, "tools": tools, "count": len(tools)}
+
+
+@app.get("/api/modules")
+async def get_runtime_modules() -> dict[str, object]:
+    """List editable module configs exposed to the Runtime IDE."""
+    modules = [_module_list_item(path) for path in sorted(RUNTIME_MODULE_ROOT.glob("*/module.yaml"))]
+    categories: dict[str, int] = {}
+    for module in modules:
+        category = str(module.get("category") or "runtime")
+        categories[category] = categories.get(category, 0) + 1
+    return {"ok": True, "modules": modules, "categories": categories, "loaded_module_ids": sorted(_RUNTIME_MODULE_MANAGEMENT_LOADED)}
+
+
+@app.get("/api/modules/management-state")
+async def get_runtime_module_management_state() -> dict[str, object]:
+    """Return module management workspace load state."""
+    modules = [_module_list_item(path) for path in sorted(RUNTIME_MODULE_ROOT.glob("*/module.yaml"))]
+    known_ids = {str(module.get("id")) for module in modules}
+    _RUNTIME_MODULE_MANAGEMENT_LOADED.intersection_update(known_ids)
+    return {"ok": True, "loaded_module_ids": sorted(_RUNTIME_MODULE_MANAGEMENT_LOADED), "modules": modules}
+
+
+@app.post("/api/modules")
+async def create_runtime_module(req: RuntimeModuleCreateRequest) -> dict[str, object]:
+    """Create a cataloged Runtime IDE module from an uploaded Python file via the active LLM backend."""
+    if controller.snapshot().get("is_running"):
+        raise HTTPException(status_code=409, detail="Cannot create runtime module while a run is active.")
+    try:
+        safe_id = ModuleConfigStore.safe_module_id(req.module_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    module_dir = RUNTIME_MODULE_ROOT / safe_id
+    module_path = module_dir / "module.yaml"
+    if module_path.exists():
+        raise HTTPException(status_code=409, detail=f"Module already exists: {safe_id}")
+
+    handler_registry = set(_runtime_graph_handler_registry().names())
+    registered_tools = _registered_tool_names()
+    warnings: list[str] = []
+    transform_payload: dict[str, Any] = {}
+    transformed_source = ""
+
+    if req.transform_with_llm:
+        transform_payload = await _transform_module_source_with_model(req, safe_id)
+        transformed_source = str(transform_payload.get("transformed_source") or "").strip()
+    else:
+        transformed_source = str(req.source_text or "").strip()
+        if not transformed_source:
+            raise HTTPException(status_code=400, detail="source_text is required when transform_with_llm is false.")
+        warnings.append("LLM transform was disabled; module is stored as a protocol-pending source artifact.")
+
+    requested_handler = str(req.handler or "").strip()
+    suggested_handler = str(transform_payload.get("handler") or "").strip()
+    if requested_handler and requested_handler != "runtime.step_complete" and requested_handler in handler_registry:
+        handler = requested_handler
+    elif suggested_handler in handler_registry:
+        handler = suggested_handler
+    elif requested_handler in handler_registry:
+        handler = requested_handler
+    else:
+        handler = "runtime.step_complete"
+        if requested_handler or suggested_handler:
+            warnings.append(f"Unsupported handler ignored: requested={requested_handler or '-'} suggested={suggested_handler or '-'}")
+
+    category = _module_designer_category(str(transform_payload.get("category") or req.category or "custom"))
+    label = str(transform_payload.get("label") or req.label or safe_id).strip() or safe_id
+    llm_role = str(req.llm_role or transform_payload.get("llm_role") or "").strip()
+    notes = str(transform_payload.get("notes") or req.notes or "Created from Runtime IDE Module Designer.").strip()
+
+    suggested_tools = transform_payload.get("tools") if isinstance(transform_payload.get("tools"), list) else []
+    raw_tools = [*req.tools, *[str(tool) for tool in suggested_tools]]
+    tools: list[str] = []
+    rejected_tools: list[str] = []
+    for tool in raw_tools:
+        clean = str(tool).strip()
+        if not clean or clean in tools:
+            continue
+        if registered_tools and clean not in registered_tools:
+            rejected_tools.append(clean)
+            continue
+        tools.append(clean)
+    if rejected_tools:
+        warnings.append(f"Unregistered tools omitted: {', '.join(rejected_tools[:8])}")
+
+    internal_graph = _normalize_designer_steps(
+        transform_payload.get("internal_graph"),
+        default_handler=handler,
+        handler_registry=handler_registry,
+    )
+
+    module_dir.mkdir(parents=True, exist_ok=True)
+    original_source_name = _safe_source_filename(req.source_filename or f"{safe_id}_original.py")
+    if original_source_name == "handler.py":
+        original_source_name = "source_original.py"
+    original_path = module_dir / original_source_name
+    if req.source_text.strip():
+        original_path.write_text(req.source_text, encoding="utf-8")
+
+    transformed_path = module_dir / "handler.py"
+    transformed_path.write_text(transformed_source + ("\n" if not transformed_source.endswith("\n") else ""), encoding="utf-8")
+    designer_model = str(
+        transform_payload.get("_used_model")
+        or req.transform_model
+        or os.getenv("AUTONOMOUS_MODULE_DESIGNER_MODEL", "")
+        or "module_designer_route"
+    )
+
+    metadata: dict[str, object] = {
+        "category": category,
+        "created_from": "runtime_ide_module_designer",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "source_filename": original_source_name,
+        "python_source_path": str(original_path) if req.source_text.strip() else "",
+        "transformed_python_source_path": str(transformed_path),
+        "transformed_by_model": designer_model if req.transform_with_llm else "operator_disabled_llm_transform",
+        "source_truncated_for_prompt": bool(transform_payload.get("_source_truncated_for_prompt", False)),
+        "pending_handler_registration": handler == "runtime.step_complete",
+        "generated_adapter_approved": False,
+        "generated_adapter_handler_id": GENERATED_MODULE_HANDLER_ID,
+        "protocol_contract": "AgentResult / OrchestratorState / AgentContext / ToolRegistry",
+        "warnings": warnings,
+    }
+    if rejected_tools:
+        metadata["rejected_tools"] = rejected_tools
+
+    payload = {
+        "module": {
+            "id": safe_id,
+            "label": label,
+            "handler": handler,
+            "llm_role": llm_role,
+            "editable": True,
+            "category": category,
+            "metadata": metadata,
+            "safety": {"live_requires_validation": True, "dry_run_supported": True, "requires_human_approval": handler == "runtime.step_complete"},
+            "tools": tools,
+            "pre_execution": [],
+            "internal_graph": internal_graph,
+            "io_contract": {
+                "input": "OrchestratorState",
+                "output": "AgentResult.data merged into OrchestratorState",
+                "adapter_signature": "async run(state: OrchestratorState, ctx: AgentContext) -> AgentResult",
+            },
+            "notes": notes,
+        }
+    }
+    errors = _validate_module_payload(safe_id, payload)
+    if errors:
+        return {"ok": False, "module_id": safe_id, "errors": errors, "warnings": warnings, "module": payload}
+
+    store = _module_config_store()
+    dry_run = _module_dry_run_evidence(safe_id, payload)
+    version = store.save_version(safe_id, payload, reason="runtime_ide_module_designer_create", author="runtime_ide")
+    store.write_active(safe_id, payload)
+    return {
+        "ok": True,
+        "module_id": safe_id,
+        "errors": [],
+        "warnings": warnings,
+        "version": version,
+        "module": payload,
+        "dry_run": dry_run,
+        "catalog_item": _module_list_item(module_path),
+        "transform": {
+            "model": designer_model if req.transform_with_llm else "disabled",
+            "category": category,
+            "handler": handler,
+            "transformed_source_path": str(transformed_path),
+            "pending_handler_registration": handler == "runtime.step_complete",
+            "generated_adapter_approved": False,
+            "generated_adapter_handler_id": GENERATED_MODULE_HANDLER_ID,
+        },
+    }
+
+
+@app.post("/api/modules/templates/{template_kind}")
+async def create_runtime_module_template(template_kind: str, req: RuntimeModuleTemplateRequest) -> dict[str, object]:
+    """Create an inactive draft module template for Runtime IDE preview/editing."""
+    if controller.snapshot().get("is_running"):
+        raise HTTPException(status_code=409, detail="Cannot create runtime module template while a run is active.")
+    try:
+        safe_id = ModuleConfigStore.safe_module_id(req.module_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    module_dir = RUNTIME_MODULE_ROOT / safe_id
+    module_path = module_dir / "module.yaml"
+    ui_path = module_dir / "ui.yaml"
+    if module_path.exists():
+        raise HTTPException(status_code=409, detail=f"Module already exists: {safe_id}")
+    payload, ui_payload = _runtime_module_template_payload(template_kind, req, safe_id)
+    errors = _validate_module_payload(safe_id, payload)
+    if errors:
+        return {"ok": False, "module_id": safe_id, "errors": errors, "module": payload}
+    module_dir.mkdir(parents=True, exist_ok=True)
+    ui_path.write_text(yaml.safe_dump(ui_payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    store = _module_config_store()
+    version = store.save_version(safe_id, payload, reason=f"runtime_module_template_create:{template_kind}", author=req.author)
+    store.write_active(safe_id, payload)
+    dry_run = _module_dry_run_evidence(safe_id, payload)
+    return {
+        "ok": True,
+        "module_id": safe_id,
+        "template_kind": template_kind,
+        "version": version,
+        "module": payload,
+        "ui": ui_payload,
+        "ui_path": str(ui_path),
+        "catalog_item": _module_list_item(module_path),
+        "manifest": next((item for item in _runtime_agent_manifests_payload(PRIMARY_RUNTIME_GRAPH_ID, include_unattached=True)["agents"] if item.get("id") == safe_id), {}),
+        "dry_run": dry_run,
+        "errors": [],
+    }
+
+
+@app.get("/api/modules/{module_id}")
+async def get_runtime_module(module_id: str) -> dict[str, object]:
+    """Return one editable module config."""
+    payload = _module_config_payload(module_id)
+    installed = _installed_agent_module(module_id)
+    catalog = _module_execution_catalog(module_id)
+    normalized = ModuleConfigStore.normalize_payload(dict(payload))
+    module = normalized.get("module", {}) if isinstance(normalized, dict) else {}
+    compiled = _compiled_module_execution_graph(module_id, module) if catalog is not None and isinstance(module, dict) else None
+    owner = controller._deps.agent_registry.get_installed(installed.agent_name) if installed is not None else None
+    plan_contract = getattr(owner, "plan_contract", None)
+    owner_plan_contract = plan_contract() if callable(plan_contract) else None
+    return {
+        "ok": True,
+        "module": payload,
+        "execution_catalog": catalog.describe() if catalog is not None else None,
+        "execution_graph_revision": compiled.revision if compiled is not None else None,
+        "implementation": installed.describe() if installed else None,
+        "owner_plan_contract": owner_plan_contract,
+        "owner_plan_state": "configured" if isinstance(module, dict) and module.get("owner_plan") is not None else "default",
+        "loaded": module_id in _RUNTIME_MODULE_MANAGEMENT_LOADED,
+        "runtime_effect": _module_management_runtime_effect(),
+        "lifecycle": _module_management_lifecycle(module_id, payload),
+    }
+
+
+@app.get("/api/modules/{module_id}/ui")
+async def get_runtime_module_ui(module_id: str) -> dict[str, object]:
+    """Return one module-local UI descriptor."""
+    ui_path = _module_ui_path(module_id)
+    ui, path = _module_ui_payload(module_id)
+    return {
+        "ok": True,
+        "module_id": ModuleConfigStore.safe_module_id(module_id),
+        "ui": ui,
+        "path": path or str(ui_path),
+        "exists": ui_path.exists(),
+    }
+
+
+@app.put("/api/modules/{module_id}/ui")
+async def save_runtime_module_ui(module_id: str, req: RuntimeModuleUiSaveRequest) -> dict[str, object]:
+    """Save one module-local UI descriptor without changing Python execution."""
+    if controller.snapshot().get("is_running"):
+        raise HTTPException(status_code=409, detail="Cannot modify runtime module UI while a run is active.")
+    ui_path = _module_ui_path(module_id)
+    safe_id = ModuleConfigStore.safe_module_id(module_id)
+    ui = _normalize_module_ui_descriptor(req.ui if isinstance(req.ui, dict) else {})
+    payload = {"ui": ui}
+    ui_path.parent.mkdir(parents=True, exist_ok=True)
+    ui_path.write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    manifest = next((item for item in _runtime_agent_manifests_payload(PRIMARY_RUNTIME_GRAPH_ID, include_unattached=True)["agents"] if item.get("module_id") == safe_id or item.get("id") == safe_id), {})
+    return {
+        "ok": True,
+        "module_id": safe_id,
+        "ui": ui,
+        "path": str(ui_path),
+        "reason": req.reason,
+        "author": req.author,
+        "manifest": manifest,
+    }
+
+
+@app.post("/api/modules/{module_id}/register-generated")
+async def register_generated_runtime_module(module_id: str) -> dict[str, object]:
+    """Approve and activate a Module Designer-generated adapter after static validation."""
+    if controller.snapshot().get("is_running"):
+        raise HTTPException(status_code=409, detail="Cannot register generated module while a run is active.")
+    payload = ModuleConfigStore.normalize_payload(dict(_module_config_payload(module_id)))
+    module = payload.get("module", {}) if isinstance(payload, dict) else {}
+    if not isinstance(module, dict):
+        raise HTTPException(status_code=400, detail="Invalid module payload.")
+    safe_id = ModuleConfigStore.safe_module_id(module_id)
+    adapter_path = generated_adapter_path(RUNTIME_MODULE_ROOT, safe_id)
+    errors = validate_generated_adapter_file(adapter_path)
+    if errors:
+        return {"ok": False, "module_id": safe_id, "registered": False, "errors": errors, "adapter_path": str(adapter_path)}
+    metadata = module.setdefault("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+        module["metadata"] = metadata
+    module["handler"] = GENERATED_MODULE_HANDLER_ID
+    for step in module.get("internal_graph", []) if isinstance(module.get("internal_graph"), list) else []:
+        if isinstance(step, dict) and str(step.get("handler") or "").strip() == "runtime.step_complete":
+            step.pop("handler", None)
+    safety = module.setdefault("safety", {})
+    if isinstance(safety, dict):
+        safety["requires_human_approval"] = True
+        safety["live_requires_validation"] = True
+        safety["dry_run_supported"] = True
+    metadata["pending_handler_registration"] = False
+    metadata["generated_adapter_approved"] = True
+    metadata["generated_adapter_handler_id"] = GENERATED_MODULE_HANDLER_ID
+    metadata["generated_adapter_registered_at"] = datetime.now(timezone.utc).isoformat()
+    metadata["generated_adapter_path"] = str(adapter_path)
+    normalized = {"module": module}
+    enabled, enable_errors = generated_adapter_enabled(safe_id, normalized, RUNTIME_MODULE_ROOT)
+    if not enabled:
+        return {"ok": False, "module_id": safe_id, "registered": False, "errors": enable_errors, "adapter_path": str(adapter_path)}
+    errors = _validate_module_payload(safe_id, normalized)
+    if errors:
+        return {"ok": False, "module_id": safe_id, "registered": False, "errors": errors, "adapter_path": str(adapter_path)}
+    dry_run = _module_dry_run_evidence(safe_id, normalized)
+    version = _module_config_store().save_version(
+        safe_id,
+        normalized,
+        reason="runtime_module_register_generated_adapter",
+        author="runtime_ide",
+    )
+    _module_config_store().write_active(safe_id, normalized)
+    return {
+        "ok": True,
+        "module_id": safe_id,
+        "registered": True,
+        "handler": GENERATED_MODULE_HANDLER_ID,
+        "adapter_path": str(adapter_path),
+        "version": version,
+        "dry_run": dry_run,
+        "module": normalized,
+    }
+
+
+@app.post("/api/modules/{module_id}/load")
+async def load_runtime_module_into_management(module_id: str) -> dict[str, object]:
+    """Load a module into the standalone management workspace without changing runtime config."""
+    payload = _module_config_payload(module_id)
+    _RUNTIME_MODULE_MANAGEMENT_LOADED.add(module_id)
+    return {
+        "ok": True,
+        "module_id": module_id,
+        "loaded": True,
+        "loaded_module_ids": sorted(_RUNTIME_MODULE_MANAGEMENT_LOADED),
+        "runtime_effect": _module_management_runtime_effect(),
+        "lifecycle": _module_management_lifecycle(module_id, payload),
+        "module": payload,
+    }
+
+
+@app.post("/api/modules/{module_id}/unload")
+async def unload_runtime_module_from_management(module_id: str) -> dict[str, object]:
+    """Unload a module from the management workspace without deleting module.yaml."""
+    payload = _module_config_payload(module_id)
+    _RUNTIME_MODULE_MANAGEMENT_LOADED.discard(module_id)
+    return {
+        "ok": True,
+        "module_id": module_id,
+        "loaded": False,
+        "loaded_module_ids": sorted(_RUNTIME_MODULE_MANAGEMENT_LOADED),
+        "runtime_effect": _module_management_runtime_effect(),
+        "lifecycle": _module_management_lifecycle(module_id, payload),
+    }
+
+
+@app.get("/api/modules/{module_id}/versions")
+async def get_runtime_module_versions(module_id: str) -> dict[str, object]:
+    """List saved versions for one module config."""
+    _module_config_payload(module_id)
+    return {"ok": True, "module_id": module_id, "versions": _module_config_store().list_versions(module_id)}
+
+
+@app.get("/api/modules/{module_id}/versions/{version_id}")
+async def get_runtime_module_version(module_id: str, version_id: str) -> dict[str, object]:
+    """Return one saved module config version without activating it."""
+    _module_config_payload(module_id)
+    try:
+        version = _module_config_store().read_version(module_id, version_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "module_id": module_id, "version": version}
+
+
+@app.post("/api/modules/{module_id}/validate")
+async def validate_runtime_module(module_id: str, req: RuntimeModuleSaveRequest | None = None) -> dict[str, object]:
+    """Validate an active or draft module config without writing it."""
+    payload = dict(req.module) if req and req.module else _module_config_payload(module_id)
+    errors = _validate_module_payload(module_id, payload)
+    return {"ok": not errors, "module_id": module_id, "errors": errors}
+
+
+@app.post("/api/modules/{module_id}/dry-run")
+async def dry_run_runtime_module(module_id: str, req: RuntimeModuleSaveRequest | None = None) -> dict[str, object]:
+    """Validate and enumerate structural paths without calling owner functions."""
+    payload = dict(req.module) if req and req.module else _module_config_payload(module_id)
+    errors = _validate_module_payload(module_id, payload)
+    if errors:
+        return {
+            "ok": False, "module_id": module_id, "errors": errors,
+            "mode": "structural_preview", "executes_owner_functions": False,
+            "graph_revision": "", "paths": [], "sequence": [], "summary": _module_dry_run_summary([]),
+        }
+    return {**_module_dry_run_evidence(module_id, payload), "errors": []}
+
+
+@app.put("/api/modules/{module_id}")
+async def save_runtime_module(module_id: str, req: RuntimeModuleSaveRequest) -> dict[str, object]:
+    """Validate, version, and optionally activate one module config."""
+    if controller.snapshot().get("is_running"):
+        raise HTTPException(status_code=409, detail="Cannot modify runtime module while a run is active.")
+    if not req.module:
+        raise HTTPException(status_code=400, detail="Missing module payload.")
+    payload = ModuleConfigStore.normalize_payload(dict(req.module))
+    errors = _validate_module_payload(module_id, payload)
+    if errors:
+        return {
+            "ok": False,
+            "module_id": module_id,
+            "errors": errors,
+            "version": None,
+            "dry_run": {"ok": False, "module_id": module_id, "sequence": [], "summary": _module_dry_run_summary([])},
+        }
+    dry_run = _module_dry_run_evidence(module_id, payload)
+    version = _module_config_store().save_version(module_id, payload, reason=req.reason, author=req.author)
+    if req.activate:
+        _module_config_store().write_active(module_id, payload)
+    return {
+        "ok": True,
+        "module_id": module_id,
+        "errors": [],
+        "version": version,
+        "activated": req.activate,
+        "dry_run": dry_run,
+    }
+
+
+@app.post("/api/graphs/{graph_id}/validate")
+async def validate_runtime_graph(graph_id: str) -> dict[str, object]:
+    """Validate the runtime graph against the current handler allowlist."""
+    config = _load_runtime_graph_config(graph_id)
+    compiler = _runtime_graph_compiler(config)
+    errors = compiler.validate()
+    if errors:
+        await _emit_graph_validation_failed(graph_id=graph_id, action="validate", errors=errors)
+    return {"ok": not errors, "graph_id": graph_id, "errors": errors}
+
+
+@app.post("/api/graphs/{graph_id}/validate-draft")
+async def validate_runtime_graph_draft(graph_id: str, req: RuntimeGraphSaveRequest) -> dict[str, object]:
+    """Validate and compile-check a draft graph payload without writing a version."""
+    if not req.graph:
+        raise HTTPException(status_code=400, detail="Missing graph payload.")
+    try:
+        config = GraphConfig.model_validate(req.graph)
+    except Exception as exc:
+        errors = [str(exc)]
+        await _emit_graph_validation_failed(graph_id=graph_id, action="validate-draft", errors=errors)
+        return {"ok": False, "graph_id": graph_id, "errors": errors, "compiled": False}
+    if graph_id != config.id:
+        raise HTTPException(status_code=400, detail=f"graph_id path/body mismatch: {graph_id} != {config.id}")
+    compiler = _runtime_graph_compiler(config)
+    errors = compiler.validate()
+    if errors:
+        await _emit_graph_validation_failed(graph_id=graph_id, action="validate-draft", errors=errors)
+        return {"ok": False, "graph_id": graph_id, "errors": errors, "compiled": False}
+    compiler.compile()
+    compiled_graph = compiler.summary()
+    await _emit_graph_compiled(graph_id=graph_id, action="validate-draft", compiled_graph=compiled_graph, graph_evidence=_graph_version_evidence(graph_id, config))
+    return {"ok": True, "graph_id": graph_id, "errors": [], "compiled": True,
+            "compiled_graph": compiled_graph, "module_lifecycle": _graph_module_lifecycle_preview(config)}
+
+
+def _graph_module_lifecycle_preview(draft: GraphConfig) -> dict[str, object]:
+    """Compare owner bindings without applying the draft or contacting equipment."""
+    from agents.core.orchestrator.capabilities import OwnerCatalog
+
+    applied = controller._planning_setup_catalog()
+    draft_catalog = OwnerCatalog(controller._deps.agent_registry, draft,
+                                 graph_root=RUNTIME_MODULE_ROOT.parent).snapshot()
+    current = {row["owner"] for row in applied.bindings()}
+    proposed = {row["owner"] for row in draft_catalog.bindings()}
+    return {
+        "applied_graph_id": applied.graph_config.id,
+        "draft_graph_id": draft.id,
+        "applied": sorted(current), "draft": sorted(proposed),
+        "added": sorted(proposed - current), "removed": sorted(current - proposed),
+        "retained": sorted(current & proposed),
+        "running": bool(controller.snapshot().get("is_running")),
+        "history_preserved": True,
+        "affected_surfaces": ["Execution admission", "Live GUI", "Owner/setup discovery"],
+    }
+
+
+@app.post("/api/graphs/{graph_id}/compile")
+async def compile_runtime_graph(graph_id: str) -> dict[str, object]:
+    """Compile the active graph without starting agents or hardware."""
+    config = _load_runtime_graph_config(graph_id)
+    compiler = _runtime_graph_compiler(config)
+    errors = compiler.validate()
+    if errors:
+        await _emit_graph_validation_failed(graph_id=graph_id, action="compile", errors=errors)
+        return {"ok": False, "graph_id": graph_id, "errors": errors, "compiled": False}
+    compiler.compile()
+    compiled_graph = compiler.summary()
+    await _emit_graph_compiled(graph_id=graph_id, action="compile", compiled_graph=compiled_graph, graph_evidence=_graph_version_evidence(graph_id, config))
+    return {"ok": True, "graph_id": graph_id, "errors": [], "compiled": True, "compiled_graph": compiled_graph}
+
+
+@app.post("/api/graphs/{graph_id}/export-yaml", response_class=PlainTextResponse)
+async def export_runtime_graph_yaml(graph_id: str, req: RuntimeGraphSaveRequest | None = None) -> PlainTextResponse:
+    """Export an active or draft graph payload as canonical YAML."""
+    payload = dict(req.graph) if req and req.graph else _graph_config_payload(graph_id)
+    try:
+        config = GraphConfig.model_validate(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid graph payload: {exc}") from exc
+    if graph_id != config.id:
+        raise HTTPException(status_code=400, detail=f"graph_id path/body mismatch: {graph_id} != {config.id}")
+    body = yaml.safe_dump({"graph": config.model_dump(mode="json")}, sort_keys=False, allow_unicode=True)
+    return PlainTextResponse(
+        content=body,
+        media_type="application/x-yaml",
+        headers={"Content-Disposition": f'attachment; filename="{config.id}.yaml"'},
+    )
+
+
+@app.post("/api/graphs/{graph_id}/import-yaml")
+async def import_runtime_graph_yaml(graph_id: str, req: RuntimeGraphYamlImportRequest) -> dict[str, object]:
+    """Parse, validate, and compile-check an imported graph YAML draft without activation."""
+    try:
+        raw = yaml.safe_load(req.yaml_text) or {}
+    except yaml.YAMLError as exc:
+        errors = [f"YAML parse error: {exc}"]
+        await _emit_graph_validation_failed(graph_id=graph_id, action="import-yaml", errors=errors)
+        return {"ok": False, "graph_id": graph_id, "errors": errors, "compiled": False, "graph": None}
+    if not isinstance(raw, dict):
+        errors = ["YAML root must be an object"]
+        await _emit_graph_validation_failed(graph_id=graph_id, action="import-yaml", errors=errors)
+        return {"ok": False, "graph_id": graph_id, "errors": errors, "compiled": False, "graph": None}
+    graph_payload = raw.get("graph", raw)
+    try:
+        config = GraphConfig.model_validate(graph_payload)
+    except Exception as exc:
+        errors = [str(exc)]
+        await _emit_graph_validation_failed(graph_id=graph_id, action="import-yaml", errors=errors)
+        return {"ok": False, "graph_id": graph_id, "errors": errors, "compiled": False, "graph": None}
+    if graph_id != config.id:
+        errors = [f"graph_id path/body mismatch: {graph_id} != {config.id}"]
+        await _emit_graph_validation_failed(graph_id=graph_id, action="import-yaml", errors=errors)
+        raise HTTPException(status_code=400, detail=errors[0])
+    compiler = _runtime_graph_compiler(config)
+    errors = compiler.validate()
+    if errors:
+        await _emit_graph_validation_failed(graph_id=graph_id, action="import-yaml", errors=errors)
+        return {
+            "ok": False,
+            "graph_id": graph_id,
+            "errors": errors,
+            "compiled": False,
+            "compiled_graph": None,
+            "graph": config.model_dump(mode="json"),
+        }
+    compiler.compile()
+    compiled_graph = compiler.summary()
+    await _emit_graph_compiled(graph_id=graph_id, action="import-yaml", compiled_graph=compiled_graph, graph_evidence=_graph_version_evidence(graph_id, config))
+    return {
+        "ok": True,
+        "graph_id": graph_id,
+        "errors": [],
+        "compiled": True,
+        "compiled_graph": compiled_graph,
+        "graph": config.model_dump(mode="json"),
+    }
+
+
+@app.get("/api/graphs/{graph_id}/versions")
+async def get_runtime_graph_versions(graph_id: str) -> dict[str, object]:
+    """List saved graph config versions."""
+    _graph_config_payload(graph_id)
+    return {"ok": True, "graph_id": graph_id, "versions": _graph_version_store(graph_id).list_versions(graph_id)}
+
+
+@app.get("/api/graphs/{graph_id}/versions/{version_id}")
+async def get_runtime_graph_version(graph_id: str, version_id: str) -> dict[str, object]:
+    """Return one saved graph config version without activating it."""
+    _graph_config_payload(graph_id)
+    try:
+        version = _graph_version_store(graph_id).read_version(graph_id, version_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "graph_id": graph_id, "version": version}
+
+
+@app.put("/api/graphs/{graph_id}")
+async def save_runtime_graph(graph_id: str, req: RuntimeGraphSaveRequest) -> dict[str, object]:
+    """Validate, version, and optionally activate a Runtime IDE graph config."""
+    if controller.snapshot().get("is_running") and req.activate:
+        raise HTTPException(status_code=409, detail="Cannot modify runtime graph while a run is active.")
+    if not req.graph:
+        raise HTTPException(status_code=400, detail="Missing graph payload.")
+    try:
+        config = GraphConfig.model_validate(req.graph)
+    except Exception as exc:
+        errors = [str(exc)]
+        await _emit_graph_validation_failed(graph_id=graph_id, action="save", errors=errors)
+        return {"ok": False, "graph_id": graph_id, "errors": errors, "version": None, "dry_run": {"ok": False, "sequence": [], "dry_run_record": {}}}
+    if graph_id != config.id:
+        errors = [f"graph_id path/body mismatch: {graph_id} != {config.id}"]
+        await _emit_graph_validation_failed(graph_id=graph_id, action="save", errors=errors)
+        raise HTTPException(status_code=400, detail=errors[0])
+    compiler = _runtime_graph_compiler(config)
+    errors = compiler.validate()
+    if errors:
+        await _emit_graph_validation_failed(graph_id=graph_id, action="save", errors=errors)
+        return {"ok": False, "graph_id": graph_id, "errors": errors, "version": None, "dry_run": {"ok": False, "sequence": [], "dry_run_record": {}}}
+    compiler.compile()
+    compiled_graph = compiler.summary()
+    dry_run = _graph_dry_run_evidence(config=config, compiled_graph=compiled_graph, record_live_gate=False)
+    await _emit_graph_compiled(graph_id=graph_id, action="save", compiled_graph=compiled_graph, graph_evidence=_graph_version_evidence(graph_id, config))
+    payload = config.model_dump(mode="json")
+    version = _graph_version_store(graph_id).save_version(graph_id, payload, reason=req.reason, author=req.author)
+    if req.activate:
+        _graph_version_store(graph_id).write_active(payload)
+        dry_run["dry_run_record"] = _record_graph_dry_run(
+            config=config,
+            options=RuntimeGraphDryRunRequest(start_stage=str(dry_run.get("start_stage") or "idle"), max_steps=24),
+            sequence=dry_run.get("sequence", []),
+            compiled_graph=compiled_graph,
+        )
+    return {
+        "ok": True,
+        "graph_id": graph_id,
+        "errors": [],
+        "version": version,
+        "activated": req.activate,
+        "compiled_graph": compiled_graph,
+        "dry_run": dry_run,
+        "dry_run_record": dry_run.get("dry_run_record", {}),
+    }
+
+
+@app.post("/api/graphs/{graph_id}/save-version")
+async def save_runtime_graph_version_compat(graph_id: str, req: RuntimeGraphSaveVersionRequest | None = None) -> dict[str, object]:
+    """Compatibility endpoint for package-specified graph version saves.
+
+    Unlike the Runtime IDE PUT endpoint, this package endpoint defaults to
+    version-only writes. Activation still requires an explicit activate=true.
+    """
+    payload = req or RuntimeGraphSaveVersionRequest()
+    graph_payload = dict(payload.graph) if payload.graph else _graph_config_payload(graph_id)
+    result = await save_runtime_graph(
+        graph_id,
+        RuntimeGraphSaveRequest(
+            graph=graph_payload,
+            reason=payload.reason,
+            author=payload.author,
+            activate=payload.activate,
+        ),
+    )
+    if result.get("ok"):
+        await controller.emit_runtime_event(
+            event_type="graph_version_saved",
+            message=f"Graph version saved: {graph_id}",
+            payload={
+                "graph_id": graph_id,
+                "version": result.get("version"),
+                "activated": result.get("activated"),
+                "compatibility_endpoint": f"/api/graphs/{graph_id}/save-version",
+            },
+            level="INFO",
+        )
+    result["compatibility"] = "atr_live_gui_package"
+    result["save_version_endpoint"] = True
+    return result
+
+
+@app.post("/api/graphs/{graph_id}/dry-run")
+async def dry_run_runtime_graph(graph_id: str, req: RuntimeGraphDryRunRequest | None = None) -> dict[str, object]:
+    """Run a non-device transition simulation for the active graph or a supplied draft graph."""
+    options = req or RuntimeGraphDryRunRequest()
+    draft_mode = bool(options.graph)
+    if draft_mode:
+        try:
+            config = GraphConfig.model_validate(options.graph)
+        except Exception as exc:
+            errors = [str(exc)]
+            await _emit_graph_validation_failed(graph_id=graph_id, action="dry-run-draft", errors=errors)
+            return {"ok": False, "graph_id": graph_id, "errors": errors, "sequence": [], "draft": True}
+        if graph_id != config.id:
+            raise HTTPException(status_code=400, detail=f"graph_id path/body mismatch: {graph_id} != {config.id}")
+    else:
+        config = _load_runtime_graph_config(graph_id)
+    compiler = _runtime_graph_compiler(config)
+    errors = compiler.validate()
+    if errors:
+        await _emit_graph_validation_failed(graph_id=graph_id, action="dry-run-draft" if draft_mode else "dry-run", errors=errors)
+        return {"ok": False, "graph_id": graph_id, "errors": errors, "sequence": [], "draft": draft_mode}
+    compiler.compile()
+    compiled_graph = compiler.summary()
+    sequence = _graph_dry_run_sequence(config, max_steps=options.max_steps, start_stage=options.start_stage)
+    if draft_mode:
+        dry_run_record = {
+            "graph_id": config.id,
+            "digest": _graph_config_digest(config),
+            "dry_run_at": datetime.now(timezone.utc).isoformat(),
+            "start_stage": options.start_stage,
+            "max_steps": options.max_steps,
+            "step_count": len(sequence),
+            "compiled_graph": compiled_graph,
+            "draft": True,
+            "live_gate_recorded": False,
+        }
+    else:
+        dry_run_record = _record_graph_dry_run(config=config, options=options, sequence=sequence, compiled_graph=compiled_graph)
+    await _emit_graph_compiled(graph_id=graph_id, action="dry-run-draft" if draft_mode else "dry-run", compiled_graph=compiled_graph, graph_evidence=_graph_version_evidence(graph_id, config))
+    return {
+        "ok": True,
+        "graph_id": graph_id,
+        "errors": [],
+        "start_stage": options.start_stage,
+        "sequence": sequence,
+        "compiled_graph": compiled_graph,
+        "dry_run_record": dry_run_record,
+        "draft": draft_mode,
+    }
+
+
+@app.get("/api/graphs/{graph_id}/dry-run-gate")
+async def get_runtime_graph_dry_run_gate(graph_id: str) -> dict[str, object]:
+    """Return active-config dry-run gate status for live Runtime IDE execution."""
+    config = _load_runtime_graph_config(graph_id)
+    dry_run_ok, dry_run_record = _graph_live_dry_run_gate(config)
+    return {
+        "ok": True,
+        "graph_id": graph_id,
+        "gate_ok": dry_run_ok,
+        "has_record": bool(dry_run_record),
+        "dry_run_record": dry_run_record,
+    }
+
+
+@app.post("/api/graphs/{graph_id}/run")
+async def run_runtime_graph(graph_id: str, req: StartRunRequest) -> dict[str, object]:
+    """Compile-check one graph config and start it through the shared LangGraph run loop."""
+    config_path = _graph_config_path(graph_id)
+    config = load_graph_config(config_path)
+    compiler = _runtime_graph_compiler(config)
+    errors = compiler.validate()
+    if errors:
+        await _emit_graph_validation_failed(graph_id=graph_id, action="run", errors=errors)
+        return {"ok": False, "graph_id": graph_id, "errors": errors, "run": None}
+    compiler.compile()
+    compiled_graph = compiler.summary()
+    metadata = config.metadata if isinstance(config.metadata, dict) else {}
+    if graph_id != PRIMARY_RUNTIME_GRAPH_ID and req.mode == "live" and not bool(metadata.get("executable_from_runtime_ide")):
+        raise HTTPException(
+            status_code=400,
+            detail="Workspace template graph live run is disabled by graph metadata; use test/replay/fault-injection or set executable_from_runtime_ide=true after validation.",
+        )
+    dry_run_ok, dry_run_record = _graph_live_dry_run_gate(config)
+    if req.mode == "live" and not dry_run_ok:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "GRAPH_DRY_RUN_REQUIRED",
+                "message": "Run graph dry-run on the active graph config before live execution.",
+                "graph_id": graph_id,
+                "has_record": bool(dry_run_record),
+            },
+        )
+    graph_evidence = _graph_version_evidence(graph_id, config)
+    run = await controller.start(
+        mode=Mode(req.mode),
+        goal=req.goal,
+        backend=req.backend,
+        fault=req.fault,
+        fault_stage=req.fault_stage,
+        graph_id=graph_id,
+        graph_config_path=_graph_config_runtime_path(config_path),
+        graph_hash=str(graph_evidence.get("graph_hash") or ""),
+        graph_version=str(graph_evidence.get("graph_version") or ""),
+        graph_version_id=str(graph_evidence.get("graph_version_id") or ""),
+        graph_version_path=str(graph_evidence.get("graph_version_path") or ""),
+    )
+    await _emit_graph_compiled(graph_id=graph_id, action="run", compiled_graph=compiled_graph, graph_evidence=graph_evidence)
+    return {
+        "ok": bool(run.get("ok")),
+        "graph_id": graph_id,
+        "graph_hash": graph_evidence.get("graph_hash", ""),
+        "graph_version": graph_evidence.get("graph_version", ""),
+        "graph_version_id": graph_evidence.get("graph_version_id", ""),
+        "errors": [],
+        "run": run,
+        "compiled_graph": compiled_graph,
+        "dry_run_record": dry_run_record if req.mode == "live" else _RUNTIME_GRAPH_DRY_RUN_RECORDS.get(graph_id, {}),
+    }
+
+
+@app.get("/api/objectives/metrics")
+async def get_objective_metrics() -> dict[str, object]:
+    """Return the allowlisted Metric Registry without filesystem metadata."""
+    service = _objective_service()
+    return {
+        "ok": True,
+        "registry_version": service.registry.version_id,
+        "metrics": [item.model_dump(mode="json") for item in service.registry.list()],
+    }
+
+
+@app.get("/api/objectives/authoring-contract")
+async def get_objective_authoring_contract() -> dict[str, object]:
+    """Return the bounded operator and unit contract used by manual editors."""
+    return {"ok": True, **objective_authoring_manifest()}
+
+
+@app.get("/api/objectives/presets")
+async def get_objective_presets() -> dict[str, object]:
+    """Return optional objective drafts without persisting or activating them."""
+    service = _objective_service()
+    return {
+        "ok": True,
+        "registry_version": service.registry.version_id,
+        "presets": [item.model_dump(mode="json") for item in service.list_presets()],
+    }
+
+
+@app.get("/api/objectives/metrics/{metric_id}")
+async def get_objective_metric(metric_id: str) -> dict[str, object]:
+    try:
+        metric = _objective_service().registry.get(metric_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown objective metric: {metric_id}") from exc
+    return {"ok": True, "metric": metric.model_dump(mode="json")}
+
+
+@app.post("/api/objectives/compose")
+async def post_objective_compose(req: ObjectiveComposeRequest) -> dict[str, object]:
+    try:
+        draft = await _objective_service().compose(req.intent)
+    except Exception as exc:
+        raise _objective_http_error(exc) from exc
+    return {"ok": True, "draft": draft.model_dump(mode="json")}
+
+
+@app.post("/api/objectives/manual")
+async def post_objective_manual(req: ObjectiveManualDraftRequest) -> dict[str, object]:
+    """Create one server-normalized operator-authored objective draft."""
+    try:
+        draft, validation = _objective_service().create_manual_draft(
+            req.spec,
+            operator=req.operator,
+            revision_of=req.revision_of,
+        )
+    except Exception as exc:
+        raise _objective_http_error(exc) from exc
+    return {
+        "ok": True,
+        "source": "manual",
+        "objective": draft.model_dump(mode="json"),
+        "validation": validation.model_dump(mode="json"),
+    }
+
+
+@app.post("/api/objectives/validate")
+async def post_objective_validate(req: ObjectiveReferenceRequest) -> dict[str, object]:
+    try:
+        validation = _objective_service().validate(req.objective_id, req.version)
+    except Exception as exc:
+        raise _objective_http_error(exc) from exc
+    if not validation.valid:
+        raise HTTPException(status_code=422, detail=validation.model_dump(mode="json"))
+    return {"ok": True, "validation": validation.model_dump(mode="json")}
+
+
+@app.post("/api/objectives/preview")
+async def post_objective_preview(req: ObjectivePreviewRequest) -> dict[str, object]:
+    try:
+        preview = _objective_service().preview(req.objective_id, req.version, req.observations)
+    except Exception as exc:
+        raise _objective_http_error(exc) from exc
+    if preview.usable_rows < 1:
+        raise HTTPException(status_code=422, detail=preview.model_dump(mode="json"))
+    return {"ok": True, "preview": preview.model_dump(mode="json")}
+
+
+@app.post("/api/objectives/revise")
+async def post_objective_revise(req: ObjectiveRevisionRequest) -> dict[str, object]:
+    try:
+        draft = await _objective_service().revise(req.objective_id, req.instruction)
+    except Exception as exc:
+        raise _objective_http_error(exc) from exc
+    return {"ok": True, "draft": draft.model_dump(mode="json")}
+
+
+@app.post("/api/objectives/approve")
+async def post_objective_approve(req: ObjectiveApprovalRequest) -> dict[str, object]:
+    try:
+        decision = _objective_service().approve(req.objective_id, req.version, operator=req.operator)
+    except Exception as exc:
+        raise _objective_http_error(exc) from exc
+    return {"ok": True, "decision": decision.model_dump(mode="json")}
+
+
+@app.post("/api/objectives/activate")
+async def post_objective_activate(req: ObjectiveActivationRequest) -> dict[str, object]:
+    try:
+        binding = _objective_service().activate(
+            req.objective_id,
+            req.version,
+            run_id=req.run_id,
+            operator=req.operator,
+        )
+    except Exception as exc:
+        raise _objective_http_error(exc) from exc
+    return {"ok": True, "binding": binding.model_dump(mode="json")}
+
+
+@app.post("/api/objectives/evaluate")
+async def post_objective_evaluate(req: ObjectiveEvaluationRequest) -> dict[str, object]:
+    try:
+        evaluation = _objective_service().evaluate(
+            run_id=req.run_id,
+            metrics=req.metrics,
+            observation_id=req.observation_id,
+            uncertainty=req.uncertainty,
+            provenance_refs=req.provenance_refs,
+            fidelity=req.fidelity,
+        )
+    except Exception as exc:
+        raise _objective_http_error(exc) from exc
+    return {"ok": True, "evaluation": evaluation.model_dump(mode="json")}
+
+
+@app.post("/api/objectives/compare")
+async def post_objective_compare(req: ObjectiveCompareRequest) -> dict[str, object]:
+    try:
+        comparisons = _objective_service().compare(req.candidates, req.observations)
+    except Exception as exc:
+        raise _objective_http_error(exc) from exc
+    return {"ok": True, "comparisons": comparisons}
+
+
+@app.get("/api/objectives/status")
+async def get_objective_status(run_id: str = "") -> dict[str, object]:
+    try:
+        return _objective_service().status(run_id=run_id)
+    except Exception as exc:
+        raise _objective_http_error(exc) from exc
+
+
+@app.get("/api/bo/config")
+async def get_bo_config(visualization_only: bool = False) -> dict[str, object]:
+    """Return BO Workspace defaults and recent BO state."""
+    if visualization_only:
+        # Plot refreshes never need the run history, device state, or GP refit.
+        # Select before serialization so large unrelated metadata is not copied.
+        state = controller._state.model_dump(mode="json", include={
+            "run_id": True,
+            "run_metadata": {"bo_visualization", "lhs_visualization"},
+        })
+        metadata = state.get("run_metadata", {})
+        run_id = str(state.get("run_id") or "")
+        def current_plot(key, validate, attach):
+            plot = metadata.get(key, {})
+            try:
+                validate(plot)
+            except (TypeError, ValueError):
+                return {}
+            if str(plot.get("run_id") or "") != run_id:
+                return {}
+            return attach(plot, run_id)
+        return {
+            "ok": True, "run_id": run_id,
+            "recent_visualization": current_plot("bo_visualization", validate_bo_visualization, _attach_bo_artifact_urls),
+            "recent_lhs_visualization": current_plot("lhs_visualization", validate_lhs_design_visualization, _attach_lhs_artifact_urls),
+        }
+    snapshot = controller.snapshot()
+    state = snapshot.get("state", {}) if isinstance(snapshot.get("state"), dict) else {}
+    metadata = state.get("run_metadata", {}) if isinstance(state.get("run_metadata"), dict) else {}
+    saved = _read_workspace_settings(BO_WORKSPACE_SETTINGS_PATH)
+    recent_lhs_visualization = metadata.get("lhs_visualization", {})
+    try:
+        validate_lhs_design_visualization(recent_lhs_visualization)
+    except (TypeError, ValueError):
+        recent_lhs_visualization = {}
+    recent_visualization = metadata.get("bo_visualization", {})
+    try:
+        validate_bo_visualization(recent_visualization)
+    except (TypeError, ValueError):
+        recent_visualization = {}
+        run_dir_value = (snapshot.get("logs") or {}).get("run_dir") if isinstance(snapshot.get("logs"), dict) else ""
+        result_dir = Path(str(run_dir_value)) / "runtime" / "bo" if run_dir_value else None
+        if result_dir and result_dir.is_dir():
+            result_paths = sorted(result_dir.glob("*_bo_agent_result.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+            for result_path in result_paths[:20]:
+                try:
+                    result_payload = json.loads(result_path.read_text(encoding="utf-8"))
+                    bo_result = result_payload.get("bo_result", result_payload) if isinstance(result_payload, dict) else {}
+                    candidate = bo_result.get("visualization", {}) if isinstance(bo_result, dict) else {}
+                    validate_bo_visualization(candidate)
+                    if state.get("run_id") and candidate.get("run_id") != state.get("run_id"):
+                        continue
+                    recent_visualization = candidate
+                    break
+                except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                    continue
+    visualization = dict(recent_visualization) if isinstance(recent_visualization, dict) else {}
+    objective_trace = visualization.get("objective_trace") if isinstance(visualization.get("objective_trace"), dict) else {}
+    backend = visualization.get("backend") if isinstance(visualization.get("backend"), dict) else {}
+    bo_agent = metadata.get("bo_agent") if isinstance(metadata.get("bo_agent"), dict) else {}
+    parameter_space = bo_agent.get("parameter_space") if isinstance(bo_agent.get("parameter_space"), dict) else {}
+    if (
+        visualization
+        and backend.get("active") == "botorch"
+        and objective_trace.get("path_mode") != "continuous_2d_gp_path"
+        and parameter_space
+    ):
+        cache_key = (
+            str(visualization.get("run_id") or state.get("run_id") or ""),
+            int(visualization.get("step") or 0),
+            str(visualization.get("generated_at") or ""),
+        )
+        upgraded = _BO_VISUALIZATION_UPGRADE_CACHE.get(cache_key)
+        if upgraded is None:
+            bo_metadata = bo_agent.get("metadata") if isinstance(bo_agent.get("metadata"), dict) else {}
+            try:
+                upgraded = rebuild_legacy_continuous_objective_trace(
+                    visualization,
+                    parameter_space=parameter_space,
+                    random_seed=int(bo_metadata.get("random_seed") or 7),
+                )
+            except (RuntimeError, TypeError, ValueError):
+                upgraded = visualization
+            _BO_VISUALIZATION_UPGRADE_CACHE[cache_key] = upgraded
+            while len(_BO_VISUALIZATION_UPGRADE_CACHE) > 16:
+                _BO_VISUALIZATION_UPGRADE_CACHE.pop(next(iter(_BO_VISUALIZATION_UPGRADE_CACHE)))
+        visualization = dict(upgraded)
+    visualization_run_id = str(state.get("run_id") or visualization.get("run_id") or "")
+    recent_visualization = _attach_bo_artifact_urls(visualization, visualization_run_id)
+    lhs_visualization = dict(recent_lhs_visualization) if isinstance(recent_lhs_visualization, dict) else {}
+    lhs_run_id = str(state.get("run_id") or lhs_visualization.get("run_id") or "")
+    recent_lhs_visualization = _attach_lhs_artifact_urls(lhs_visualization, lhs_run_id)
+    return {
+        "ok": True,
+        "defaults": BOAgent.defaults(),
+        "saved": saved,
+        "settings_path": str(BO_WORKSPACE_SETTINGS_PATH),
+        "recent": metadata.get("bo_agent", {}),
+        "recent_lhs_visualization": recent_lhs_visualization,
+        "lhs_visualization_steps": metadata.get("lhs_visualization_steps", []),
+        "recent_visualization": recent_visualization,
+        "visualization_steps": metadata.get("bo_visualization_steps", []),
+        "state": state,
+    }
+
+
+@app.post("/api/bo/config")
+async def save_bo_config(req: BOAgentRequest) -> dict[str, object]:
+    """Persist BO Workspace settings for future GUI sessions."""
+    settings, warnings = BOAgent.normalize_settings(req.model_dump())
+    saved: dict[str, Any] = {
+        **settings,
+        "objective": req.objective,
+        "mode": req.mode,
+    }
+    _write_workspace_settings(BO_WORKSPACE_SETTINGS_PATH, saved)
+    return {
+        "ok": True,
+        "saved": saved,
+        "warnings": warnings,
+        "settings_path": str(BO_WORKSPACE_SETTINGS_PATH),
+    }
+
+
+@app.post("/api/bo/benchmark")
+async def post_bo_benchmark(req: BOAgentRequest) -> dict[str, object]:
+    """Run experiment.benchmark from BO Workspace without changing hardware state."""
+    settings, warnings = BOAgent.normalize_settings(req.model_dump())
+    objective = req.objective or {
+        "objective_id": "bo-workspace-objective",
+        "name": "Specimen printability and performance proxy",
+        "metric_name": "objective_score",
+        "direction": "maximize",
+        "tags": ["bo", "workspace"],
+    }
+    strategies = ["random", "grid", "bo"] if settings["strategy"] == "mbo" else [settings["benchmark_strategy"]]
+    result = controller._deps.agent_context.tools.call(
+        "experiment.benchmark",
+        {
+            "budget": settings["budget"],
+            "strategies": strategies,
+            "seed": settings["random_seed"],
+            "parameter_space": settings["parameter_space"],
+            "objective": objective,
+            "acquisition": settings["acquisition"],
+            "kappa": settings["kappa"],
+            "xi": settings["xi"],
+            "exploration_weight": settings["exploration_weight"],
+            "exploitation_weight": settings["exploitation_weight"],
+            "bo_backend": settings["bo_backend"],
+            "initial_sampler": settings["initial_sampler"],
+            "initial_design_size": settings["initial_design_size"],
+            "num_restarts": settings["num_restarts"],
+            "raw_samples": settings["raw_samples"],
+            "optimizer_timeout_s": settings["optimizer_timeout_s"],
+            "prior_evaluations": BOAgent._prior_evaluations_from_state(controller._state),
+            "request": {
+                "run_id": controller.snapshot()["state"]["run_id"],
+                "experiment_id": controller.snapshot()["state"]["experiment_id"],
+                "objective": objective,
+                "execution": {"mode": "virtual", "bridge": "virtual", "dry_run": True},
+                "metadata": {
+                    "source": "bo_workspace",
+                    "acquisition": settings["acquisition"],
+                    "kappa": settings["kappa"],
+                    "xi": settings["xi"],
+                    "exploration_weight": settings["exploration_weight"],
+                    "exploitation_weight": settings["exploitation_weight"],
+                    "bo_backend": settings["bo_backend"],
+                },
+            },
+        },
+    )
+    strategies_payload = result.get("strategies") if isinstance(result.get("strategies"), dict) else {}
+    for strategy_payload in strategies_payload.values():
+        if not isinstance(strategy_payload, dict):
+            continue
+        for trace_item in strategy_payload.get("surrogate_trace", []):
+            if isinstance(trace_item, dict) and isinstance(trace_item.get("lhs_visualization"), dict):
+                await controller.emit_lhs_visualization(trace_item["lhs_visualization"], source="bo_workspace_benchmark")
+            if isinstance(trace_item, dict) and isinstance(trace_item.get("visualization"), dict):
+                await controller.emit_bo_visualization(trace_item["visualization"], source="bo_workspace_benchmark")
+    await controller.emit_workspace_result(
+        workspace="bo",
+        tool="experiment.benchmark",
+        result=result,
+        stage=Stage.BO,
+        module_id="bo",
+        agent="bo_agent",
+        workflow="benchmark",
+    )
+    return {"ok": bool(result.get("ok", False)), "warnings": warnings, "benchmark": result}
+
+
+@app.post("/api/bo/run")
+async def post_bo_run(req: BOAgentRequest) -> dict[str, object]:
+    """Run the registered BO decision path and store its governed proposal."""
+    state = controller._state
+    if req.mode in {"test", "live", "replay"}:
+        state.mode = Mode(req.mode)
+    agent = controller._deps.agent_registry.get("bo_agent")
+    result = await agent.run_with_settings(state, controller._deps.agent_context, req.model_dump())
+    workspace_result = {"ok": bool(result.success), "summary": result.summary, "data": result.data}
+    bo_result = result.data.get("bo_result") if isinstance(result.data.get("bo_result"), dict) else {}
+    if isinstance(bo_result.get("lhs_visualization"), dict) and bo_result["lhs_visualization"]:
+        await controller.emit_lhs_visualization(bo_result["lhs_visualization"], source="bo_workspace_agent")
+    if isinstance(bo_result.get("visualization"), dict) and bo_result["visualization"]:
+        await controller.emit_bo_visualization(bo_result["visualization"], source="bo_workspace_agent")
+    await controller.emit_workspace_result(
+        workspace="bo",
+        tool="bo_agent.run_with_settings",
+        result=workspace_result,
+        stage=Stage.BO,
+        module_id="bo",
+        agent="bo_agent",
+        workflow="bo_agent_run",
+        node_event=True,
+    )
+    return {
+        "ok": bool(result.success),
+        "summary": result.summary,
+        "data": result.data,
+        "snapshot": controller.snapshot(),
+    }
+
+
+
+
+
+
+
+
+@app.post("/api/runtime/backend")
+async def post_runtime_backend(req: BackendSwitchRequest) -> dict[str, object]:
+    """Switch active inference backend for future model calls."""
+    return await controller.switch_inference_backend(req.backend)
+
+
+@app.get("/api/runtime/models")
+async def get_runtime_models() -> dict[str, object]:
+    """Return managed model serving status for the selected backend."""
+    return await controller.runtime_model_statuses()
+
+
+@app.post("/api/runtime/models/load")
+async def post_runtime_model_load(req: RuntimeModelRequest) -> dict[str, object]:
+    """Load one managed NemoClaw vLLM model."""
+    return await controller.load_runtime_model(req.model)
+
+
+@app.post("/api/runtime/models/unload")
+async def post_runtime_model_unload(req: RuntimeModelRequest) -> dict[str, object]:
+    """Unload one managed NemoClaw vLLM model."""
+    return await controller.unload_runtime_model(req.model)
+
+
+@app.get("/api/runtime/api-key")
+async def get_runtime_api_key() -> dict[str, object]:
+    """Return the local OpenAI API key status without exposing the secret."""
+    settings = _read_api_key_settings(import_env=True)
+    return await _apply_runtime_api_key_settings(settings, emit_event=False)
+
+
+@app.post("/api/runtime/api-key")
+async def post_runtime_api_key(req: RuntimeApiKeyRequest) -> dict[str, object]:
+    """Save the OpenAI API key to the local gitignored single-file store."""
+    settings = _write_api_key_settings(req.api_key, enabled=req.enabled, source="user")
+    return await _apply_runtime_api_key_settings(settings)
+
+
+@app.post("/api/runtime/api-key/load")
+async def post_runtime_api_key_load() -> dict[str, object]:
+    """Enable the saved OpenAI API key for runtime fallback use."""
+    settings = _read_api_key_settings(import_env=True)
+    if not str(settings.get("api_key") or "").strip():
+        public = _public_api_key_settings(settings)
+        public.update({"ok": False, "message": "API key is not configured."})
+        return public
+    settings = _write_api_key_settings(
+        str(settings.get("api_key") or ""),
+        enabled=True,
+        source=str(settings.get("source") or "memory"),
+    )
+    return await _apply_runtime_api_key_settings(settings)
+
+
+@app.post("/api/runtime/api-key/unload")
+async def post_runtime_api_key_unload() -> dict[str, object]:
+    """Disable the saved OpenAI API key without deleting it from the local store."""
+    settings = _read_api_key_settings(import_env=True)
+    settings = _write_api_key_settings(
+        str(settings.get("api_key") or ""),
+        enabled=False,
+        source=str(settings.get("source") or "memory"),
+    )
+    return await _apply_runtime_api_key_settings(settings)
+
+
+def _request_audit_log_gate(payload: dict[str, object]) -> tuple[dict[str, object], str | None]:
+    """Return strict request-audit evidence for a live Windows UTM command path."""
+    audit = payload.get("request_audit_log") if isinstance(payload.get("request_audit_log"), dict) else {}
+    path = str(
+        audit.get("path")
+        or audit.get("request_log")
+        or payload.get("request_log_path")
+        or payload.get("bridge_request_log_ref")
+        or payload.get("request_log")
+        or ""
+    )
+
+    def as_int(value: object) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    raw_count = audit.get("event_count")
+    if raw_count in (None, ""):
+        raw_count = payload.get("request_log_event_count")
+    if raw_count in (None, ""):
+        raw_count = payload.get("event_count")
+    event_count = as_int(raw_count)
+    execute_event_count = as_int(
+        audit.get("execute_event_count")
+        or payload.get("request_log_execute_count")
+        or payload.get("execute_event_count")
+    )
+    execute_payload_event_count = as_int(
+        audit.get("execute_payload_event_count")
+        or payload.get("request_log_execute_payload_event_count")
+        or payload.get("execute_payload_event_count")
+    )
+    execute_result_event_count = as_int(
+        audit.get("execute_result_event_count")
+        or payload.get("request_log_execute_result_event_count")
+        or payload.get("execute_result_event_count")
+    )
+    if event_count <= 0 and execute_event_count > 0:
+        event_count = execute_event_count
+
+    recent_paths = audit.get("recent_paths") if isinstance(audit.get("recent_paths"), list) else []
+    if not recent_paths and isinstance(payload.get("request_log_recent_paths"), list):
+        recent_paths = payload.get("request_log_recent_paths")  # type: ignore[assignment]
+    if not recent_paths and isinstance(payload.get("events"), list):
+        recent_paths = [item.get("path") for item in payload["events"] if isinstance(item, dict)]
+    recent_paths = [str(item) for item in recent_paths if str(item or "").strip()]
+    execute_from_paths = any(item == "/execute" or item.endswith("/execute") for item in recent_paths)
+    execute_event_seen = bool(
+        audit.get("execute_event_seen") is True
+        or payload.get("request_log_execute_seen") is True
+        or payload.get("execute_event_seen") is True
+        or execute_event_count > 0
+        or execute_from_paths
+    )
+    last_execute_at = str(
+        audit.get("last_execute_at")
+        or payload.get("request_log_last_execute_at")
+        or payload.get("last_execute_at")
+        or ""
+    )
+
+    def string_list(*values: object) -> list[str]:
+        output: list[str] = []
+        for value in values:
+            if isinstance(value, list):
+                for item in value:
+                    text = str(item or "").strip()
+                    if text and text not in output:
+                        output.append(text)
+            else:
+                text = str(value or "").strip()
+                if text and text not in output:
+                    output.append(text)
+        return output
+
+    last_context = audit.get("last_execute_context") if isinstance(audit.get("last_execute_context"), dict) else payload.get("request_log_last_execute_context") if isinstance(payload.get("request_log_last_execute_context"), dict) else {}
+    execute_run_ids = string_list(audit.get("execute_run_ids"), payload.get("request_log_execute_run_ids"), payload.get("execute_run_ids"), last_context.get("run_id") if isinstance(last_context, dict) else "")
+    execute_sequence_ids = string_list(audit.get("execute_sequence_ids"), payload.get("request_log_execute_sequence_ids"), payload.get("execute_sequence_ids"), last_context.get("sequence_id") if isinstance(last_context, dict) else "")
+    execute_specimen_ids = string_list(audit.get("execute_specimen_ids"), payload.get("request_log_execute_specimen_ids"), payload.get("execute_specimen_ids"), last_context.get("specimen_id") if isinstance(last_context, dict) else "")
+    execute_program_ids = string_list(audit.get("execute_program_ids"), payload.get("request_log_execute_program_ids"), payload.get("execute_program_ids"), last_context.get("program_id") if isinstance(last_context, dict) else "")
+    expected_identity = {
+        "run_id": str(payload.get("expected_run_id") or audit.get("expected_run_id") or ""),
+        "sequence_id": str(payload.get("expected_sequence_id") or audit.get("expected_sequence_id") or ""),
+        "specimen_id": str(payload.get("expected_specimen_id") or audit.get("expected_specimen_id") or ""),
+        "program_id": str(payload.get("expected_program_id") or audit.get("expected_program_id") or ""),
+    }
+    identity_required = bool(payload.get("require_execute_identity_match") or audit.get("require_execute_identity_match") or any(expected_identity.values()))
+    identity_present = bool(execute_payload_event_count > 0 or execute_run_ids or execute_specimen_ids or execute_program_ids)
+
+    def contains(expected: str, observed: list[str]) -> bool:
+        return not expected or expected in observed
+
+    identity_match = bool(
+        (not identity_required)
+        or (
+            identity_present
+            and contains(expected_identity["run_id"], execute_run_ids)
+            and contains(expected_identity["program_id"], execute_program_ids)
+            and contains(expected_identity["specimen_id"], execute_specimen_ids)
+        )
+    )
+    ok = bool(path and event_count > 0 and execute_event_seen and identity_match)
+    failure_code = None
+    if not ok:
+        if path and event_count > 0 and execute_event_seen and not identity_match:
+            failure_code = "UTM_REQUEST_LOG_EXECUTE_IDENTITY_REQUIRED"
+        else:
+            failure_code = "UTM_REQUEST_LOG_EXECUTE_EVENT_REQUIRED" if path and event_count > 0 else "UTM_REQUEST_LOG_REQUIRED"
+    return (
+        {
+            "ok": ok,
+            "path": path,
+            "event_count": event_count,
+            "recent_paths": recent_paths,
+            "execute_event_seen": execute_event_seen,
+            "execute_event_count": execute_event_count,
+            "execute_payload_event_count": execute_payload_event_count,
+            "execute_result_event_count": execute_result_event_count,
+            "execute_run_ids": execute_run_ids,
+            "execute_sequence_ids": execute_sequence_ids,
+            "execute_specimen_ids": execute_specimen_ids,
+            "execute_program_ids": execute_program_ids,
+            "last_execute_context": last_context,
+            "last_execute_at": last_execute_at,
+            "execute_identity_required": identity_required,
+            "execute_identity_present": identity_present,
+            "execute_identity_match": identity_match,
+            "execute_identity_detail": {
+                "expected": expected_identity,
+                "observed": {
+                    "run_ids": execute_run_ids,
+                    "sequence_ids": execute_sequence_ids,
+                    "specimen_ids": execute_specimen_ids,
+                    "program_ids": execute_program_ids,
+                },
+            },
+        },
+        failure_code,
+    )
+
+
+def _windows_utm_proof_checklist(
+    *,
+    gates: dict[str, object],
+    request_audit_log: dict[str, object],
+    screen_refs: list[object],
+    data_refs: list[object],
+    data_acquisition: dict[str, object],
+    blockers: list[str],
+    source: str,
+) -> tuple[list[dict[str, object]], bool]:
+    """Build an operator-readable proof checklist for Windows UTM handoff evidence."""
+    screen_ref_count = len([item for item in screen_refs if str(item or "").strip()])
+    data_ref_count = len([item for item in data_refs if str(item or "").strip()])
+    linux_path = str(data_acquisition.get("linux_path") or data_acquisition.get("local_path") or "")
+    row_count = data_acquisition.get("row_count_probe")
+    try:
+        row_count_int = int(row_count or 0)
+    except (TypeError, ValueError):
+        row_count_int = 0
+    checklist = [
+        {
+            "id": "request_log_execute",
+            "label": "Windows bridge /execute audit",
+            "ok": bool(request_audit_log.get("ok") and request_audit_log.get("execute_event_seen") and request_audit_log.get("execute_identity_match") is not False),
+            "required": True,
+            "detail": f"events={request_audit_log.get('event_count', 0)}; execute_count={request_audit_log.get('execute_event_count', 0)}; identity_match={request_audit_log.get('execute_identity_match', '-')}; last_execute_at={request_audit_log.get('last_execute_at', '') or '-'}",
+        },
+        {
+            "id": "physical_live_execute",
+            "label": "Physical live /execute dispatch",
+            "ok": bool(gates.get("physical_live_execute")),
+            "required": True,
+            "detail": "The proof must come from a live physical validation run, not preflight, simulator, or a copied report.",
+        },
+        {
+            "id": "screen_evidence",
+            "label": "UTM screen-state evidence",
+            "ok": bool(gates.get("screen_evidence_complete")),
+            "required": True,
+            "detail": f"screen_refs={screen_ref_count}; expected before_start/after_start/after_complete screenshots",
+        },
+        {
+            "id": "physical_motion",
+            "label": "Physical UTM motion cross-check",
+            "ok": bool(gates.get("physical_motion_started")),
+            "required": True,
+            "detail": "Vision or data-stream evidence must confirm motion; screen running alone is not sufficient.",
+        },
+        {
+            "id": "linux_artifact_pull",
+            "label": "Linux-side UTM artifact pull",
+            "ok": bool(gates.get("linux_artifact_pulled")),
+            "required": True,
+            "detail": linux_path or "Linux-local UTM CSV path is not recorded.",
+        },
+        {
+            "id": "save_export_responsibility",
+            "label": "UTM save/export responsibility",
+            "ok": bool(gates.get("save_export_responsibility_ok")),
+            "required": True,
+            "detail": f"save_method={data_acquisition.get('save_method', '') or '-'}; save_attempted={bool(data_acquisition.get('save_attempted_by_agent'))}; confirmation={bool(data_acquisition.get('save_confirmation_screen_ok'))}",
+        },
+        {
+            "id": "data_parse_probe",
+            "label": "UTM CSV parse probe",
+            "ok": bool(gates.get("data_parse_probe_ok")),
+            "required": True,
+            "detail": f"data_refs={data_ref_count}; row_count_probe={row_count_int}",
+        },
+        {
+            "id": "vision_evidence_frames",
+            "label": "Vision frame evidence",
+            "ok": bool(gates.get("vision_evidence_complete")),
+            "required": True,
+            "detail": "Frame IDs must prove fixture/motion/complete physical states before Analysis handoff.",
+        },
+    ]
+    blockers_set = set(blockers)
+    if blockers_set:
+        checklist.append(
+            {
+                "id": "blocking_reason_review",
+                "label": "Blocking reason review",
+                "ok": False,
+                "required": False,
+                "detail": ", ".join(sorted(blockers_set)[:8]),
+            }
+        )
+    proof_ready = all(bool(item.get("ok")) for item in checklist if item.get("required") is not False)
+    for item in checklist:
+        item["source"] = source
+    return checklist, proof_ready
+
+
+def _windows_utm_evidence_audit_from_raw_result(result: dict[str, object], *, run_id: str = "") -> dict[str, object]:
+    """Audit a direct /equipment/windows UTM protocol-test result without hardware calls."""
+    screen_checks = result.get("screen_checks") if isinstance(result.get("screen_checks"), list) else []
+    artifacts = result.get("output_artifacts") if isinstance(result.get("output_artifacts"), list) else []
+    data_acquisition = result.get("data_acquisition") if isinstance(result.get("data_acquisition"), dict) else {}
+    cross_checks = result.get("cross_checks") if isinstance(result.get("cross_checks"), dict) else {}
+    request_audit_log, request_audit_failure = _request_audit_log_gate({
+        **result,
+        "expected_run_id": str(run_id or result.get("run_id") or ""),
+        "expected_sequence_id": str(result.get("sequence_id") or ""),
+        "expected_specimen_id": str(result.get("specimen_id") or ""),
+        "expected_program_id": str(result.get("program_id") or ""),
+        "require_execute_identity_match": True,
+    })
+
+    required_checkpoints = ["before_start", "after_start", "after_complete"]
+    screen_by_checkpoint = {
+        str(item.get("checkpoint") or ""): item
+        for item in screen_checks
+        if isinstance(item, dict)
+    }
+    missing_checkpoints = [
+        checkpoint
+        for checkpoint in required_checkpoints
+        if not (
+            isinstance(screen_by_checkpoint.get(checkpoint), dict)
+            and bool(screen_by_checkpoint[checkpoint].get("ok"))
+            and bool(str(screen_by_checkpoint[checkpoint].get("screenshot_artifact") or "").strip())
+        )
+    ]
+
+    screen_ids = {
+        str(item.get("screenshot_artifact") or "")
+        for item in screen_checks
+        if isinstance(item, dict) and item.get("screenshot_artifact")
+    }
+    screen_refs: list[str] = []
+    data_refs: list[str] = []
+    artifact_refs: list[str] = []
+    data_row_count_probe = data_acquisition.get("row_count_probe")
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        ref = str(artifact.get("local_path") or artifact.get("linux_path") or artifact.get("path") or artifact.get("artifact_id") or artifact.get("windows_path") or "")
+        if ref:
+            artifact_refs.append(ref)
+        kind = str(artifact.get("kind") or "")
+        artifact_id = str(artifact.get("artifact_id") or "")
+        if kind == "screen_png" or artifact_id in screen_ids:
+            screen_refs.append(ref)
+        if kind == "utm_csv":
+            data_refs.append(ref)
+            if data_row_count_probe in (None, 0, "") and artifact.get("row_count_probe") not in (None, 0, ""):
+                data_row_count_probe = artifact.get("row_count_probe")
+    result_file = str(result.get("result_file") or result.get("utm_csv_path") or data_acquisition.get("linux_path") or data_acquisition.get("local_path") or "")
+    if result_file:
+        data_refs.insert(0, result_file)
+        artifact_refs.insert(0, result_file)
+
+    screen_evidence_complete = not missing_checkpoints
+    linux_artifact_pulled = bool(
+        str(data_acquisition.get("status") or "") == "pulled_to_linux"
+        and bool(result_file)
+        and bool(data_acquisition.get("linux_path") or data_acquisition.get("local_path") or result.get("result_file"))
+    )
+    data_parse_probe_ok = bool(cross_checks.get("data_parse_probe_ok", result_file and data_row_count_probe not in (None, 0, "")))
+    save_completed = bool(cross_checks.get("save_completed", data_acquisition.get("save_confirmation_screen_ok") or linux_artifact_pulled))
+    data_file_created = bool(cross_checks.get("data_file_created", bool(result_file)))
+    save_method = str(data_acquisition.get("save_method") or "").strip()
+    recognized_save_methods = {"windows_export_watch", "manual_save_dialog", "export_menu", "simulated_bridge_export", "simulated_auto_export", "synthetic_test_export"}
+    save_export_responsibility_ok = bool(
+        cross_checks.get(
+            "save_export_responsibility_ok",
+            linux_artifact_pulled
+            and data_parse_probe_ok
+            and save_method in recognized_save_methods
+            and (bool(data_acquisition.get("save_attempted_by_agent")) or save_method in {"windows_export_watch", "simulated_bridge_export", "simulated_auto_export"})
+            and (bool(data_acquisition.get("save_confirmation_screen_ok")) or bool(data_acquisition.get("windows_path")) or bool(result_file)),
+        )
+    )
+
+    gate_values = {
+        "screen_started": bool(cross_checks.get("screen_started", screen_evidence_complete)),
+        "physical_motion_started": bool(cross_checks.get("physical_motion_started", False)),
+        "save_completed": save_completed,
+        "data_file_created": data_file_created,
+        "data_parse_probe_ok": data_parse_probe_ok,
+        "screen_evidence_complete": bool(screen_evidence_complete),
+        "linux_artifact_pulled": bool(linux_artifact_pulled),
+        "save_export_responsibility_ok": bool(save_export_responsibility_ok),
+        "vision_evidence_complete": False,
+        "request_audit_log_available": bool(request_audit_log.get("ok")),
+        "physical_live_execute": False,
+    }
+    blockers: list[str] = []
+    for gate, ok in gate_values.items():
+        if not ok:
+            if gate == "request_audit_log_available" and request_audit_failure:
+                blockers.append(request_audit_failure)
+            elif gate == "save_export_responsibility_ok":
+                blockers.append("UTM_SAVE_EXPORT_RESPONSIBILITY_REQUIRED")
+            else:
+                blockers.append(f"{gate.upper()}_REQUIRED")
+    if not data_refs:
+        blockers.append("UTM_DATA_EVIDENCE_REF_REQUIRED")
+    if len(screen_refs) < 3:
+        blockers.append("UTM_SCREEN_EVIDENCE_REFS_INCOMPLETE")
+    if request_audit_failure:
+        blockers.append(request_audit_failure)
+    blockers.append("UTM_VISION_EVIDENCE_FRAMES_REQUIRED")
+    if result.get("failure_code"):
+        blockers.append(str(result["failure_code"]))
+    blockers = list(dict.fromkeys(item for item in blockers if item))
+
+    live_evidence_audit = {
+        "required_for_handoff": True,
+        "source": "windows_equipment_run_program",
+        "screen_evidence": {
+            "ok": bool(screen_evidence_complete),
+            "required_checkpoints": required_checkpoints,
+            "observed_checkpoints": [checkpoint for checkpoint in required_checkpoints if checkpoint not in missing_checkpoints],
+            "missing_checkpoints": missing_checkpoints,
+        },
+        "linux_artifact_pull": {
+            "ok": bool(linux_artifact_pulled),
+            "status": data_acquisition.get("status", ""),
+            "linux_path": result_file,
+            "parse_probe_ok": bool(data_parse_probe_ok),
+        },
+        "save_export": {
+            "ok": bool(save_export_responsibility_ok),
+            "save_method": save_method,
+            "save_attempted_by_agent": bool(data_acquisition.get("save_attempted_by_agent")),
+            "save_confirmation_screen_ok": bool(data_acquisition.get("save_confirmation_screen_ok")),
+            "windows_path": str(data_acquisition.get("windows_path") or ""),
+            "linux_path": result_file,
+            "recognized_save_method": save_method in recognized_save_methods,
+        },
+        "vision_evidence": {
+            "ok": False,
+            "all_required_ok": False,
+            "evidence_frame_ids": [],
+        },
+        "request_audit_log": request_audit_log,
+    }
+    proof_checklist, proof_ready = _windows_utm_proof_checklist(
+        gates=gate_values,
+        request_audit_log=request_audit_log,
+        screen_refs=list(screen_refs),
+        data_refs=list(data_refs),
+        data_acquisition=data_acquisition,
+        blockers=blockers,
+        source="windows_equipment_run_program",
+    )
+
+    return {
+        "ok": False,
+        "tool": "equipment.pyautogui.live_evidence_audit",
+        "status": "blocked",
+        "run_id": run_id or str(result.get("run_id") or result.get("sequence_id") or ""),
+        "bridge": str(result.get("bridge") or "windows_pyautogui"),
+        "program_id": str(result.get("program_id") or ""),
+        "handoff_status": "blocked",
+        "equipment_status": str(result.get("status") or ""),
+        "failure_code": blockers[0] if blockers else None,
+        "required_for_handoff": True,
+        "gates": gate_values,
+        "live_evidence_audit": live_evidence_audit,
+        "request_audit_log": request_audit_log,
+        "proof_checklist": proof_checklist,
+        "proof_ready": proof_ready,
+        "decision": {
+            "handoff_status": "blocked",
+            "equipment_status": str(result.get("status") or ""),
+            "blocking_reasons": blockers,
+            "recommended_next_agent": "equipment_agent",
+        },
+        "data_acquisition": data_acquisition,
+        "evidence_refs": list(dict.fromkeys(str(item) for item in artifact_refs if str(item or "").strip())),
+        "screen_evidence_refs": list(dict.fromkeys(str(item) for item in screen_refs if str(item or "").strip())),
+        "data_evidence_refs": list(dict.fromkeys(str(item) for item in data_refs if str(item or "").strip())),
+        "blockers": blockers,
+        "warnings": ["WINDOWS_GUI_PROTOCOL_TEST_REQUIRES_LABEQUIPMENT_AGENT_VISION_PACKAGE_FOR_ANALYSIS_HANDOFF"],
+        "next_actions": [
+            "Use the full Lab Equipment Agent stage to add Vision frame evidence before Analysis handoff.",
+            "If this was a setup test, review screen and CSV pull gates, then run the autonomous equipment stage.",
+        ] + (
+            ["Inspect the Windows bridge request log and confirm the live /execute request was recorded."]
+            if request_audit_failure
+            else []
+        ),
+    }
+
+
+
+def _physical_validation_identity_gate(
+    source: dict[str, object],
+    *,
+    expected_run_id: str = "",
+    expected_sequence_id: str = "",
+    expected_specimen_id: str = "",
+    expected_program_id: str = "",
+) -> tuple[bool, dict[str, object]]:
+    """Require the physical validation packet itself to identify the live UTM command."""
+    expected = {
+        "run_id": str(expected_run_id or "").strip(),
+        "sequence_id": str(expected_sequence_id or "").strip(),
+        "specimen_id": str(expected_specimen_id or "").strip(),
+        "program_id": str(expected_program_id or "").strip(),
+    }
+    observed = {key: str(source.get(key) or "").strip() for key in expected}
+    missing = [key for key, value in observed.items() if not value]
+    mismatched = [key for key, value in expected.items() if value and observed.get(key) and observed.get(key) != value]
+    dispatch_ok = bool(
+        source.get("requested_physical_execute") is True
+        and source.get("execute_sent") is True
+        and source.get("non_actuating") is False
+        and str(source.get("status") or "") == "verified_complete"
+    )
+    identity_ok = bool(not missing and not mismatched)
+    evidence = {
+        "dispatch_ok": dispatch_ok,
+        "identity_ok": identity_ok,
+        "expected": expected,
+        "observed": observed,
+        "missing_identity_fields": missing,
+        "mismatched_identity_fields": mismatched,
+        "requested_physical_execute": bool(source.get("requested_physical_execute")),
+        "execute_sent": bool(source.get("execute_sent")),
+        "non_actuating": bool(source.get("non_actuating", True)),
+        "status": str(source.get("status") or ""),
+    }
+    return bool(dispatch_ok and identity_ok), evidence
+
+
+
+def _windows_utm_intermediate_file_evidence_gate(
+    screen_refs: list[str],
+    data_refs: list[str],
+    *artifact_sources: object,
+) -> dict[str, object]:
+    """Verify local screen/data evidence before the final proof-package audit."""
+    package = {
+        "source_packets": {
+            f"source_{index}": value
+            for index, value in enumerate(artifact_sources)
+            if isinstance(value, dict)
+        }
+    }
+    artifact_records = _windows_proof_artifact_records(package)
+
+    verified_screen_files: list[str] = []
+    missing_screen_files: list[str] = []
+    invalid_screen_files: list[str] = []
+    unresolved_screen_refs: list[str] = []
+    for ref in screen_refs:
+        path, source = _windows_proof_resolved_ref_path(ref, artifact_records)
+        if path is None:
+            unresolved_screen_refs.append(str(ref))
+            continue
+        if path.exists() and path.is_file():
+            image_ok, image_detail = _windows_proof_image_signature(path)
+            if image_ok:
+                verified_screen_files.append(str(path))
+            else:
+                invalid_screen_files.append(f"{path} ({image_detail}; {source})")
+        else:
+            missing_screen_files.append(f"{path} ({source})")
+    unique_screen_files = sorted(set(verified_screen_files))
+    duplicate_screen_files = len(unique_screen_files) != len(verified_screen_files)
+    screen_ok = bool(
+        len(screen_refs) >= 3
+        and len(unique_screen_files) >= 3
+        and not missing_screen_files
+        and not invalid_screen_files
+        and not unresolved_screen_refs
+        and not duplicate_screen_files
+    )
+
+    verified_data_files: list[str] = []
+    missing_data_files: list[str] = []
+    unresolved_data_refs: list[str] = []
+    for ref in data_refs:
+        path, source = _windows_proof_resolved_ref_path(ref, artifact_records)
+        if path is None:
+            unresolved_data_refs.append(str(ref))
+            continue
+        if path.exists() and path.is_file():
+            verified_data_files.append(str(path))
+        else:
+            missing_data_files.append(f"{path} ({source})")
+    unique_data_files = sorted(set(verified_data_files))
+    csv_probes = [_windows_proof_csv_probe(Path(item)) for item in unique_data_files]
+    failed_csv_probes = [probe for probe in csv_probes if not bool(probe.get("ok"))]
+    data_ok = bool(data_refs and unique_data_files and not missing_data_files and not unresolved_data_refs)
+    data_probe_ok = bool(data_ok and csv_probes and not failed_csv_probes)
+
+    blockers: list[str] = []
+    if not screen_ok:
+        blockers.append("UTM_SCREEN_EVIDENCE_FILES_REQUIRED")
+    if not data_ok:
+        blockers.append("UTM_DATA_EVIDENCE_FILES_REQUIRED")
+    if data_ok and not data_probe_ok:
+        for probe in failed_csv_probes:
+            code = str(probe.get("failure_code") or "UTM_CSV_PARSE_PROBE_FAILED")
+            if code not in blockers:
+                blockers.append(code)
+    return {
+        "screen_ok": screen_ok,
+        "data_ok": data_ok,
+        "data_probe_ok": data_probe_ok,
+        "verified_screen_files": unique_screen_files,
+        "verified_data_files": unique_data_files,
+        "csv_probes": csv_probes,
+        "failed_csv_probes": failed_csv_probes,
+        "missing_screen_files": missing_screen_files,
+        "invalid_screen_files": invalid_screen_files,
+        "unresolved_screen_refs": unresolved_screen_refs,
+        "duplicate_screen_files": duplicate_screen_files,
+        "missing_data_files": missing_data_files,
+        "unresolved_data_refs": unresolved_data_refs,
+        "blockers": blockers,
+    }
+
+
+def _windows_utm_evidence_audit_from_live_validation_report(report: dict[str, object], *, run_id: str = "") -> dict[str, object]:
+    """Convert a lab_equipment_utm_live_validation.v1 report into the proof-package audit contract."""
+    evidence = report.get("evidence") if isinstance(report.get("evidence"), dict) else {}
+    execution = evidence.get("execution") if isinstance(evidence.get("execution"), dict) else {}
+    data_acquisition = execution.get("data_acquisition") if isinstance(execution.get("data_acquisition"), dict) else {}
+    request_audit_source = report.get("request_audit_log") if isinstance(report.get("request_audit_log"), dict) else evidence.get("request_log_after") if isinstance(evidence.get("request_log_after"), dict) else {}
+    expected_run_id = str(report.get("run_id") or run_id or execution.get("run_id") or "")
+    expected_sequence_id = str(report.get("sequence_id") or execution.get("sequence_id") or "")
+    expected_specimen_id = str(report.get("specimen_id") or execution.get("specimen_id") or "")
+    expected_program_id = str(report.get("program_id") or execution.get("program_id") or "")
+    request_audit_log, request_audit_failure = _request_audit_log_gate({
+        **dict(request_audit_source),
+        "request_audit_log": request_audit_source,
+        "expected_run_id": expected_run_id,
+        "expected_sequence_id": expected_sequence_id,
+        "expected_specimen_id": expected_specimen_id,
+        "expected_program_id": expected_program_id,
+        "require_execute_identity_match": True,
+    })
+
+    gates_by_name = {
+        str(item.get("name") or ""): item
+        for item in report.get("gates", [])
+        if isinstance(item, dict)
+    }
+
+    def gate_ok(name: str) -> bool:
+        return bool(isinstance(gates_by_name.get(name), dict) and gates_by_name[name].get("ok") is True)
+
+    screen_gate = gates_by_name.get("screen_state_evidence") if isinstance(gates_by_name.get("screen_state_evidence"), dict) else {}
+    screen_evidence = screen_gate.get("evidence") if isinstance(screen_gate.get("evidence"), dict) else {}
+    observed_screens = screen_evidence.get("observed") if isinstance(screen_evidence.get("observed"), list) else execution.get("screen_checks") if isinstance(execution.get("screen_checks"), list) else []
+    screen_refs = [
+        str(item.get("screenshot_artifact") or item.get("artifact") or item.get("path") or "")
+        for item in observed_screens
+        if isinstance(item, dict) and str(item.get("screenshot_artifact") or item.get("artifact") or item.get("path") or "").strip()
+    ]
+
+    data_refs: list[str] = []
+    result_file = str(execution.get("result_file") or execution.get("utm_csv_path") or data_acquisition.get("linux_path") or data_acquisition.get("local_path") or "").strip()
+    if result_file:
+        data_refs.append(result_file)
+    artifacts = execution.get("output_artifacts") if isinstance(execution.get("output_artifacts"), list) else []
+    artifact_refs: list[str] = []
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        ref = str(artifact.get("local_path") or artifact.get("linux_path") or artifact.get("path") or artifact.get("artifact_id") or artifact.get("windows_path") or "").strip()
+        if ref:
+            artifact_refs.append(ref)
+            if str(artifact.get("kind") or "") == "utm_csv":
+                data_refs.append(ref)
+    report_artifact = report.get("report_artifact") if isinstance(report.get("report_artifact"), dict) else report.get("artifact") if isinstance(report.get("artifact"), dict) else {}
+    if report_artifact.get("path"):
+        artifact_refs.append(str(report_artifact["path"]))
+
+    file_evidence = _windows_utm_intermediate_file_evidence_gate(
+        list(dict.fromkeys(screen_refs)),
+        list(dict.fromkeys(data_refs)),
+        execution,
+        report,
+        evidence,
+    )
+
+    physical_execute_ok, physical_execute_evidence = _physical_validation_identity_gate(
+        report,
+        expected_run_id=expected_run_id,
+        expected_sequence_id=expected_sequence_id,
+        expected_specimen_id=expected_specimen_id,
+        expected_program_id=expected_program_id,
+    )
+    gate_values = {
+        "physical_live_execute": physical_execute_ok,
+        "screen_started": gate_ok("screen_state_evidence"),
+        "physical_motion_started": gate_ok("vision_physical_cross_check"),
+        "save_completed": gate_ok("save_export_responsibility"),
+        "data_file_created": bool(gate_ok("linux_data_artifact") and file_evidence["data_ok"]),
+        "data_parse_probe_ok": bool(gate_ok("utm_csv_parse_probe") and file_evidence["data_probe_ok"]),
+        "screen_evidence_complete": bool(gate_ok("screen_state_evidence") and file_evidence["screen_ok"]),
+        "linux_artifact_pulled": bool(gate_ok("linux_data_artifact") and file_evidence["data_ok"]),
+        "save_export_responsibility_ok": gate_ok("save_export_responsibility"),
+        "vision_evidence_complete": gate_ok("vision_physical_cross_check"),
+        "request_audit_log_available": bool(request_audit_log.get("ok")),
+        "request_audit_execute_identity_match": bool(request_audit_log.get("execute_identity_match")),
+    }
+    blockers: list[str] = []
+    for item in report.get("blockers", []):
+        if isinstance(item, dict):
+            blockers.append(str(item.get("failure_code") or item.get("name") or item.get("detail") or ""))
+        elif str(item or "").strip():
+            blockers.append(str(item))
+    if request_audit_failure:
+        blockers.append(request_audit_failure)
+    if not physical_execute_ok:
+        blockers.append("UTM_PHYSICAL_LIVE_EXECUTE_REQUIRED")
+        if physical_execute_evidence.get("missing_identity_fields"):
+            blockers.append("UTM_PHYSICAL_LIVE_EXECUTE_IDENTITY_REQUIRED")
+        if physical_execute_evidence.get("mismatched_identity_fields"):
+            blockers.append("UTM_PHYSICAL_LIVE_EXECUTE_IDENTITY_MISMATCH")
+    if not data_refs:
+        blockers.append("UTM_DATA_EVIDENCE_REF_REQUIRED")
+    if len(screen_refs) < 3:
+        blockers.append("UTM_SCREEN_EVIDENCE_REFS_INCOMPLETE")
+    blockers.extend(str(item) for item in file_evidence.get("blockers", []) if str(item or "").strip())
+    blockers = list(dict.fromkeys(item for item in blockers if str(item or "").strip()))
+
+    vision_gate = gates_by_name.get("vision_physical_cross_check") if isinstance(gates_by_name.get("vision_physical_cross_check"), dict) else {}
+    vision_evidence = vision_gate.get("evidence") if isinstance(vision_gate.get("evidence"), dict) else evidence.get("vision_proof") if isinstance(evidence.get("vision_proof"), dict) else {}
+    vision_frame_ids = _windows_utm_vision_frame_ids(vision_evidence)
+
+    live_evidence_audit = {
+        "required_for_handoff": True,
+        "source": "lab_equipment_utm_live_validation",
+        "screen_evidence": {
+            "ok": bool(gate_values["screen_evidence_complete"]),
+            "observed_checkpoints": [str(item.get("checkpoint") or "") for item in observed_screens if isinstance(item, dict)],
+            "screen_refs": list(dict.fromkeys(screen_refs)),
+            "file_evidence": file_evidence,
+        },
+        "linux_artifact_pull": {
+            "ok": bool(gate_values["linux_artifact_pulled"]),
+            "status": data_acquisition.get("status", ""),
+            "linux_path": result_file,
+            "parse_probe_ok": bool(gate_values["data_parse_probe_ok"]),
+            "file_evidence": {
+                "ok": bool(file_evidence["data_ok"]),
+                "verified_data_files": file_evidence.get("verified_data_files", []),
+                "csv_probes": file_evidence.get("csv_probes", []),
+                "failed_csv_probes": file_evidence.get("failed_csv_probes", []),
+                "missing_data_files": file_evidence.get("missing_data_files", []),
+                "unresolved_data_refs": file_evidence.get("unresolved_data_refs", []),
+            },
+        },
+        "save_export": {
+            "ok": bool(gate_values["save_export_responsibility_ok"]),
+            "save_method": str(data_acquisition.get("save_method") or ""),
+            "save_attempted_by_agent": bool(data_acquisition.get("save_attempted_by_agent")),
+            "save_confirmation_screen_ok": bool(data_acquisition.get("save_confirmation_screen_ok")),
+            "windows_path": str(data_acquisition.get("windows_path") or ""),
+            "linux_path": result_file,
+            "recognized_save_method": bool(gate_values["save_export_responsibility_ok"]),
+        },
+        "vision_evidence": {
+            "ok": bool(gate_values["vision_evidence_complete"]),
+            "all_required_ok": bool(gate_values["vision_evidence_complete"]),
+            "evidence_frame_ids": list(dict.fromkeys(vision_frame_ids)),
+            "source_report_gate": vision_evidence,
+        },
+        "request_audit_log": request_audit_log,
+        "physical_execution": physical_execute_evidence,
+    }
+    proof_checklist, proof_ready = _windows_utm_proof_checklist(
+        gates=gate_values,
+        request_audit_log=request_audit_log,
+        screen_refs=list(screen_refs),
+        data_refs=list(data_refs),
+        data_acquisition=data_acquisition,
+        blockers=blockers,
+        source="lab_equipment_utm_live_validation",
+    )
+    ready_for_analysis = bool(report.get("ok") is True and str(report.get("status") or "") == "verified_complete" and proof_ready and not blockers)
+    status = "ready_for_analysis" if ready_for_analysis else "blocked"
+    return {
+        "ok": ready_for_analysis,
+        "tool": "equipment.pyautogui.live_evidence_audit",
+        "status": status,
+        "run_id": expected_run_id,
+        "bridge": "windows_pyautogui",
+        "program_id": expected_program_id,
+        "handoff_status": "ready_for_analysis" if ready_for_analysis else "blocked",
+        "equipment_status": str(report.get("status") or ""),
+        "failure_code": blockers[0] if blockers else None,
+        "required_for_handoff": True,
+        "gates": gate_values,
+        "live_evidence_audit": live_evidence_audit,
+        "request_audit_log": request_audit_log,
+        "proof_checklist": proof_checklist,
+        "proof_ready": proof_ready,
+        "decision": {
+            "handoff_status": "ready_for_analysis" if ready_for_analysis else "blocked",
+            "equipment_status": str(report.get("status") or ""),
+            "blocking_reasons": blockers,
+            "recommended_next_agent": "analysis_agent" if ready_for_analysis else "equipment_agent",
+        },
+        "data_acquisition": data_acquisition,
+        "evidence_refs": list(dict.fromkeys([*artifact_refs, *screen_refs, *data_refs])),
+        "screen_evidence_refs": list(dict.fromkeys(screen_refs)),
+        "data_evidence_refs": list(dict.fromkeys(data_refs)),
+        "source_live_validation_report": report,
+        "blockers": blockers,
+        "warnings": [] if ready_for_analysis else ["LIVE_VALIDATION_REPORT_NOT_READY_FOR_ANALYSIS"],
+        "next_actions": ["Proof package can be built for Analysis handoff review."] if ready_for_analysis else ["Resolve blocked live validation gates, then rerun physical validation."],
+    }
+
+
+def _windows_utm_runtime_metadata_from_live_validation_report(report: dict[str, object], *, run_id: str = "") -> dict[str, object]:
+    """Promote a successful physical live-validation report into Analysis-readable runtime packets."""
+    audit = _windows_utm_evidence_audit_from_live_validation_report(report, run_id=run_id)
+    evidence = report.get("evidence") if isinstance(report.get("evidence"), dict) else {}
+    execution = evidence.get("execution") if isinstance(evidence.get("execution"), dict) else {}
+    data_acquisition = execution.get("data_acquisition") if isinstance(execution.get("data_acquisition"), dict) else {}
+    request_audit_log = audit.get("request_audit_log") if isinstance(audit.get("request_audit_log"), dict) else {}
+    live_evidence_audit = audit.get("live_evidence_audit") if isinstance(audit.get("live_evidence_audit"), dict) else {}
+    cross_checks = audit.get("gates") if isinstance(audit.get("gates"), dict) else {}
+    decision = audit.get("decision") if isinstance(audit.get("decision"), dict) else {}
+    run_id_value = str(report.get("run_id") or run_id or execution.get("run_id") or "").strip()
+    sequence_id = str(report.get("sequence_id") or execution.get("sequence_id") or "").strip()
+    specimen_id = str(report.get("specimen_id") or execution.get("specimen_id") or "").strip()
+    program_id = str(report.get("program_id") or execution.get("program_id") or "").strip()
+    created_at = str(report.get("created_at") or datetime.now(timezone.utc).isoformat())
+    result_file = str(
+        execution.get("result_file")
+        or execution.get("utm_csv_path")
+        or data_acquisition.get("linux_path")
+        or data_acquisition.get("local_path")
+        or ""
+    ).strip()
+    artifact_refs = [str(item) for item in audit.get("evidence_refs", []) if str(item or "").strip()] if isinstance(audit.get("evidence_refs"), list) else []
+    screen_refs = [str(item) for item in audit.get("screen_evidence_refs", []) if str(item or "").strip()] if isinstance(audit.get("screen_evidence_refs"), list) else []
+    data_refs = [str(item) for item in audit.get("data_evidence_refs", []) if str(item or "").strip()] if isinstance(audit.get("data_evidence_refs"), list) else []
+    if result_file and result_file not in data_refs:
+        data_refs.append(result_file)
+    if result_file and result_file not in artifact_refs:
+        artifact_refs.append(result_file)
+
+    vision_evidence = live_evidence_audit.get("vision_evidence") if isinstance(live_evidence_audit.get("vision_evidence"), dict) else {}
+    evidence_frame_ids = (
+        [str(item) for item in vision_evidence.get("evidence_frame_ids", []) if str(item or "").strip()]
+        if isinstance(vision_evidence.get("evidence_frame_ids"), list)
+        else []
+    )
+    screen_evidence = live_evidence_audit.get("screen_evidence") if isinstance(live_evidence_audit.get("screen_evidence"), dict) else {}
+    save_export = live_evidence_audit.get("save_export") if isinstance(live_evidence_audit.get("save_export"), dict) else {}
+    verified = bool(audit.get("ok") is True and audit.get("status") == "ready_for_analysis" and result_file)
+    status = "ready_for_analysis" if verified else "blocked"
+    equipment_status = "verified_complete" if verified else "blocked"
+    failure_code = None if verified else str(audit.get("failure_code") or "LIVE_VALIDATION_NOT_READY_FOR_ANALYSIS")
+
+    physical_checks = {
+        "vision_motion_confirmed": bool(cross_checks.get("physical_motion_started")),
+        "specimen_alignment_ok": bool(cross_checks.get("vision_evidence_complete")),
+        "fixture_safe_to_access": bool(cross_checks.get("vision_evidence_complete")),
+        "evidence_frame_ids": evidence_frame_ids,
+    }
+    visual_verification = {
+        "screen_started": bool(cross_checks.get("screen_started")),
+        "screen_evidence_complete": bool(cross_checks.get("screen_evidence_complete")),
+        "screen_evidence_refs": screen_refs,
+        "observed_checkpoints": screen_evidence.get("observed_checkpoints", []),
+    }
+    physical_verification = {
+        "all_required_ok": bool(cross_checks.get("vision_evidence_complete")),
+        **physical_checks,
+        "checks": vision_evidence.get("source_report_gate", {}),
+    }
+    data_ledger = {
+        "status": data_acquisition.get("status", ""),
+        "save_method": data_acquisition.get("save_method", ""),
+        "save_attempted_by_agent": bool(data_acquisition.get("save_attempted_by_agent")),
+        "save_confirmation_screen_ok": bool(data_acquisition.get("save_confirmation_screen_ok")),
+        "save_export_responsibility_ok": bool(cross_checks.get("save_export_responsibility_ok")),
+        "recognized_save_method": bool(save_export.get("recognized_save_method")),
+        "windows_path": data_acquisition.get("windows_path", ""),
+        "linux_path": result_file,
+        "row_count_probe": data_acquisition.get("row_count_probe", 0),
+        "columns_probe": data_acquisition.get("columns_probe", []),
+        "parse_ready": bool(cross_checks.get("data_parse_probe_ok")),
+        "data_evidence_refs": data_refs,
+    }
+    handoff_gate = {
+        "handoff_status": status,
+        "equipment_status": equipment_status,
+        "failure_code": failure_code,
+        "ready_for_analysis": verified,
+        "required_gates": dict(cross_checks),
+        "blocking_reasons": list(decision.get("blocking_reasons", [])) if isinstance(decision.get("blocking_reasons"), list) else [],
+        "recommended_next_agent": "analysis_agent" if verified else "guardian_agent",
+        "live_evidence_audit": live_evidence_audit,
+    }
+    safety_gate = {
+        "guardian_status": "allow" if verified else "block",
+        "blocks_workflow": not verified,
+        "requires_human_approval": not verified,
+        "hardware_alert_count": 0,
+        "active_hardware_alert": {},
+        "incident_records": [],
+        "blocked_commands": [] if verified else [failure_code],
+    }
+    bridge_report = {
+        "provider": "windows_pyautogui",
+        "connection_status": "ready" if verified else "blocked",
+        "live_execute_enabled": True,
+        "request_log_path": request_audit_log.get("path", ""),
+        "request_log_event_count": request_audit_log.get("event_count", 0),
+        "request_log_recent_paths": request_audit_log.get("recent_paths", []),
+        "request_log_execute_seen": bool(request_audit_log.get("execute_event_seen")),
+        "request_log_execute_count": request_audit_log.get("execute_event_count", 0),
+        "request_log_execute_payload_event_count": request_audit_log.get("execute_payload_event_count", 0),
+        "request_log_execute_result_event_count": request_audit_log.get("execute_result_event_count", 0),
+        "request_log_execute_run_ids": request_audit_log.get("execute_run_ids", []),
+        "request_log_execute_sequence_ids": request_audit_log.get("execute_sequence_ids", []),
+        "request_log_execute_specimen_ids": request_audit_log.get("execute_specimen_ids", []),
+        "request_log_execute_program_ids": request_audit_log.get("execute_program_ids", []),
+        "request_log_last_execute_context": request_audit_log.get("last_execute_context", {}),
+        "request_log_last_execute_at": request_audit_log.get("last_execute_at", ""),
+        "request_log_execute_identity_required": bool(request_audit_log.get("execute_identity_required")),
+        "request_log_execute_identity_present": bool(request_audit_log.get("execute_identity_present")),
+        "request_log_execute_identity_match": bool(request_audit_log.get("execute_identity_match")),
+        "request_log_execute_identity_detail": request_audit_log.get("execute_identity_detail", {}),
+    }
+    report_packet = {
+        "schema": "equipment_report.v1",
+        "report_version": "lab_equipment_utm_visual_control_v1",
+        "source": "lab_equipment_utm_live_validation",
+        "run_id": run_id_value,
+        "mode": "live",
+        "task_id": "utm_compression_test",
+        "bridge": bridge_report,
+        "control_plan": {
+            "program_id": program_id,
+            "macro_version": "v1" if program_id else "",
+            "profile": report.get("execution_payload_preview") if isinstance(report.get("execution_payload_preview"), dict) else {},
+        },
+        "screen_checks": execution.get("screen_checks") if isinstance(execution.get("screen_checks"), list) else [],
+        "physical_checks": physical_checks,
+        "data_acquisition": data_acquisition,
+        "cross_checks": dict(cross_checks),
+        "artifact_refs": artifact_refs,
+        "screen_evidence_refs": screen_refs,
+        "data_evidence_refs": data_refs,
+        "artifact_pull": execution.get("artifact_pull") if isinstance(execution.get("artifact_pull"), dict) else {},
+        "live_evidence_audit": live_evidence_audit,
+        "visual_verification": visual_verification,
+        "physical_verification": physical_verification,
+        "data_ledger": data_ledger,
+        "handoff_gate": handoff_gate,
+        "safety_gate": safety_gate,
+        "decision": {
+            "equipment_status": equipment_status,
+            "handoff_status": status,
+            "failure_code": failure_code,
+            "blocking_reasons": handoff_gate["blocking_reasons"],
+            "recommended_next_agent": "analysis_agent" if verified else "guardian_agent",
+        },
+    }
+    packet = {
+        "schema": "utm_data_ready.v1",
+        "run_id": run_id_value,
+        "specimen_id": specimen_id,
+        "producer_agent": "lab_equipment_agent",
+        "consumer_agent": "analysis_agent",
+        "created_at": created_at,
+        "status": "ready" if verified else "blocked",
+        "evidence_refs": artifact_refs,
+        "data_evidence_refs": data_refs,
+        "screen_evidence_refs": screen_refs,
+        "live_evidence_audit": live_evidence_audit,
+        "save_export_responsibility_ok": bool(cross_checks.get("save_export_responsibility_ok")),
+        "save_export": save_export,
+        "artifact_pull": execution.get("artifact_pull") if isinstance(execution.get("artifact_pull"), dict) else {},
+        "bridge_request_log_ref": request_audit_log.get("path", ""),
+        "bridge_request_log_execute_event_seen": bool(request_audit_log.get("execute_event_seen")),
+        "bridge_request_log_execute_run_ids": request_audit_log.get("execute_run_ids", []),
+        "bridge_request_log_execute_sequence_ids": request_audit_log.get("execute_sequence_ids", []),
+        "bridge_request_log_execute_specimen_ids": request_audit_log.get("execute_specimen_ids", []),
+        "bridge_request_log_execute_program_ids": request_audit_log.get("execute_program_ids", []),
+        "bridge_request_log_execute_identity_match": bool(request_audit_log.get("execute_identity_match")),
+        "bridge_request_log_execute_identity_detail": request_audit_log.get("execute_identity_detail", {}),
+        "guardian_status": "allow" if verified else "block",
+        "decisions": [report_packet["decision"]],
+        "warnings": [] if verified else [failure_code],
+        "next_action": "analysis_agent" if verified else "guardian_review",
+        "equipment_report": report_packet,
+        "control_trace": {
+            "bridge_provider": "windows_pyautogui",
+            "connection_status": bridge_report["connection_status"],
+            "program_id": program_id,
+            "sequence_id": sequence_id,
+            "macro_version": report_packet["control_plan"]["macro_version"],
+            "source": "lab_equipment_utm_live_validation",
+        },
+        "visual_verification": visual_verification,
+        "physical_verification": physical_verification,
+        "data_ledger": data_ledger,
+        "handoff_gate": handoff_gate,
+        "safety_gate": safety_gate,
+        "result_file": result_file,
+        "utm_csv_path": result_file,
+    }
+    handoff = {
+        "schema": "utm_data_ready.v1",
+        "status": status,
+        "bridge": "windows_pyautogui",
+        "program_id": program_id,
+        "sequence_id": sequence_id,
+        "result_file": result_file,
+        "utm_csv_path": result_file,
+        "failure_code": failure_code,
+        "data_parse_probe_ok": bool(cross_checks.get("data_parse_probe_ok")),
+        "artifact_refs": artifact_refs,
+        "screen_evidence_refs": screen_refs,
+        "data_evidence_refs": data_refs,
+        "live_evidence_audit": live_evidence_audit,
+        "save_export_responsibility_ok": bool(cross_checks.get("save_export_responsibility_ok")),
+        "save_export": save_export,
+        "data_ledger": data_ledger,
+        "handoff_gate": handoff_gate,
+        "safety_gate": safety_gate,
+        "bridge_request_log_ref": request_audit_log.get("path", ""),
+        "bridge_request_log_execute_event_seen": bool(request_audit_log.get("execute_event_seen")),
+        "bridge_request_log_execute_run_ids": request_audit_log.get("execute_run_ids", []),
+        "bridge_request_log_execute_sequence_ids": request_audit_log.get("execute_sequence_ids", []),
+        "bridge_request_log_execute_specimen_ids": request_audit_log.get("execute_specimen_ids", []),
+        "bridge_request_log_execute_program_ids": request_audit_log.get("execute_program_ids", []),
+        "bridge_request_log_execute_identity_match": bool(request_audit_log.get("execute_identity_match")),
+        "bridge_request_log_execute_identity_detail": request_audit_log.get("execute_identity_detail", {}),
+    }
+    equipment_result = dict(execution)
+    equipment_result.update(
+        {
+            "ok": verified,
+            "tool": str(execution.get("tool") or "equipment.pyautogui.run"),
+            "status": equipment_status,
+            "failure_code": failure_code,
+            "bridge": "windows_pyautogui",
+            "program_id": program_id,
+            "sequence_id": sequence_id,
+            "result_file": result_file,
+            "utm_csv_path": result_file,
+            "data_acquisition": data_acquisition,
+            "cross_checks": dict(cross_checks),
+            "equipment_report": report_packet,
+            "utm_data_ready": packet,
+            "equipment_handoff": handoff,
+        }
+    )
+    return {
+        "verified": verified,
+        "equipment_result": equipment_result,
+        "equipment_report": report_packet,
+        "utm_data_ready": packet,
+        "equipment_handoff": handoff,
+        "evidence_audit": audit,
+    }
+
+
+def _windows_utm_evidence_audit_from_metadata(metadata: dict[str, object], *, run_id: str = "") -> dict[str, object]:
+    """Return post-run UTM evidence gates without touching live hardware."""
+    equipment_report = metadata.get("equipment_report") if isinstance(metadata.get("equipment_report"), dict) else {}
+    equipment_result = metadata.get("equipment_result") if isinstance(metadata.get("equipment_result"), dict) else {}
+    equipment_handoff = metadata.get("equipment_handoff") if isinstance(metadata.get("equipment_handoff"), dict) else {}
+    utm_packet = metadata.get("utm_data_ready") if isinstance(metadata.get("utm_data_ready"), dict) else {}
+
+    if not equipment_report:
+        physical_validation = metadata.get("last_windows_utm_physical_validation") if isinstance(metadata.get("last_windows_utm_physical_validation"), dict) else {}
+        if physical_validation and physical_validation.get("execute_sent") is True:
+            return _windows_utm_evidence_audit_from_live_validation_report(physical_validation, run_id=run_id)
+        raw_result = metadata.get("last_windows_utm_protocol_result") if isinstance(metadata.get("last_windows_utm_protocol_result"), dict) else metadata.get("last_windows_equipment_run_result") if isinstance(metadata.get("last_windows_equipment_run_result"), dict) else {}
+        if raw_result and str(raw_result.get("program_id") or "").startswith("utm_"):
+            return _windows_utm_evidence_audit_from_raw_result(raw_result, run_id=run_id)
+        return {
+            "ok": False,
+            "tool": "equipment.pyautogui.live_evidence_audit",
+            "status": "missing",
+            "run_id": run_id,
+            "bridge": "windows_pyautogui",
+            "blockers": ["EQUIPMENT_REPORT_NOT_AVAILABLE"],
+            "warnings": [],
+            "gates": {},
+            "live_evidence_audit": {},
+            "proof_checklist": [],
+            "proof_ready": False,
+            "decision": {},
+            "evidence_refs": [],
+            "next_actions": ["Run the Lab Equipment Agent stage or load a completed run with equipment_report.v1."],
+        }
+
+    bridge = equipment_report.get("bridge") if isinstance(equipment_report.get("bridge"), dict) else {}
+    cross_checks = equipment_report.get("cross_checks") if isinstance(equipment_report.get("cross_checks"), dict) else {}
+    decision = equipment_report.get("decision") if isinstance(equipment_report.get("decision"), dict) else {}
+    audit = equipment_report.get("live_evidence_audit") if isinstance(equipment_report.get("live_evidence_audit"), dict) else {}
+    data_acquisition = equipment_report.get("data_acquisition") if isinstance(equipment_report.get("data_acquisition"), dict) else {}
+    request_audit_source = audit.get("request_audit_log") if isinstance(audit.get("request_audit_log"), dict) else {}
+    if not request_audit_source and isinstance(bridge, dict) and bridge.get("request_log_path"):
+        request_audit_source = {
+            "path": str(bridge.get("request_log_path") or ""),
+            "event_count": bridge.get("request_log_event_count", 0),
+            "recent_paths": bridge.get("request_log_recent_paths", []),
+        }
+    expected_specimen_id = str(
+        equipment_handoff.get("specimen_id")
+        or utm_packet.get("specimen_id")
+        or equipment_report.get("specimen_id")
+        or ""
+    )
+    request_audit_log, request_audit_failure = _request_audit_log_gate({
+        **dict(request_audit_source),
+        "request_audit_log": request_audit_source,
+        "expected_run_id": str(equipment_report.get("run_id") or run_id or ""),
+        "expected_sequence_id": str(equipment_handoff.get("sequence_id") or equipment_report.get("sequence_id") or ""),
+        "expected_specimen_id": expected_specimen_id,
+        "expected_program_id": str(equipment_handoff.get("program_id") or (equipment_report.get("control_plan") if isinstance(equipment_report.get("control_plan"), dict) else {}).get("program_id") or ""),
+        "require_execute_identity_match": bool(audit.get("required_for_handoff")),
+    })
+    screen_refs = equipment_report.get("screen_evidence_refs") if isinstance(equipment_report.get("screen_evidence_refs"), list) else []
+    data_refs = equipment_report.get("data_evidence_refs") if isinstance(equipment_report.get("data_evidence_refs"), list) else []
+    artifact_refs = equipment_report.get("artifact_refs") if isinstance(equipment_report.get("artifact_refs"), list) else []
+
+    blockers: list[str] = [str(item) for item in decision.get("blocking_reasons", []) if str(item or "").strip()] if isinstance(decision.get("blocking_reasons"), list) else []
+    warnings: list[str] = []
+    required_for_handoff = bool(audit.get("required_for_handoff"))
+
+    save_export_audit = audit.get("save_export") if isinstance(audit.get("save_export"), dict) else {}
+    source_live_validation_report = metadata.get("last_windows_utm_physical_validation") if isinstance(metadata.get("last_windows_utm_physical_validation"), dict) else {}
+    file_evidence = _windows_utm_intermediate_file_evidence_gate(
+        [str(item) for item in screen_refs],
+        [str(item) for item in data_refs],
+        equipment_report,
+        equipment_result,
+        source_live_validation_report,
+    )
+    required_screen_files_ok = bool(file_evidence["screen_ok"]) if required_for_handoff else True
+    required_data_files_ok = bool(file_evidence["data_ok"]) if required_for_handoff else True
+    physical_execute_ok, physical_execute_evidence = _physical_validation_identity_gate(
+        source_live_validation_report,
+        expected_run_id=str(equipment_report.get("run_id") or run_id or ""),
+        expected_sequence_id=str(equipment_handoff.get("sequence_id") or equipment_report.get("sequence_id") or ""),
+        expected_specimen_id=expected_specimen_id,
+        expected_program_id=str(equipment_handoff.get("program_id") or (equipment_report.get("control_plan") if isinstance(equipment_report.get("control_plan"), dict) else {}).get("program_id") or ""),
+    )
+    gate_values = {
+        "physical_live_execute": physical_execute_ok,
+        "screen_started": bool(cross_checks.get("screen_started")),
+        "physical_motion_started": bool(cross_checks.get("physical_motion_started")),
+        "save_completed": bool(cross_checks.get("save_completed")),
+        "data_file_created": bool(cross_checks.get("data_file_created") and required_data_files_ok),
+        "data_parse_probe_ok": bool(cross_checks.get("data_parse_probe_ok") and (not required_for_handoff or file_evidence["data_probe_ok"])),
+        "screen_evidence_complete": bool(cross_checks.get("screen_evidence_complete", not required_for_handoff) and required_screen_files_ok),
+        "linux_artifact_pulled": bool(cross_checks.get("linux_artifact_pulled", not required_for_handoff) and required_data_files_ok),
+        "save_export_responsibility_ok": bool(cross_checks.get("save_export_responsibility_ok", save_export_audit.get("ok", not required_for_handoff))),
+        "vision_evidence_complete": bool(cross_checks.get("vision_evidence_complete", not required_for_handoff)),
+        "request_audit_log_available": bool(request_audit_log.get("ok")),
+        "request_audit_execute_identity_match": bool(request_audit_log.get("execute_identity_match")),
+    }
+    if required_for_handoff:
+        for gate, ok in gate_values.items():
+            if not ok:
+                if gate == "request_audit_log_available" and request_audit_failure:
+                    blockers.append(request_audit_failure)
+                elif gate == "save_export_responsibility_ok":
+                    blockers.append("UTM_SAVE_EXPORT_RESPONSIBILITY_REQUIRED")
+                else:
+                    blockers.append(f"{gate.upper()}_REQUIRED")
+        if str(data_acquisition.get("status") or "") != "pulled_to_linux":
+            blockers.append("UTM_LINUX_ARTIFACT_PULL_REQUIRED")
+        if not data_refs:
+            blockers.append("UTM_DATA_EVIDENCE_REF_REQUIRED")
+        if len(screen_refs) < 3:
+            blockers.append("UTM_SCREEN_EVIDENCE_REFS_INCOMPLETE")
+        blockers.extend(str(item) for item in file_evidence.get("blockers", []) if str(item or "").strip())
+        if not physical_execute_ok:
+            blockers.append("UTM_PHYSICAL_LIVE_EXECUTE_REQUIRED")
+            if physical_execute_evidence.get("missing_identity_fields"):
+                blockers.append("UTM_PHYSICAL_LIVE_EXECUTE_IDENTITY_REQUIRED")
+            if physical_execute_evidence.get("mismatched_identity_fields"):
+                blockers.append("UTM_PHYSICAL_LIVE_EXECUTE_IDENTITY_MISMATCH")
+    else:
+        warnings.append("LIVE_WINDOWS_UTM_AUDIT_NOT_REQUIRED_FOR_THIS_REPORT")
+
+    handoff_status = str(decision.get("handoff_status") or equipment_handoff.get("status") or "")
+    equipment_status = str(decision.get("equipment_status") or equipment_result.get("status") or "")
+    failure_code = str(decision.get("failure_code") or equipment_result.get("failure_code") or "")
+    blockers = list(dict.fromkeys(item for item in blockers if item))
+    status = "ready_for_analysis" if not blockers and handoff_status == "ready_for_analysis" else "blocked" if blockers else handoff_status or equipment_status or "unknown"
+
+    proof_checklist, proof_ready = _windows_utm_proof_checklist(
+        gates=gate_values,
+        request_audit_log=request_audit_log,
+        screen_refs=list(screen_refs),
+        data_refs=list(data_refs),
+        data_acquisition=data_acquisition,
+        blockers=blockers,
+        source="equipment_report",
+    )
+
+    next_actions = []
+    if "UTM_SCREEN_EVIDENCE_INCOMPLETE" in blockers or "SCREEN_EVIDENCE_COMPLETE_REQUIRED" in blockers or "UTM_SCREEN_EVIDENCE_REFS_INCOMPLETE" in blockers:
+        next_actions.append("Verify UTM locators and rerun the protocol until before/start/complete screenshots are captured.")
+    if "UTM_LINUX_ARTIFACT_PULL_REQUIRED" in blockers or "LINUX_ARTIFACT_PULLED_REQUIRED" in blockers or "UTM_DATA_EVIDENCE_REF_REQUIRED" in blockers:
+        next_actions.append("Pull the UTM CSV through the Windows artifact endpoint and confirm a Linux-local path is recorded.")
+    if "UTM_SAVE_EXPORT_RESPONSIBILITY_REQUIRED" in blockers or "SAVE_EXPORT_RESPONSIBILITY_OK_REQUIRED" in blockers:
+        next_actions.append("Confirm the UTM save/export method, save attempt, and Windows/Linux export paths before Analysis handoff.")
+    if "UTM_VISION_EVIDENCE_FRAMES_REQUIRED" in blockers or "VISION_EVIDENCE_COMPLETE_REQUIRED" in blockers:
+        next_actions.append("Refresh Vision cross-checks and preserve frame IDs for pre-start, motion, and complete states.")
+    if "UTM_REQUEST_LOG_REQUIRED" in blockers or "UTM_REQUEST_LOG_EXECUTE_EVENT_REQUIRED" in blockers:
+        next_actions.append("Inspect the Windows bridge request log and confirm the live /execute request was recorded.")
+    if failure_code and not next_actions:
+        next_actions.append("Review the Equipment report failure/recovery table before retrying.")
+
+    return {
+        "ok": not blockers and status == "ready_for_analysis",
+        "tool": "equipment.pyautogui.live_evidence_audit",
+        "status": status,
+        "run_id": run_id,
+        "bridge": bridge.get("provider", "windows_pyautogui"),
+        "program_id": (equipment_report.get("control_plan") or {}).get("program_id", equipment_result.get("program_id", "")) if isinstance(equipment_report.get("control_plan"), dict) else equipment_result.get("program_id", ""),
+        "handoff_status": handoff_status,
+        "equipment_status": equipment_status,
+        "failure_code": failure_code or None,
+        "required_for_handoff": required_for_handoff,
+        "gates": gate_values,
+        "live_evidence_audit": audit,
+        "request_audit_log": request_audit_log,
+        "physical_execution": physical_execute_evidence,
+        "file_evidence": file_evidence,
+        "proof_checklist": proof_checklist,
+        "proof_ready": proof_ready,
+        "decision": decision,
+        "data_acquisition": data_acquisition,
+        "evidence_refs": list(dict.fromkeys(str(item) for item in [*artifact_refs, *screen_refs, *data_refs] if str(item or "").strip())),
+        "screen_evidence_refs": [str(item) for item in screen_refs],
+        "data_evidence_refs": [str(item) for item in data_refs],
+        "source_live_validation_report": source_live_validation_report,
+        "blockers": blockers,
+        "warnings": warnings,
+        "next_actions": next_actions,
+    }
+
+
+_DEFAULT_REQUIRED_UTM_LOCATORS = ("ready_state", "start_button", "running_state", "complete_state")
+
+
+def _required_utm_locator_names(runtime_profile: dict[str, object]) -> list[str]:
+    """Infer screen-control locator names required by the configured UTM protocol."""
+    sequence = runtime_profile.get("sequence") if isinstance(runtime_profile.get("sequence"), list) else []
+    names: list[str] = []
+    for action in sequence:
+        if not isinstance(action, dict):
+            continue
+        action_name = str(action.get("action") or "").strip()
+        if action_name not in {"assert_visible", "wait_until", "click"}:
+            continue
+        target = str(action.get("target") or action.get("name") or "").strip()
+        if target and target not in names:
+            names.append(target)
+    if not names:
+        names = list(_DEFAULT_REQUIRED_UTM_LOCATORS)
+    return names
+
+
+def _configured_locator_names(locators: object) -> list[str]:
+    if isinstance(locators, dict):
+        return sorted(str(name) for name, value in locators.items() if isinstance(value, dict))
+    return []
+
+
+def _windows_utm_readiness_from_bridge(
+    bridge: WindowsPyAutoGUIBridge,
+    runtime_overrides: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Return passive UTM readiness without touching live hardware endpoints."""
+    overrides = runtime_overrides if isinstance(runtime_overrides, dict) else {}
+    connection = bridge.connection_status()
+    programs = bridge.list_programs({"runtime_mode": "test"})
+    profile_status = bridge.utm_profile_status()
+    profile = profile_status.get("profile") if isinstance(profile_status.get("profile"), dict) else {}
+    program_id = str(overrides.get("program_id") or profile.get("program_id") or "utm_compression_start_v1")
+    program_list = programs.get("programs") if isinstance(programs.get("programs"), list) else []
+    program_ids = {str(item.get("program_id")) for item in program_list if isinstance(item, dict) and item.get("program_id")}
+    runtime_profile: dict[str, object]
+    runtime_payload_builder = getattr(bridge, "_runtime_program_payload", None)
+    if callable(runtime_payload_builder):
+        runtime_profile = runtime_payload_builder({"program_id": program_id, "runtime_mode": "live"})
+    else:
+        runtime_profile = dict(profile)
+        runtime_profile.setdefault("program_id", program_id)
+    for key, value in overrides.items():
+        if key in {"sequence", "locators"}:
+            if value:
+                runtime_profile[key] = value
+            continue
+        if value not in (None, ""):
+            runtime_profile[key] = value
+    locators = runtime_profile.get("locators") if isinstance(runtime_profile.get("locators"), dict) else {}
+    export_glob = str(runtime_profile.get("export_glob") or profile.get("export_glob") or "").strip()
+    require_screen = bool(runtime_profile.get("require_screen_assertions", profile.get("require_screen_assertions", False)))
+    simulate = bool(runtime_profile.get("simulate_utm_protocol", profile.get("simulate_utm_protocol", False)))
+    required_locator_names = _required_utm_locator_names(runtime_profile)
+    configured_locator_names = _configured_locator_names(locators)
+    missing_required_locators = [name for name in required_locator_names if name not in set(configured_locator_names)]
+
+    blockers: list[str] = []
+    warnings: list[str] = []
+    if not bool(connection.get("selected")):
+        blockers.append("PYAUTOGUI_BRIDGE_NOT_SELECTED")
+    if not bool(connection.get("token_configured")):
+        blockers.append("PYAUTOGUI_TOKEN_MISSING")
+    if program_id not in program_ids:
+        blockers.append("UTM_PROGRAM_NOT_REGISTERED")
+    if not export_glob:
+        blockers.append("UTM_EXPORT_GLOB_MISSING")
+    if require_screen and missing_required_locators:
+        blockers.append("UTM_REQUIRED_LOCATORS_MISSING")
+    if profile_status.get("source") != "memory":
+        warnings.append("UTM_PROFILE_USING_REGISTERED_DEFAULTS")
+    if not locators:
+        warnings.append("UTM_LOCATORS_NOT_CAPTURED")
+    elif missing_required_locators:
+        warnings.append("UTM_LOCATOR_SET_INCOMPLETE")
+    if not require_screen:
+        warnings.append("UTM_SCREEN_ASSERTIONS_NOT_REQUIRED")
+    if simulate:
+        warnings.append("UTM_PROFILE_SIMULATION_ENABLED")
+
+    status = "blocked" if blockers else "warning" if warnings else "ready"
+    next_actions = [
+        "Select a token-verified Windows bridge candidate." if "PYAUTOGUI_BRIDGE_NOT_SELECTED" in blockers else "",
+        "Save the bridge token with the selected candidate." if "PYAUTOGUI_TOKEN_MISSING" in blockers else "",
+        f"Register program {program_id}." if "UTM_PROGRAM_NOT_REGISTERED" in blockers else "",
+        "Set the UTM export glob for the CSV file." if "UTM_EXPORT_GLOB_MISSING" in blockers else "",
+        f"Capture required UTM locators: {', '.join(missing_required_locators)}." if "UTM_REQUIRED_LOCATORS_MISSING" in blockers else "",
+        "Capture UTM screen locators and enable screen assertions before live autonomous UTM." if "UTM_LOCATORS_NOT_CAPTURED" in warnings or "UTM_SCREEN_ASSERTIONS_NOT_REQUIRED" in warnings else "",
+        "Disable bench simulation before live UTM." if "UTM_PROFILE_SIMULATION_ENABLED" in warnings else "",
+    ]
+    return {
+        "ok": not blockers,
+        "tool": "equipment.pyautogui.utm_readiness",
+        "status": status,
+        "bridge": "windows_pyautogui",
+        "program_id": program_id,
+        "ready_for_setup_test": not blockers,
+        "ready_for_autonomous_profile": not blockers and require_screen and bool(locators) and not missing_required_locators and not simulate,
+        "runtime_overrides_applied": bool(overrides),
+        "blockers": blockers,
+        "warnings": warnings,
+        "gates": {
+            "connection_saved": bool(connection.get("selected")),
+            "token_configured": bool(connection.get("token_configured")),
+            "utm_program_registered": program_id in program_ids,
+            "export_glob_configured": bool(export_glob),
+            "locator_count": len(locators),
+            "locator_names": configured_locator_names,
+            "required_locator_names": required_locator_names,
+            "missing_required_locators": missing_required_locators,
+            "required_locators_complete": not missing_required_locators,
+            "require_screen_assertions": require_screen,
+            "simulate_utm_protocol": simulate,
+            "profile_source": str(profile_status.get("source") or ""),
+            "profile_memory_path": str(profile_status.get("profile_memory_path") or ""),
+        },
+        "next_actions": [item for item in next_actions if item],
+    }
+
+
+def _windows_bridge_request_log_from_bridge(
+    bridge: WindowsPyAutoGUIBridge,
+    *,
+    runtime_mode: str = "live",
+    confirm_live: bool = False,
+) -> dict[str, object]:
+    """Retrieve bridge request-audit events; live mode is non-actuating but explicit."""
+    mode = "live" if str(runtime_mode).strip().lower() == "live" else "test"
+    if mode == "live" and not confirm_live:
+        return {
+            "ok": False,
+            "tool": "equipment.pyautogui.request_log",
+            "status": "blocked",
+            "bridge": "windows_pyautogui",
+            "failure_code": "PYAUTOGUI_REQUEST_LOG_CONFIRMATION_REQUIRED",
+            "message": "confirm_live=true is required before contacting the live Windows bridge request-log endpoint.",
+            "events": [],
+            "event_count": 0,
+        }
+    payload = {"runtime_mode": mode}
+    if mode == "live":
+        payload["force_live_bridge"] = True
+    result = bridge.request_log(payload)
+    events = result.get("events") if isinstance(result.get("events"), list) else []
+    sanitized_events: list[dict[str, object]] = []
+    for event in events[-100:]:
+        if not isinstance(event, dict):
+            continue
+        sanitized_events.append(
+            {
+                key: value
+                for key, value in event.items()
+                if "token" not in str(key).lower() or str(key).lower() in {"token_auth_enabled", "token_header_present"}
+            }
+        )
+    result["events"] = sanitized_events
+    result["event_count"] = int(result.get("event_count") or len(sanitized_events))
+    result.setdefault("request_log", result.get("request_log") or "")
+    result.setdefault("non_actuating", True)
+    return result
+
+
+
+def _windows_utm_proof_package_from_metadata(
+    metadata: dict[str, object],
+    *,
+    run_id: str = "",
+    passive_readiness: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Build a single operator/audit package for live Windows UTM proof review."""
+    evidence_audit = _windows_utm_evidence_audit_from_metadata(metadata, run_id=run_id)
+    checklist = evidence_audit.get("proof_checklist") if isinstance(evidence_audit.get("proof_checklist"), list) else []
+    required_items = [item for item in checklist if isinstance(item, dict) and item.get("required") is not False]
+    missing_items = [item for item in required_items if item.get("ok") is not True]
+    evidence_refs = [str(item) for item in evidence_audit.get("evidence_refs", []) if str(item or "").strip()] if isinstance(evidence_audit.get("evidence_refs"), list) else []
+    screen_refs = [str(item) for item in evidence_audit.get("screen_evidence_refs", []) if str(item or "").strip()] if isinstance(evidence_audit.get("screen_evidence_refs"), list) else []
+    data_refs = [str(item) for item in evidence_audit.get("data_evidence_refs", []) if str(item or "").strip()] if isinstance(evidence_audit.get("data_evidence_refs"), list) else []
+    live_audit = evidence_audit.get("live_evidence_audit") if isinstance(evidence_audit.get("live_evidence_audit"), dict) else {}
+    vision_evidence = live_audit.get("vision_evidence") if isinstance(live_audit.get("vision_evidence"), dict) else {}
+    vision_frame_ids = [str(item) for item in vision_evidence.get("evidence_frame_ids", []) if str(item or "").strip()] if isinstance(vision_evidence.get("evidence_frame_ids"), list) else []
+    request_audit = evidence_audit.get("request_audit_log") if isinstance(evidence_audit.get("request_audit_log"), dict) else {}
+    save_export = live_audit.get("save_export") if isinstance(live_audit.get("save_export"), dict) else {}
+    data_acquisition = evidence_audit.get("data_acquisition") if isinstance(evidence_audit.get("data_acquisition"), dict) else {}
+    blockers = [str(item) for item in evidence_audit.get("blockers", []) if str(item or "").strip()] if isinstance(evidence_audit.get("blockers"), list) else []
+    warnings = [str(item) for item in evidence_audit.get("warnings", []) if str(item or "").strip()] if isinstance(evidence_audit.get("warnings"), list) else []
+    proof_ready = bool(evidence_audit.get("proof_ready"))
+    ready_for_analysis = proof_ready and str(evidence_audit.get("status") or "") == "ready_for_analysis"
+    last_preflight = metadata.get("last_windows_live_preflight_result") if isinstance(metadata.get("last_windows_live_preflight_result"), dict) else {}
+    last_result = metadata.get("last_windows_utm_protocol_result") if isinstance(metadata.get("last_windows_utm_protocol_result"), dict) else metadata.get("last_windows_equipment_run_result") if isinstance(metadata.get("last_windows_equipment_run_result"), dict) else {}
+    last_live_validation = metadata.get("last_windows_utm_live_validation") if isinstance(metadata.get("last_windows_utm_live_validation"), dict) else {}
+    last_physical_validation = metadata.get("last_windows_utm_physical_validation") if isinstance(metadata.get("last_windows_utm_physical_validation"), dict) else {}
+    source_packets = {
+        "equipment_report": metadata.get("equipment_report") if isinstance(metadata.get("equipment_report"), dict) else {},
+        "utm_data_ready": metadata.get("utm_data_ready") if isinstance(metadata.get("utm_data_ready"), dict) else {},
+        "equipment_handoff": metadata.get("equipment_handoff") if isinstance(metadata.get("equipment_handoff"), dict) else {},
+        "last_windows_utm_live_validation": last_live_validation,
+        "last_windows_utm_physical_validation": last_physical_validation,
+    }
+    physical_evidence = evidence_audit.get("physical_execution") if isinstance(evidence_audit.get("physical_execution"), dict) else {}
+    physical_execution_ok = bool(physical_evidence.get("dispatch_ok") is True and physical_evidence.get("identity_ok") is True)
+    physical_execution = {
+        "ok": physical_execution_ok,
+        "source": "last_windows_utm_physical_validation" if last_physical_validation else "missing",
+        "requested_physical_execute": bool(last_physical_validation.get("requested_physical_execute")),
+        "execute_sent": bool(last_physical_validation.get("execute_sent")),
+        "non_actuating": bool(last_physical_validation.get("non_actuating", True)),
+        "status": str(last_physical_validation.get("status") or ""),
+        "run_id": str(last_physical_validation.get("run_id") or ""),
+        "sequence_id": str(last_physical_validation.get("sequence_id") or ""),
+        "specimen_id": str(last_physical_validation.get("specimen_id") or ""),
+        "program_id": str(last_physical_validation.get("program_id") or ""),
+        "dispatch_ok": bool(physical_evidence.get("dispatch_ok")),
+        "identity_ok": bool(physical_evidence.get("identity_ok")),
+        "expected_identity": physical_evidence.get("expected", {}),
+        "observed_identity": physical_evidence.get("observed", {}),
+        "missing_identity_fields": physical_evidence.get("missing_identity_fields", []),
+        "mismatched_identity_fields": physical_evidence.get("mismatched_identity_fields", []),
+    }
+    if not physical_execution_ok and "UTM_PHYSICAL_LIVE_EXECUTE_REQUIRED" not in blockers:
+        blockers.append("UTM_PHYSICAL_LIVE_EXECUTE_REQUIRED")
+    if physical_execution.get("missing_identity_fields") and "UTM_PHYSICAL_LIVE_EXECUTE_IDENTITY_REQUIRED" not in blockers:
+        blockers.append("UTM_PHYSICAL_LIVE_EXECUTE_IDENTITY_REQUIRED")
+    if physical_execution.get("mismatched_identity_fields") and "UTM_PHYSICAL_LIVE_EXECUTE_IDENTITY_MISMATCH" not in blockers:
+        blockers.append("UTM_PHYSICAL_LIVE_EXECUTE_IDENTITY_MISMATCH")
+    physical_item = {
+        "id": "physical_live_execute",
+        "label": "Physical live /execute dispatch",
+        "ok": physical_execution_ok,
+        "required": True,
+        "detail": "requires Run Physical Validation with execute_sent=true, non_actuating=false, status=verified_complete, and matching run/sequence/specimen/program identity",
+        "source": "proof_package_manifest",
+    }
+    checklist = [physical_item, *[item for item in checklist if not (isinstance(item, dict) and item.get("id") == "physical_live_execute")]]
+    required_items = [item for item in checklist if isinstance(item, dict) and item.get("required") is not False]
+    missing_items = [item for item in required_items if item.get("ok") is not True]
+    proof_ready = bool(proof_ready and physical_execution_ok)
+    ready_for_analysis = bool(ready_for_analysis and physical_execution_ok and not blockers)
+    manifest = {
+        "physical_execution": physical_execution,
+        "request_log": {
+            "path": str(request_audit.get("path") or request_audit.get("request_log") or ""),
+            "event_count": int(request_audit.get("event_count") or 0),
+            "execute_event_seen": bool(request_audit.get("execute_event_seen")),
+            "execute_event_count": int(request_audit.get("execute_event_count") or 0),
+            "last_execute_at": str(request_audit.get("last_execute_at") or ""),
+            "execute_payload_event_count": int(request_audit.get("execute_payload_event_count") or 0),
+            "execute_result_event_count": int(request_audit.get("execute_result_event_count") or 0),
+            "execute_run_ids": request_audit.get("execute_run_ids", []),
+            "execute_sequence_ids": request_audit.get("execute_sequence_ids", []),
+            "execute_specimen_ids": request_audit.get("execute_specimen_ids", []),
+            "execute_program_ids": request_audit.get("execute_program_ids", []),
+            "execute_identity_required": bool(request_audit.get("execute_identity_required")),
+            "execute_identity_present": bool(request_audit.get("execute_identity_present")),
+            "execute_identity_match": bool(request_audit.get("execute_identity_match")),
+            "execute_identity_detail": request_audit.get("execute_identity_detail", {}),
+        },
+        "screen_evidence_refs": screen_refs,
+        "screen_evidence_count": len(screen_refs),
+        "data_evidence_refs": data_refs,
+        "data_evidence_count": len(data_refs),
+        "evidence_refs": list(dict.fromkeys(evidence_refs + screen_refs + data_refs)),
+        "linux_data_path": str(data_acquisition.get("linux_path") or data_acquisition.get("local_path") or ""),
+        "data_status": str(data_acquisition.get("status") or ""),
+        "row_count_probe": data_acquisition.get("row_count_probe"),
+        "save_export": {
+            "ok": bool(save_export.get("ok")),
+            "save_method": str(save_export.get("save_method") or data_acquisition.get("save_method") or ""),
+            "save_attempted_by_agent": bool(save_export.get("save_attempted_by_agent", data_acquisition.get("save_attempted_by_agent"))),
+            "save_confirmation_screen_ok": bool(save_export.get("save_confirmation_screen_ok", data_acquisition.get("save_confirmation_screen_ok"))),
+            "windows_path": str(save_export.get("windows_path") or data_acquisition.get("windows_path") or ""),
+            "linux_path": str(save_export.get("linux_path") or data_acquisition.get("linux_path") or data_acquisition.get("local_path") or ""),
+            "recognized_save_method": bool(save_export.get("recognized_save_method")),
+        },
+        "vision_frame_ids": vision_frame_ids,
+        "vision_frame_count": len(vision_frame_ids),
+    }
+    next_actions = [str(item) for item in evidence_audit.get("next_actions", []) if str(item or "").strip()] if isinstance(evidence_audit.get("next_actions"), list) else []
+    if missing_items:
+        next_actions = [
+            "Resolve missing proof checklist items before Analysis handoff: " + ", ".join(str(item.get("id") or item.get("label") or "proof") for item in missing_items),
+            *next_actions,
+        ]
+    elif ready_for_analysis:
+        next_actions = ["Proof package is ready for Analysis handoff review.", *next_actions]
+    return {
+        "ok": ready_for_analysis,
+        "tool": "equipment.pyautogui.live_proof_package",
+        "status": "ready_for_analysis" if ready_for_analysis else "incomplete",
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "run_id": run_id,
+        "bridge": "windows_pyautogui",
+        "ready_for_analysis": ready_for_analysis,
+        "proof_ready": proof_ready,
+        "required_item_count": len(required_items),
+        "missing_required_item_count": len(missing_items),
+        "missing_required_items": [
+            {
+                "id": str(item.get("id") or ""),
+                "label": str(item.get("label") or item.get("id") or ""),
+                "detail": str(item.get("detail") or ""),
+            }
+            for item in missing_items
+        ],
+        "proof_checklist": checklist,
+        "evidence_audit": evidence_audit,
+        "passive_readiness": passive_readiness or {},
+        "last_live_preflight": last_preflight,
+        "last_windows_utm_result": last_result,
+        "last_windows_utm_live_validation": last_live_validation,
+        "last_windows_utm_physical_validation": last_physical_validation,
+        "source_packets": source_packets,
+        "manifest": manifest,
+        "blockers": blockers,
+        "warnings": warnings,
+        "next_actions": list(dict.fromkeys(next_actions)),
+    }
+
+
+
+def _persist_windows_utm_proof_package(package: dict[str, object]) -> dict[str, object]:
+    """Persist the Windows UTM proof package as a run-local JSON artifact."""
+    run_id = str(package.get("run_id") or controller._state.run_id or "run").strip() or "run"
+    safe_run_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", run_id).strip("._-")[:96] or "run"
+    artifact_dir = (RUNTIME_PATHS.artifact_root / "equipment") / safe_run_id / "utm"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    path = artifact_dir / f"windows_utm_proof_package_{stamp}.json"
+    artifact = {
+        "kind": "windows_utm_proof_package",
+        "content_type": "application/json",
+        "filename": path.name,
+        "path": str(path),
+        "local_path": str(path),
+        "run_id": run_id,
+        "ready_for_analysis": bool(package.get("ready_for_analysis")),
+        "proof_ready": bool(package.get("proof_ready")),
+        "missing_required_item_count": int(package.get("missing_required_item_count") or 0),
+    }
+    package = dict(package)
+    package["package_artifact"] = artifact
+    manifest = package.get("manifest") if isinstance(package.get("manifest"), dict) else {}
+    manifest = dict(manifest)
+    manifest["proof_package_path"] = str(path)
+    manifest["proof_package_filename"] = path.name
+    package["manifest"] = manifest
+    path.write_text(json.dumps(package, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+    try:
+        artifact["size_bytes"] = path.stat().st_size
+    except OSError:
+        artifact["size_bytes"] = 0
+    package["package_artifact"] = artifact
+    path.write_text(json.dumps(package, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+    return package
+
+
+
+_WINDOWS_UTM_VISION_REQUIRED_CHECKS = ("utm_pre_start", "utm_motion_confirm", "utm_test_complete")
+_WINDOWS_UTM_VISION_SIGNAL_TO_CHECK = {
+    "specimen_on_utm_platen": "utm_pre_start",
+    "fixture_alignment_ok": "utm_pre_start",
+    "utm_motion_observed": "utm_motion_confirm",
+    "utm_home_restored": "utm_test_complete",
+}
+
+
+def _windows_utm_vision_frame_ids(value: object) -> list[str]:
+    """Collect frame-like evidence ids from a Vision payload without validating the files."""
+    frames: list[str] = []
+
+    def collect(item: object, depth: int = 0) -> None:
+        if depth > 10:
+            return
+        if isinstance(item, dict):
+            for key in ("frame_ids", "evidence_frame_ids", "frames"):
+                values = item.get(key)
+                if isinstance(values, list):
+                    frames.extend(str(value) for value in values if str(value or "").strip())
+                elif isinstance(values, str) and values.strip():
+                    frames.append(values.strip())
+            for key in ("frame_id", "observation_id", "image_id", "artifact_id"):
+                value = item.get(key)
+                if isinstance(value, str) and value.strip():
+                    frames.append(value.strip())
+            for value in item.values():
+                collect(value, depth + 1)
+        elif isinstance(item, list):
+            for value in item:
+                collect(value, depth + 1)
+
+    collect(value)
+    return list(dict.fromkeys(frames))
+
+
+def _windows_utm_vision_truthy(value: object) -> bool:
+    if value is True:
+        return True
+    if not isinstance(value, dict):
+        return False
+    if "ok" in value:
+        return value.get("ok") is True
+    if "ready" in value:
+        return value.get("ready") is True
+    status = str(value.get("status") or value.get("state") or "").strip().lower()
+    return status in {"ok", "ready", "verified", "complete", "completed", "observed", "passed"}
+
+
+def _windows_utm_vision_identity(value: object, *, run_id: str, specimen_id: str) -> dict[str, object]:
+    payload = value if isinstance(value, dict) else {}
+    nested = payload.get("identity") if isinstance(payload.get("identity"), dict) else {}
+    observed = {
+        "run_id": str(payload.get("run_id") or nested.get("run_id") or "").strip(),
+        "specimen_id": str(payload.get("specimen_id") or nested.get("specimen_id") or "").strip(),
+    }
+    expected = {"run_id": str(run_id or "").strip(), "specimen_id": str(specimen_id or "").strip()}
+    mismatched = [key for key, expected_value in expected.items() if expected_value and observed.get(key) and observed[key] != expected_value]
+    missing = [key for key, expected_value in expected.items() if expected_value and not observed.get(key)]
+    return {
+        "expected": expected,
+        "observed": observed,
+        "match": not mismatched,
+        "missing_fields": missing,
+        "mismatched_fields": mismatched,
+    }
+
+
+def _windows_utm_normalize_vision_candidate(check_id: str, value: object, *, source: str, run_id: str, specimen_id: str) -> dict[str, object]:
+    payload = value if isinstance(value, dict) else {"ok": value}
+    confidence_value = payload.get("confidence") if isinstance(payload, dict) else None
+    confidence: float | None = None
+    if confidence_value not in (None, ""):
+        try:
+            confidence = float(confidence_value)
+        except Exception:
+            confidence = None
+    identity = _windows_utm_vision_identity(payload, run_id=run_id, specimen_id=specimen_id)
+    ok = _windows_utm_vision_truthy(payload)
+    if confidence is not None and confidence < 0.6:
+        ok = False
+    if identity.get("missing_fields") or identity.get("mismatched_fields"):
+        ok = False
+    evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
+    frame_ids = _windows_utm_vision_frame_ids(payload)
+    normalized: dict[str, object] = {
+        "ok": bool(ok),
+        "source": source,
+        "confidence": confidence if confidence is not None else payload.get("confidence", ""),
+        "identity": identity,
+        "evidence": evidence,
+        "frame_ids": frame_ids,
+    }
+    for key in ("timestamp", "expires_at", "freshness_ttl_ms", "signals", "status", "state", "message"):
+        if isinstance(payload, dict) and key in payload:
+            normalized[key] = payload[key]
+    return normalized
+
+
+def _windows_utm_vision_proof_draft(
+    metadata: dict[str, object],
+    *,
+    observations: dict[str, object] | None = None,
+    run_id: str = "",
+    specimen_id: str = "",
+) -> dict[str, object]:
+    """Build a non-actuating Vision proof JSON draft from current runtime evidence."""
+    observations = observations if isinstance(observations, dict) else {}
+
+    def nested_value(payload: object, *keys: str) -> str:
+        current = payload
+        for key in keys:
+            if not isinstance(current, dict):
+                return ""
+            current = current.get(key)
+        return str(current or "").strip()
+
+    resolved_run_id = str(run_id or controller._state.run_id or nested_value(metadata.get("equipment_report"), "run_id") or "utm-live-validation").strip() or "utm-live-validation"
+    resolved_specimen_id = str(
+        specimen_id
+        or nested_value(metadata.get("equipment_report"), "specimen_id")
+        or nested_value(metadata.get("equipment_handoff"), "specimen_id")
+        or nested_value(metadata.get("utm_data_ready"), "specimen_id")
+        or nested_value(metadata.get("last_windows_utm_physical_validation"), "specimen_id")
+        or "specimen-live-validation"
+    ).strip() or "specimen-live-validation"
+
+    candidates: dict[str, list[dict[str, object]]] = {check_id: [] for check_id in _WINDOWS_UTM_VISION_REQUIRED_CHECKS}
+
+    def add_candidate(check_id: str, value: object, source: str) -> None:
+        if check_id not in candidates:
+            return
+        candidates[check_id].append(
+            _windows_utm_normalize_vision_candidate(
+                check_id,
+                value,
+                source=source,
+                run_id=resolved_run_id,
+                specimen_id=resolved_specimen_id,
+            )
+        )
+
+    def scan(value: object, source: str, depth: int = 0) -> None:
+        if depth > 10:
+            return
+        if isinstance(value, dict):
+            checks = value.get("checks")
+            if isinstance(checks, dict):
+                for check_id in _WINDOWS_UTM_VISION_REQUIRED_CHECKS:
+                    if check_id in checks:
+                        add_candidate(check_id, checks[check_id], f"{source}.checks.{check_id}")
+            check_id = str(value.get("check_id") or "").strip()
+            if check_id in candidates:
+                add_candidate(check_id, value, f"{source}.check_id")
+            signal = str(value.get("signal") or value.get("signal_id") or "").strip()
+            mapped = _WINDOWS_UTM_VISION_SIGNAL_TO_CHECK.get(signal)
+            if mapped:
+                add_candidate(mapped, value, f"{source}.signal.{signal}")
+            for check_id in _WINDOWS_UTM_VISION_REQUIRED_CHECKS:
+                if check_id in value:
+                    add_candidate(check_id, value[check_id], f"{source}.{check_id}")
+            for key, child in value.items():
+                scan(child, f"{source}.{key}", depth + 1)
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                scan(child, f"{source}[{index}]", depth + 1)
+
+    scan(metadata, "run_metadata")
+    scan(observations, "latest_observations")
+
+    selected_checks: dict[str, dict[str, object]] = {}
+    blockers: list[str] = []
+    warnings: list[str] = []
+    all_frame_ids: list[str] = []
+    candidate_counts: dict[str, int] = {}
+    for check_id in _WINDOWS_UTM_VISION_REQUIRED_CHECKS:
+        values = candidates.get(check_id, [])
+        candidate_counts[check_id] = len(values)
+        values.sort(
+            key=lambda item: (
+                item.get("ok") is True,
+                len(item.get("frame_ids", [])) if isinstance(item.get("frame_ids"), list) else 0,
+                float(item.get("confidence") or 0.0) if str(item.get("confidence") or "").replace(".", "", 1).isdigit() else 0.0,
+            ),
+            reverse=True,
+        )
+        selected = dict(values[0]) if values else {"ok": False, "source": "missing", "confidence": "", "identity": {}, "evidence": {}, "frame_ids": []}
+        selected_checks[check_id] = selected
+        frame_ids = selected.get("frame_ids") if isinstance(selected.get("frame_ids"), list) else []
+        all_frame_ids.extend(str(frame_id) for frame_id in frame_ids if str(frame_id or "").strip())
+        if selected.get("ok") is not True:
+            blockers.append(f"VISION_{check_id.upper()}_REQUIRED")
+        identity = selected.get("identity") if isinstance(selected.get("identity"), dict) else {}
+        missing_identity = identity.get("missing_fields") if isinstance(identity.get("missing_fields"), list) else []
+        if missing_identity and selected.get("source") != "missing":
+            warnings.append(f"VISION_{check_id.upper()}_IDENTITY_FIELDS_NOT_PRESENT: {', '.join(str(item) for item in missing_identity)}")
+
+    all_frame_ids = list(dict.fromkeys(all_frame_ids or _windows_utm_vision_frame_ids({"metadata": metadata, "observations": observations})))
+    if len(all_frame_ids) < len(_WINDOWS_UTM_VISION_REQUIRED_CHECKS):
+        blockers.append("VISION_FRAME_IDS_REQUIRED")
+
+    blockers = list(dict.fromkeys(blockers))
+    warnings = list(dict.fromkeys(warnings))
+    ready = not blockers
+    vision_proof = {
+        "ok": ready,
+        "run_id": resolved_run_id,
+        "specimen_id": resolved_specimen_id,
+        "checks": selected_checks,
+        "evidence": {"frame_ids": all_frame_ids},
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "source": "runtime_vision_proof_draft",
+    }
+    return {
+        "ok": ready,
+        "tool": "equipment.pyautogui.vision_proof_draft",
+        "status": "ready" if ready else "incomplete",
+        "non_actuating": True,
+        "run_id": resolved_run_id,
+        "specimen_id": resolved_specimen_id,
+        "required_checks": list(_WINDOWS_UTM_VISION_REQUIRED_CHECKS),
+        "candidate_counts": candidate_counts,
+        "vision_proof": vision_proof,
+        "blockers": blockers,
+        "warnings": warnings,
+        "next_actions": ["Paste the generated vision_proof into physical live validation."] if ready else ["Attach real Vision Agent evidence for every required UTM check before physical validation."],
+    }
+
+
+
+def _persist_windows_utm_completion_audit(result: dict[str, object]) -> dict[str, object]:
+    """Persist the Improvement 05 completion audit as a run-local JSON artifact."""
+    verification = result.get("verification") if isinstance(result.get("verification"), dict) else {}
+    run_id = str(verification.get("run_id") or controller._state.run_id or result.get("run_id") or "run").strip() or "run"
+    safe_run_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", run_id).strip("._-")[:96] or "run"
+    artifact_dir = (RUNTIME_PATHS.artifact_root / "equipment") / safe_run_id / "utm"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    path = artifact_dir / f"windows_utm_completion_audit_{stamp}.json"
+    artifact = {
+        "kind": "windows_utm_completion_audit",
+        "content_type": "application/json",
+        "filename": path.name,
+        "path": str(path),
+        "local_path": str(path),
+        "run_id": run_id,
+        "status": str(result.get("status") or ""),
+        "ok": bool(result.get("ok")),
+        "blocker_count": len(result.get("blockers", [])) if isinstance(result.get("blockers"), list) else 0,
+    }
+    persisted = dict(result)
+    persisted["audit_artifact"] = artifact
+    persisted["artifact"] = artifact
+    path.write_text(json.dumps(persisted, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+    try:
+        artifact["size_bytes"] = path.stat().st_size
+    except OSError:
+        artifact["size_bytes"] = 0
+    persisted["audit_artifact"] = artifact
+    persisted["artifact"] = artifact
+    path.write_text(json.dumps(persisted, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+    return persisted
+
+
+def _persist_windows_utm_live_validation(report: dict[str, object]) -> dict[str, object]:
+    """Persist the non-actuating Windows UTM live validation report as a JSON artifact."""
+    run_id = str(report.get("run_id") or controller._state.run_id or "run").strip() or "run"
+    safe_run_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", run_id).strip("._-")[:96] or "run"
+    artifact_dir = (RUNTIME_PATHS.artifact_root / "equipment") / safe_run_id / "live_validation"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    path = artifact_dir / "lab_equipment_utm_live_validation.json"
+    artifact = {
+        "kind": "lab_equipment_utm_live_validation",
+        "content_type": "application/json",
+        "filename": path.name,
+        "path": str(path),
+        "local_path": str(path),
+        "run_id": run_id,
+        "status": str(report.get("status") or ""),
+        "non_actuating": bool(report.get("non_actuating", True)),
+    }
+    persisted = dict(report)
+    persisted["report_artifact"] = artifact
+    persisted["artifact"] = artifact
+    path.write_text(json.dumps(persisted, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+    try:
+        artifact["size_bytes"] = path.stat().st_size
+    except OSError:
+        artifact["size_bytes"] = 0
+    persisted["report_artifact"] = artifact
+    persisted["artifact"] = artifact
+    path.write_text(json.dumps(persisted, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+    return persisted
+
+
+def _windows_proof_checkable_path(value: object) -> Path | None:
+    """Return a local filesystem path for refs that are checkable on this host."""
+    raw = str(value or "").strip()
+    if not raw or "://" in raw:
+        return None
+    if re.match(r"^[A-Za-z]:[\\/]", raw):
+        return Path(raw).expanduser()
+    if raw.startswith("/") or raw.startswith("~"):
+        return Path(raw).expanduser()
+    if raw.startswith("artifacts/") or raw.startswith("./artifacts/"):
+        return resolve_path(raw[2:] if raw.startswith("./") else raw)
+    return None
+
+
+def _windows_proof_image_signature(path: Path) -> tuple[bool, str]:
+    """Check that a screen evidence file looks like an actual image artifact."""
+    try:
+        header = path.read_bytes()[:16]
+    except OSError as exc:
+        return False, str(exc)
+    if header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return True, "png"
+    if header.startswith(b"\xff\xd8\xff"):
+        return True, "jpeg"
+    if header.startswith(b"BM"):
+        return True, "bmp"
+    if header.startswith((b"GIF87a", b"GIF89a")):
+        return True, "gif"
+    return False, "unsupported image signature"
+
+
+def _windows_proof_csv_probe(path: Path) -> dict[str, object]:
+    """Re-run the Equipment Agent UTM signal-quality gate for proof packages."""
+    probe = dict(LabEquipmentAgent._probe_csv_file(str(path)))
+    columns = [str(item) for item in probe.get("columns_probe", [])] if isinstance(probe.get("columns_probe"), list) else []
+    probe.setdefault("path", str(path))
+    probe["row_count"] = int(probe.get("row_count_probe") or 0)
+    probe["headers"] = columns
+    probe["has_force_column"] = "force_N" in columns
+    probe["has_displacement_column"] = "displacement_mm" in columns
+    return probe
+
+
+
+
+def _windows_proof_artifact_records(package: dict[str, object]) -> list[dict[str, object]]:
+    """Collect artifact records from all proof-package source packets."""
+    records: list[dict[str, object]] = []
+
+    def absorb(payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        for key in ("artifact_records", "output_artifacts", "artifacts"):
+            values = payload.get(key)
+            if isinstance(values, list):
+                records.extend([dict(item) for item in values if isinstance(item, dict)])
+        nested = payload.get("equipment_report")
+        if isinstance(nested, dict):
+            absorb(nested)
+
+    absorb(package.get("evidence_audit"))
+    absorb(package.get("last_windows_utm_result"))
+    source_packets = package.get("source_packets") if isinstance(package.get("source_packets"), dict) else {}
+    for value in source_packets.values():
+        absorb(value)
+    seen: set[str] = set()
+    unique: list[dict[str, object]] = []
+    for record in records:
+        key = str(record.get("artifact_id") or record.get("local_path") or record.get("linux_path") or record.get("path") or record.get("filename") or record)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(record)
+    return unique
+
+
+def _windows_proof_resolved_ref_path(ref: object, artifact_records: list[dict[str, object]]) -> tuple[Path | None, str]:
+    """Resolve an evidence ref to a Linux-local file path when the proof package carries one."""
+    direct = _windows_proof_checkable_path(ref)
+    if direct is not None:
+        return direct, "direct"
+    ref_text = str(ref or "").strip()
+    if not ref_text:
+        return None, "empty"
+    for record in artifact_records:
+        candidates = [
+            record.get("artifact_id"),
+            record.get("filename"),
+            record.get("local_path"),
+            record.get("linux_path"),
+            record.get("path"),
+        ]
+        if ref_text not in {str(item) for item in candidates if item not in (None, "")}:
+            continue
+        for key in ("local_path", "linux_path", "path"):
+            path = _windows_proof_checkable_path(record.get(key))
+            if path is not None:
+                return path, f"artifact_record.{key}"
+    return None, "unresolved"
+
+def _latest_windows_utm_proof_package_path() -> Path | None:
+    """Return the newest persisted Windows UTM proof package under artifacts/equipment."""
+    root = (RUNTIME_PATHS.artifact_root / "equipment")
+    if not root.exists():
+        return None
+    candidates = sorted(
+        root.glob("*/utm/windows_utm_proof_package_*.json"),
+        key=lambda item: item.stat().st_mtime if item.exists() else 0.0,
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
+def _windows_utm_completion_audit(path_value: str = "", *, use_current: bool = True, latest: bool = False) -> dict[str, object]:
+    """Strict final audit for Improvement 05 physical UTM completion evidence."""
+    selected_path = str(path_value or "").strip()
+    latest_path: Path | None = None
+    if not selected_path and latest:
+        latest_path = _latest_windows_utm_proof_package_path()
+        selected_path = str(latest_path or "")
+        use_current = False
+    package, load_info = _load_windows_utm_proof_package_for_verify(selected_path, use_current=use_current)
+    verification = _verify_windows_utm_proof_package(package, load_info=load_info)
+    blockers = [str(item) for item in verification.get("blockers", []) if str(item or "").strip()] if isinstance(verification.get("blockers"), list) else []
+    ok = bool(verification.get("ok") and verification.get("status") == "verified")
+    if not selected_path and not use_current:
+        blockers = list(dict.fromkeys([*blockers, "PROOF_PACKAGE_PATH_REQUIRED"]))
+        ok = False
+    result = {
+        "ok": ok,
+        "tool": "equipment.pyautogui.improvement05_completion_audit",
+        "status": "complete_evidence_verified" if ok else "incomplete",
+        "objective": "05_lab_equipment_agent_utm_visual_control_data_loop",
+        "proof_package_path": selected_path,
+        "latest_search_used": bool(latest and latest_path is not None),
+        "runtime_state_used": bool(not selected_path and use_current),
+        "completion_rule": "Only status=verified from equipment.pyautogui.live_proof_package.verify can satisfy Improvement 05 physical UTM proof.",
+        "verification": verification,
+        "blockers": blockers,
+        "warnings": verification.get("warnings", []) if isinstance(verification.get("warnings"), list) else [],
+        "next_actions": ["Improvement 05 physical UTM evidence is verified for this proof package."]
+        if ok
+        else [
+            "Resolve blockers in verification.blockers.",
+            "Run real UTM physical validation, build a proof package, then rerun Completion Audit.",
+            "Do not mark Improvement 05 complete until this audit status is complete_evidence_verified.",
+        ],
+    }
+    if not selected_path and not use_current:
+        result["next_actions"] = [
+            "Run /equipment/windows -> Run Physical Validation with real UTM hardware.",
+            "Build /api/equipment/windows/proof-package after validation.",
+            "Rerun Completion Audit with latest=true or a specific proof package path.",
+        ]
+    return result
+
+
+def _load_windows_utm_proof_package_for_verify(path_value: str = "", *, use_current: bool = True) -> tuple[dict[str, object], dict[str, object]]:
+    """Load a proof package from an artifact path or the active runtime state."""
+    load_info: dict[str, object] = {"source": "none", "path": "", "blockers": [], "warnings": []}
+    raw_path = str(path_value or "").strip()
+    if raw_path:
+        candidate = Path(raw_path).expanduser()
+        try:
+            resolved = candidate.resolve()
+            repo_root = RUNTIME_PATHS.repository_root
+        except Exception as exc:
+            load_info["blockers"] = ["PROOF_PACKAGE_PATH_INVALID"]
+            load_info["message"] = str(exc)
+            return {}, load_info
+        equipment_root = (RUNTIME_PATHS.artifact_root / "equipment").resolve()
+        if not (resolved.is_relative_to(repo_root) or resolved.is_relative_to(equipment_root)):
+            load_info["blockers"] = ["PROOF_PACKAGE_PATH_OUTSIDE_PROJECT"]
+            load_info["path"] = str(resolved)
+            return {}, load_info
+        if not resolved.exists():
+            load_info["blockers"] = ["PROOF_PACKAGE_FILE_MISSING"]
+            load_info["path"] = str(resolved)
+            return {}, load_info
+        try:
+            package = json.loads(resolved.read_text(encoding="utf-8"))
+        except Exception as exc:
+            load_info["blockers"] = ["PROOF_PACKAGE_JSON_INVALID"]
+            load_info["path"] = str(resolved)
+            load_info["message"] = str(exc)
+            return {}, load_info
+        if not isinstance(package, dict):
+            load_info["blockers"] = ["PROOF_PACKAGE_JSON_NOT_OBJECT"]
+            load_info["path"] = str(resolved)
+            return {}, load_info
+        load_info["source"] = "path"
+        load_info["path"] = str(resolved)
+        return package, load_info
+    if use_current:
+        package = controller._state.run_metadata.get("last_windows_utm_proof_package")
+        if isinstance(package, dict):
+            load_info["source"] = "runtime_state"
+            artifact = package.get("package_artifact") if isinstance(package.get("package_artifact"), dict) else {}
+            load_info["path"] = str(artifact.get("path") or "")
+            return dict(package), load_info
+    load_info["blockers"] = ["PROOF_PACKAGE_NOT_AVAILABLE"]
+    return {}, load_info
+
+
+def _verify_windows_utm_proof_package(package: dict[str, object], *, load_info: dict[str, object] | None = None) -> dict[str, object]:
+    """Re-verify package metadata and local artifacts before Analysis handoff."""
+    load_info = load_info or {}
+    blockers: list[str] = [str(item) for item in load_info.get("blockers", []) if str(item or "").strip()] if isinstance(load_info.get("blockers"), list) else []
+    warnings: list[str] = [str(item) for item in load_info.get("warnings", []) if str(item or "").strip()] if isinstance(load_info.get("warnings"), list) else []
+    checks: list[dict[str, object]] = []
+
+    def add_check(name: str, status: str, detail: str = "", *, code: str = "") -> None:
+        item: dict[str, object] = {"name": name, "status": status}
+        if detail:
+            item["detail"] = detail
+        if code:
+            item["code"] = code
+        checks.append(item)
+
+    def add_blocker(code: str, name: str, detail: str = "") -> None:
+        if code not in blockers:
+            blockers.append(code)
+        add_check(name, "blocked", detail or code, code=code)
+
+    def add_warning(code: str, name: str, detail: str = "") -> None:
+        if code not in warnings:
+            warnings.append(code)
+        add_check(name, "warning", detail or code, code=code)
+
+    if not package:
+        add_blocker("PROOF_PACKAGE_NOT_AVAILABLE", "package_loaded", "No proof package was provided or cached.")
+        return {
+            "ok": False,
+            "tool": "equipment.pyautogui.live_proof_package.verify",
+            "status": "blocked",
+            "verified_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "load_info": load_info,
+            "checks": checks,
+            "blockers": blockers,
+            "warnings": warnings,
+        }
+
+    if str(package.get("tool") or "") == "equipment.pyautogui.live_proof_package":
+        add_check("package_schema", "ok", "equipment.pyautogui.live_proof_package")
+    else:
+        add_blocker("PROOF_PACKAGE_SCHEMA_INVALID", "package_schema", str(package.get("tool") or "missing tool"))
+
+    manifest = package.get("manifest") if isinstance(package.get("manifest"), dict) else {}
+    artifact = package.get("package_artifact") if isinstance(package.get("package_artifact"), dict) else {}
+    artifact_path = str(artifact.get("path") or manifest.get("proof_package_path") or load_info.get("path") or "")
+    if artifact_path:
+        local_path = _windows_proof_checkable_path(artifact_path)
+        if local_path and local_path.exists():
+            add_check("package_artifact_file", "ok", str(local_path))
+        elif local_path:
+            add_blocker("PROOF_PACKAGE_ARTIFACT_FILE_MISSING", "package_artifact_file", str(local_path))
+        else:
+            add_warning("PROOF_PACKAGE_ARTIFACT_PATH_NOT_LOCAL", "package_artifact_file", artifact_path)
+    else:
+        add_warning("PROOF_PACKAGE_ARTIFACT_PATH_MISSING", "package_artifact_file", "package path not recorded")
+
+    if bool(package.get("ready_for_analysis")) and bool(package.get("proof_ready")):
+        add_check("ready_for_analysis_claim", "ok", "package claims proof_ready and ready_for_analysis")
+    else:
+        add_blocker("PROOF_PACKAGE_NOT_READY_FOR_ANALYSIS", "ready_for_analysis_claim", f"status={package.get('status')}")
+
+    source_packets = package.get("source_packets") if isinstance(package.get("source_packets"), dict) else {}
+    physical_source = source_packets.get("last_windows_utm_physical_validation") if isinstance(source_packets.get("last_windows_utm_physical_validation"), dict) else {}
+    physical_execution = manifest.get("physical_execution") if isinstance(manifest.get("physical_execution"), dict) else {}
+    physical_execution_ok = bool(
+        physical_execution.get("ok") is True
+        and physical_execution.get("requested_physical_execute") is True
+        and physical_execution.get("execute_sent") is True
+        and physical_execution.get("non_actuating") is False
+        and str(physical_execution.get("status") or "") == "verified_complete"
+    )
+    physical_source_ok = bool(
+        physical_source.get("requested_physical_execute") is True
+        and physical_source.get("execute_sent") is True
+        and physical_source.get("non_actuating") is False
+        and str(physical_source.get("status") or "") == "verified_complete"
+    )
+    identity_keys = ("run_id", "sequence_id", "specimen_id", "program_id")
+    physical_identity_present = all(
+        str(physical_execution.get(key) or "").strip() and str(physical_source.get(key) or "").strip()
+        for key in identity_keys
+    )
+    physical_identity_match = bool(
+        physical_identity_present
+        and all(str(physical_execution.get(key) or "") == str(physical_source.get(key) or "") for key in identity_keys)
+    )
+    if physical_execution_ok and physical_source_ok and physical_identity_match:
+        add_check("physical_live_execute", "ok", f"source={physical_execution.get('source', '-')}; sequence={physical_execution.get('sequence_id', '-')}")
+    else:
+        add_blocker(
+            "UTM_PHYSICAL_LIVE_EXECUTE_REQUIRED",
+            "physical_live_execute",
+            f"manifest_ok={physical_execution_ok}; source_ok={physical_source_ok}; identity_present={physical_identity_present}; identity_match={physical_identity_match}; requested={physical_execution.get('requested_physical_execute')}; execute_sent={physical_execution.get('execute_sent')}; non_actuating={physical_execution.get('non_actuating')}; status={physical_execution.get('status') or '-'}",
+        )
+
+    request_log = manifest.get("request_log") if isinstance(manifest.get("request_log"), dict) else {}
+    if bool(request_log.get("execute_event_seen")):
+        add_check("request_log_execute", "ok", f"execute_event_count={request_log.get('execute_event_count', 1)}")
+    else:
+        add_blocker("UTM_REQUEST_LOG_EXECUTE_EVENT_REQUIRED", "request_log_execute", "no live /execute event in proof manifest")
+    if bool(request_log.get("execute_identity_match")):
+        add_check("request_log_execute_identity", "ok", "run/specimen/program identity matched")
+    else:
+        add_blocker("UTM_REQUEST_LOG_EXECUTE_IDENTITY_REQUIRED", "request_log_execute_identity", "live /execute identity did not match proof manifest run/specimen/program")
+
+    save_export = manifest.get("save_export") if isinstance(manifest.get("save_export"), dict) else {}
+    recognized_live_save_methods = {"windows_export_watch", "manual_save_dialog", "export_menu"}
+    save_method = str(save_export.get("save_method") or "").strip()
+    save_attempted = bool(save_export.get("save_attempted_by_agent")) or save_method == "windows_export_watch"
+    save_confirmed = bool(save_export.get("save_confirmation_screen_ok"))
+    save_path_present = bool(str(save_export.get("windows_path") or save_export.get("linux_path") or "").strip())
+    save_export_ok = bool(
+        save_export.get("ok")
+        and save_method in recognized_live_save_methods
+        and save_attempted
+        and save_confirmed
+        and save_path_present
+    )
+    if save_export_ok:
+        add_check(
+            "save_export_responsibility",
+            "ok",
+            f"method={save_method}; attempted={save_attempted}; confirmed={save_confirmed}; path_present={save_path_present}",
+        )
+    else:
+        add_blocker(
+            "UTM_SAVE_EXPORT_RESPONSIBILITY_REQUIRED",
+            "save_export_responsibility",
+            f"method={save_method or '-'}; recognized={save_method in recognized_live_save_methods}; save_attempted={save_attempted}; confirmation={save_confirmed}; path_present={save_path_present}; ok_claim={bool(save_export.get('ok'))}",
+        )
+
+    artifact_records = _windows_proof_artifact_records(package)
+    screen_refs = manifest.get("screen_evidence_refs") if isinstance(manifest.get("screen_evidence_refs"), list) else []
+    data_refs = manifest.get("data_evidence_refs") if isinstance(manifest.get("data_evidence_refs"), list) else []
+
+    screen_count = int(manifest.get("screen_evidence_count") or 0)
+    verified_screen_files: list[str] = []
+    missing_screen_files: list[str] = []
+    invalid_screen_files: list[str] = []
+    unresolved_screen_refs: list[str] = []
+    for ref in screen_refs:
+        path, source = _windows_proof_resolved_ref_path(ref, artifact_records)
+        if path is None:
+            unresolved_screen_refs.append(str(ref))
+            continue
+        if path.exists() and path.is_file():
+            image_ok, image_detail = _windows_proof_image_signature(path)
+            if image_ok:
+                verified_screen_files.append(str(path))
+            else:
+                invalid_screen_files.append(f"{path} ({image_detail}; {source})")
+        else:
+            missing_screen_files.append(f"{path} ({source})")
+    unique_screen_files = sorted(set(verified_screen_files))
+    duplicate_screen_files = len(unique_screen_files) != len(verified_screen_files)
+    if screen_count >= 3 and len(unique_screen_files) >= 3 and not missing_screen_files and not invalid_screen_files and not duplicate_screen_files:
+        add_check("screen_evidence_files", "ok", f"verified_screen_files={len(unique_screen_files)}")
+    else:
+        detail = f"screen_evidence_count={screen_count}; verified_files={len(verified_screen_files)}; unique_files={len(unique_screen_files)}"
+        if duplicate_screen_files:
+            detail += "; duplicate screen files"
+        if invalid_screen_files:
+            detail += f"; invalid_image={', '.join(invalid_screen_files[:3])}"
+        if missing_screen_files:
+            detail += f"; missing={', '.join(missing_screen_files[:3])}"
+        if unresolved_screen_refs:
+            detail += f"; unresolved={', '.join(unresolved_screen_refs[:3])}"
+        add_blocker("UTM_SCREEN_EVIDENCE_FILES_REQUIRED", "screen_evidence_files", detail)
+
+    data_count = int(manifest.get("data_evidence_count") or 0)
+    verified_data_files: list[str] = []
+    missing_data_files: list[str] = []
+    unresolved_data_refs: list[str] = []
+    for ref in data_refs:
+        path, source = _windows_proof_resolved_ref_path(ref, artifact_records)
+        if path is None:
+            unresolved_data_refs.append(str(ref))
+            continue
+        if path.exists() and path.is_file():
+            verified_data_files.append(str(path))
+        else:
+            missing_data_files.append(f"{path} ({source})")
+    unique_data_files = sorted(set(verified_data_files))
+    if data_count >= 1 and unique_data_files and not missing_data_files:
+        add_check("data_evidence_files", "ok", f"verified_data_files={len(unique_data_files)}")
+    else:
+        detail = f"data_evidence_count={data_count}; verified_files={len(verified_data_files)}; unique_files={len(unique_data_files)}"
+        if missing_data_files:
+            detail += f"; missing={', '.join(missing_data_files[:3])}"
+        if unresolved_data_refs:
+            detail += f"; unresolved={', '.join(unresolved_data_refs[:3])}"
+        add_blocker("UTM_DATA_EVIDENCE_FILES_REQUIRED", "data_evidence_files", detail)
+
+    csv_probe: dict[str, object] = {}
+    linux_data_path = str(manifest.get("linux_data_path") or "").strip()
+    local_csv_path = _windows_proof_checkable_path(linux_data_path)
+    if local_csv_path:
+        if local_csv_path.exists():
+            csv_probe = _windows_proof_csv_probe(local_csv_path)
+            if bool(csv_probe.get("ok")):
+                add_check("linux_csv_parse_probe", "ok", f"rows={csv_probe.get('row_count')} path={local_csv_path}")
+            else:
+                failure_code = str(csv_probe.get("failure_code") or "UTM_CSV_PARSE_PROBE_FAILED")
+                add_blocker(failure_code, "linux_csv_parse_probe", str(csv_probe.get("message") or csv_probe))
+        else:
+            add_blocker("UTM_LINUX_CSV_FILE_MISSING", "linux_csv_parse_probe", str(local_csv_path))
+    elif linux_data_path:
+        add_warning("UTM_LINUX_DATA_PATH_NOT_LOCAL", "linux_csv_parse_probe", linux_data_path)
+    else:
+        add_blocker("UTM_LINUX_DATA_PATH_MISSING", "linux_csv_parse_probe", "manifest.linux_data_path is empty")
+
+    vision_count = int(manifest.get("vision_frame_count") or 0)
+    if vision_count >= 3:
+        add_check("vision_frame_refs", "ok", f"vision_frame_count={vision_count}")
+    else:
+        add_blocker("VISION_FRAME_IDS_REQUIRED", "vision_frame_refs", f"vision_frame_count={vision_count}; expected fixture/motion/complete frames")
+
+    checks_by_name = {str(item.get("name") or ""): item for item in checks if isinstance(item, dict)}
+    checklist = package.get("proof_checklist") if isinstance(package.get("proof_checklist"), list) else []
+    checklist_by_id = {str(item.get("id") or ""): item for item in checklist if isinstance(item, dict)}
+
+    def check_ok(name: str) -> bool:
+        item = checks_by_name.get(name)
+        return bool(item and item.get("status") == "ok")
+
+    def checklist_ok(item_id: str) -> bool:
+        item = checklist_by_id.get(item_id)
+        return bool(item and item.get("ok") is True)
+
+    def gate_item(key: str, label: str, ok_value: bool, detail: str) -> dict[str, object]:
+        return {"key": key, "label": label, "ok": bool(ok_value), "status": "ok" if ok_value else "blocked", "detail": detail}
+
+    gate_summary = [
+        gate_item(
+            "windows_bridge",
+            "Windows Bridge",
+            check_ok("request_log_execute") and check_ok("request_log_execute_identity"),
+            "requires live /execute request and matching run/specimen/program identity",
+        ),
+        gate_item(
+            "utm_program",
+            "UTM Program",
+            check_ok("package_schema") and bool(str((package.get("evidence_audit") if isinstance(package.get("evidence_audit"), dict) else {}).get("program_id") or "").startswith("utm_")),
+            "requires a UTM protocol evidence package rather than a demo macro",
+        ),
+        gate_item(
+            "vision_preconditions",
+            "Vision Preconditions",
+            check_ok("vision_frame_refs"),
+            "requires fixture/motion/complete Vision frame references",
+        ),
+        gate_item(
+            "physical_execution",
+            "Physical Execute",
+            check_ok("physical_live_execute"),
+            "requires guarded live physical validation dispatch, not preflight or simulator evidence",
+        ),
+        gate_item(
+            "screen_state",
+            "Screen State",
+            check_ok("screen_evidence_files"),
+            "requires before_start, after_start, and after_complete screen evidence files",
+        ),
+        gate_item(
+            "physical_crosscheck",
+            "Physical Cross-check",
+            check_ok("vision_frame_refs") and checklist_ok("physical_motion"),
+            "requires physical motion proof beyond a successful GUI click",
+        ),
+        gate_item(
+            "data_artifact",
+            "Data Artifact",
+            check_ok("data_evidence_files") and check_ok("linux_csv_parse_probe") and check_ok("save_export_responsibility"),
+            "requires Linux-local CSV, save/export responsibility, and parse probe",
+        ),
+    ]
+
+    ok = not blockers
+    gate_summary.append(
+        gate_item(
+            "analysis_handoff",
+            "Analysis Handoff",
+            ok and check_ok("ready_for_analysis_claim"),
+            "allowed only after every required proof gate verifies",
+        )
+    )
+
+    return {
+        "ok": ok,
+        "tool": "equipment.pyautogui.live_proof_package.verify",
+        "status": "verified" if ok else "blocked",
+        "verified_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "run_id": str(package.get("run_id") or ""),
+        "bridge": "windows_pyautogui",
+        "load_info": load_info,
+        "package_artifact": artifact,
+        "ready_for_analysis_claimed": bool(package.get("ready_for_analysis")),
+        "proof_ready_claimed": bool(package.get("proof_ready")),
+        "checks": checks,
+        "gate_summary": gate_summary,
+        "csv_probe": csv_probe,
+        "blockers": blockers,
+        "warnings": warnings,
+        "next_actions": ["Proceed to Analysis handoff only after this verification is status=verified."] if ok else ["Resolve blockers, rebuild the proof package, then run Verify Proof Package again."],
+    }
+
+def _windows_utm_live_preflight_from_bridge(
+    bridge: WindowsPyAutoGUIBridge,
+    *,
+    include_locators: bool = True,
+    include_screenshot: bool = False,
+    include_request_log: bool = True,
+    runtime_overrides: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Actively verify live Windows UTM setup without executing UTM controls."""
+    passive = _windows_utm_readiness_from_bridge(bridge, runtime_overrides=runtime_overrides)
+    passive_gates = passive.get("gates") if isinstance(passive.get("gates"), dict) else {}
+    program_id = str(passive.get("program_id") or "utm_compression_start_v1")
+    require_screen = bool(passive_gates.get("require_screen_assertions"))
+    blockers = [str(item) for item in passive.get("blockers", []) if item]
+    warnings = [str(item) for item in passive.get("warnings", []) if item]
+    checks: list[dict[str, object]] = []
+    touched_endpoints: list[str] = []
+    evidence_refs: list[str] = []
+
+    def add_check(name: str, status: str, detail: str = "", *, code: str = "") -> None:
+        item: dict[str, object] = {"name": name, "status": status}
+        if detail:
+            item["detail"] = detail
+        if code:
+            item["code"] = code
+        checks.append(item)
+
+    def add_blocker(code: str, name: str, detail: str = "") -> None:
+        if code not in blockers:
+            blockers.append(code)
+        add_check(name, "blocked", detail or code, code=code)
+
+    def add_warning(code: str, name: str, detail: str = "") -> None:
+        if code not in warnings:
+            warnings.append(code)
+        add_check(name, "warning", detail or code, code=code)
+
+    def locator_count(payload: object) -> int:
+        if isinstance(payload, dict):
+            locators = payload.get("locators")
+            if isinstance(locators, dict):
+                return len(locators)
+            if isinstance(locators, list):
+                return len(locators)
+        return 0
+
+    add_check(
+        "passive_readiness",
+        str(passive.get("status") or "unknown"),
+        f"setup gates: {', '.join(blockers + warnings) if blockers or warnings else 'ready'}",
+    )
+
+    touched_endpoints.append("/health")
+    health = bridge.health({"runtime_mode": "live", "force_live_bridge": True})
+    if not bool(health.get("ok")):
+        add_blocker("LIVE_BRIDGE_HEALTH_FAILED", "bridge_health", str(health.get("failure_code") or health.get("message") or "health failed"))
+        programs: dict[str, object] = {}
+        locators: dict[str, object] = {}
+        screenshot: dict[str, object] = {}
+        request_log: dict[str, object] = {}
+    else:
+        add_check("bridge_health", "ok", str(health.get("status") or "ready"))
+        pyautogui = health.get("pyautogui") if isinstance(health.get("pyautogui"), dict) else {}
+        if isinstance(pyautogui, dict) and pyautogui.get("available") is False:
+            add_blocker("LIVE_PYAUTOGUI_UNAVAILABLE", "pyautogui_import", "Windows bridge reports PyAutoGUI unavailable.")
+        elif isinstance(pyautogui, dict):
+            add_check("pyautogui_import", "ok", "PyAutoGUI available")
+        else:
+            add_warning("LIVE_PYAUTOGUI_STATUS_UNKNOWN", "pyautogui_import", "Health response did not include PyAutoGUI status.")
+
+        touched_endpoints.append("/programs")
+        programs = bridge.list_programs({"runtime_mode": "live", "force_live_bridge": True})
+        program_list = programs.get("programs") if isinstance(programs.get("programs"), list) else []
+        live_program_ids = {
+            str(item.get("program_id"))
+            for item in program_list
+            if isinstance(item, dict) and item.get("program_id")
+        }
+        if not bool(programs.get("ok")):
+            add_blocker("LIVE_PROGRAM_REGISTRY_FAILED", "program_registry", str(programs.get("failure_code") or programs.get("message") or "program registry failed"))
+        elif program_id not in live_program_ids:
+            add_blocker("LIVE_UTM_PROGRAM_NOT_REGISTERED", "utm_program", f"{program_id} missing from live Windows /programs response")
+        else:
+            add_check("utm_program", "ok", f"{program_id} registered")
+
+        locators = {}
+        if include_locators:
+            touched_endpoints.append("/locators")
+            locators = bridge.list_locators({"runtime_mode": "live", "force_live_bridge": True})
+            live_locator_count = locator_count(locators)
+            profile_locator_count = int(passive_gates.get("locator_count") or 0)
+            if not bool(locators.get("ok")):
+                add_warning("LIVE_LOCATOR_LIST_FAILED", "locator_library", str(locators.get("failure_code") or locators.get("message") or "locator listing failed"))
+            elif require_screen and live_locator_count == 0 and profile_locator_count == 0:
+                add_blocker("LIVE_UTM_LOCATORS_NOT_AVAILABLE", "locator_library", "screen assertions are required but no locator profile/library is available")
+            elif live_locator_count == 0:
+                add_warning("LIVE_LOCATOR_LIBRARY_EMPTY", "locator_library", "Windows locator library returned no stored locator entries")
+            else:
+                add_check("locator_library", "ok", f"{live_locator_count} Windows-side locator(s) visible")
+
+        request_log: dict[str, object] = {}
+        if include_request_log:
+            touched_endpoints.append("/request-log")
+            request_log = _windows_bridge_request_log_from_bridge(bridge, runtime_mode="live", confirm_live=True)
+            if bool(request_log.get("ok")):
+                add_check("request_audit_log", "ok", f"events={request_log.get('event_count', 0)}")
+            else:
+                add_warning("LIVE_REQUEST_LOG_UNAVAILABLE", "request_audit_log", str(request_log.get("failure_code") or request_log.get("message") or "request log unavailable"))
+
+        screenshot = {}
+        if include_screenshot:
+            touched_endpoints.append("/screenshot")
+            screenshot = bridge.screenshot(
+                {
+                    "runtime_mode": "live",
+                    "force_live_bridge": True,
+                    "run_id": "live-preflight",
+                    "checkpoint": "preflight",
+                }
+            )
+            if not bool(screenshot.get("ok")):
+                add_blocker("LIVE_SCREENSHOT_FAILED", "preflight_screenshot", str(screenshot.get("failure_code") or screenshot.get("message") or "screenshot failed"))
+            else:
+                add_check("preflight_screenshot", "ok", str(screenshot.get("artifact_path") or screenshot.get("path") or "captured"))
+                for key in ("artifact_path", "path", "local_path"):
+                    if screenshot.get(key):
+                        evidence_refs.append(str(screenshot[key]))
+                        break
+
+    status = "blocked" if blockers else "warning" if warnings else "ready"
+    return {
+        "ok": not blockers,
+        "tool": "equipment.pyautogui.live_preflight",
+        "status": status,
+        "bridge": "windows_pyautogui",
+        "program_id": program_id,
+        "non_actuating": True,
+        "touched_endpoints": touched_endpoints,
+        "passive_readiness": passive,
+        "health": health,
+        "programs": programs,
+        "locators": locators,
+        "screenshot": screenshot,
+        "request_log": request_log,
+        "request_audit_log": {
+            "ok": bool(request_log.get("ok")) if isinstance(request_log, dict) else False,
+            "path": str(request_log.get("request_log") or "") if isinstance(request_log, dict) else "",
+            "event_count": int(request_log.get("event_count") or 0) if isinstance(request_log, dict) else 0,
+        },
+        "checks": checks,
+        "blockers": blockers,
+        "warnings": warnings,
+        "ready_for_setup_test": not blockers,
+        "ready_for_autonomous_profile": not blockers and bool(passive.get("ready_for_autonomous_profile")),
+        "evidence_refs": evidence_refs,
+        "next_actions": passive.get("next_actions", []),
+    }
+
+
+@app.post("/api/equipment/windows/live-preflight")
+async def post_windows_equipment_live_preflight(req: WindowsBridgeLivePreflightRequest) -> dict[str, object]:
+    """Actively check live Windows UTM readiness without starting equipment motion."""
+    if not req.confirm_preflight:
+        raise HTTPException(status_code=400, detail="confirm_preflight=true is required for live Windows preflight")
+    bridge = _equipment_bridge()
+    result = _windows_utm_live_preflight_from_bridge(
+        bridge,
+        include_locators=req.include_locators,
+        include_screenshot=req.include_screenshot,
+        include_request_log=req.include_request_log,
+    )
+    await controller.emit_workspace_result(
+        workspace="equipment",
+        tool="equipment.pyautogui.live_preflight",
+        result=result,
+        stage=Stage.EQUIPMENT,
+        module_id="equipment",
+        agent="equipment_agent",
+        workflow="windows_live_preflight",
+        node_event=True,
+    )
+    return result
+
+
+@app.post("/api/equipment/windows/live-validation")
+async def post_windows_equipment_live_validation(req: WindowsBridgeLiveValidationRequest) -> dict[str, object]:
+    """Build live UTM validation reports, optionally sending /execute after explicit physical confirmation."""
+    execute_requested = bool(req.confirm_live_execute)
+    if execute_requested:
+        if not req.confirm_physical_setup_safe:
+            raise HTTPException(status_code=400, detail="confirm_physical_setup_safe=true is required before physical live UTM validation")
+    elif not req.confirm_non_actuating:
+        raise HTTPException(status_code=400, detail="confirm_non_actuating=true or confirm_live_execute=true is required for Windows UTM validation")
+    from scripts.lab_equipment_live_utm_validation import evaluate_live_validation, gate
+
+    bridge = _equipment_bridge()
+    run_id = str(req.run_id or controller._state.run_id or "utm-live-validation").strip() or "utm-live-validation"
+    sequence_id = str(req.sequence_id or run_id).strip() or run_id
+    specimen_id = str(req.specimen_id or "specimen-live-validation").strip() or "specimen-live-validation"
+    program_id = str(req.program_id or "utm_compression_start_v1").strip() or "utm_compression_start_v1"
+    common = {"runtime_mode": "live", "force_live_bridge": True}
+    payload: dict[str, object] = {
+        **common,
+        "confirm_setup_gui_execute": True,
+        "run_id": run_id,
+        "sequence_id": sequence_id,
+        "specimen_id": specimen_id,
+        "program_id": program_id,
+        "command": req.command or "Run UTM compression protocol and export CSV",
+        "require_screen_assertions": req.require_screen_assertions,
+        "require_window_focus": req.require_window_focus,
+        "manual_save_required_if_no_artifact": req.manual_save_required_if_no_artifact,
+        "simulate_utm_protocol": False,
+    }
+    if req.export_glob.strip():
+        payload["export_glob"] = req.export_glob.strip()
+    if req.artifact_timeout_s is not None:
+        payload["artifact_timeout_s"] = req.artifact_timeout_s
+    if req.stable_for_sec is not None:
+        payload["stable_for_sec"] = req.stable_for_sec
+    if req.expected_export_path.strip():
+        payload["expected_export_path"] = req.expected_export_path.strip()
+    if req.target_window.strip():
+        payload["target_window"] = req.target_window.strip()
+    if req.target_window_regex.strip():
+        payload["target_window_regex"] = req.target_window_regex.strip()
+    if req.locators:
+        payload["locators"] = req.locators
+    if req.sequence:
+        payload["sequence"] = req.sequence
+
+    touched_endpoints = ["/request-log", "/health"]
+    request_log_before = _windows_bridge_request_log_from_bridge(bridge, runtime_mode="live", confirm_live=True)
+    health = bridge.health(common)
+    if bool(health.get("ok")):
+        touched_endpoints.append("/programs")
+        programs = bridge.list_programs(common)
+    else:
+        programs = {
+            "ok": False,
+            "tool": "equipment.pyautogui.list_programs",
+            "status": "skipped",
+            "failure_code": "LIVE_BRIDGE_HEALTH_FAILED",
+            "programs": [],
+        }
+
+    readiness: dict[str, object] = {}
+    preflight: dict[str, object] = {}
+    execution: dict[str, object] | None = None
+    execute_sent = False
+    extra_gates: list[dict[str, object]] = []
+    if execute_requested:
+        readiness = _windows_utm_readiness_from_bridge(bridge, runtime_overrides=payload)
+        preflight = _windows_utm_live_preflight_from_bridge(
+            bridge,
+            include_locators=True,
+            include_screenshot=False,
+            include_request_log=True,
+            runtime_overrides=payload,
+        )
+        for endpoint in preflight.get("touched_endpoints", []) if isinstance(preflight.get("touched_endpoints"), list) else []:
+            if isinstance(endpoint, str) and endpoint not in touched_endpoints:
+                touched_endpoints.append(endpoint)
+        readiness_ok = bool(readiness.get("ready_for_autonomous_profile"))
+        preflight_ok = bool(preflight.get("ready_for_autonomous_profile"))
+        extra_gates.extend(
+            [
+                gate(
+                    "pre_execution_readiness",
+                    readiness_ok,
+                    f"status={readiness.get('status', '-')}; blockers={', '.join(str(item) for item in readiness.get('blockers', []) if str(item or '').strip()) or '-'}",
+                    evidence=readiness,
+                ),
+                gate(
+                    "pre_execution_live_preflight",
+                    preflight_ok,
+                    f"status={preflight.get('status', '-')}; blockers={', '.join(str(item) for item in preflight.get('blockers', []) if str(item or '').strip()) or '-'}",
+                    evidence={"ready_for_autonomous_profile": preflight.get("ready_for_autonomous_profile"), "checks": preflight.get("checks", [])},
+                ),
+                gate(
+                    "physical_setup_confirmation",
+                    bool(req.confirm_physical_setup_safe),
+                    "operator confirmed physical UTM setup safe before /execute",
+                    evidence={"confirm_physical_setup_safe": bool(req.confirm_physical_setup_safe)},
+                ),
+            ]
+        )
+        if readiness_ok and preflight_ok:
+            touched_endpoints.append("/execute")
+            execution = bridge.run(payload)
+            execute_sent = True
+        else:
+            execution = {
+                "ok": False,
+                "tool": "equipment.pyautogui.run",
+                "status": "blocked",
+                "failure_code": "UTM_PHYSICAL_VALIDATION_PREFLIGHT_BLOCKED",
+                "message": "Physical UTM validation did not send /execute because readiness or live preflight gates are incomplete.",
+                "bridge_not_called": True,
+                "non_actuating": True,
+                "run_id": run_id,
+                "sequence_id": sequence_id,
+                "specimen_id": specimen_id,
+                "program_id": program_id,
+                "readiness": readiness,
+                "preflight": preflight,
+                "step_trace": [
+                    {"step": "READINESS_PRECHECK", "status": "ok" if readiness_ok else "blocked", "detail": str(readiness.get("status") or "unknown")},
+                    {"step": "LIVE_PREFLIGHT", "status": "ok" if preflight_ok else "blocked", "detail": str(preflight.get("status") or "unknown")},
+                ],
+            }
+
+    touched_endpoints.append("/request-log")
+    request_log_after = _windows_bridge_request_log_from_bridge(bridge, runtime_mode="live", confirm_live=True)
+    vision_proof = req.vision_proof if isinstance(req.vision_proof, dict) else {}
+    report = evaluate_live_validation(
+        run_id=run_id,
+        sequence_id=sequence_id,
+        specimen_id=specimen_id,
+        program_id=program_id,
+        health=health,
+        programs=programs,
+        request_log_before=request_log_before,
+        execution=execution,
+        request_log_after=request_log_after,
+        vision_proof=vision_proof,
+        executed=execute_sent,
+    )
+    if extra_gates:
+        report_gates = list(extra_gates) + [item for item in report.get("gates", []) if isinstance(item, dict)]
+        blockers = [item for item in report_gates if item.get("required") and item.get("ok") is not True]
+        summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+        summary = dict(summary)
+        summary["required_gate_count"] = len([item for item in report_gates if item.get("required")])
+        summary["passed_required_gate_count"] = len([item for item in report_gates if item.get("required") and item.get("ok") is True])
+        summary["blocker_count"] = len(blockers)
+        summary["physical_live_evidence_captured"] = execute_sent and not blockers
+        report["gates"] = report_gates
+        report["blockers"] = blockers
+        report["summary"] = summary
+        report["ok"] = not blockers
+        if blockers:
+            report["status"] = "blocked"
+    report["tool"] = "equipment.pyautogui.live_validation"
+    report["touched_endpoints"] = list(dict.fromkeys(touched_endpoints))
+    report["request_audit_log"] = request_log_after
+    report["requested_physical_execute"] = execute_requested
+    report["execute_sent"] = execute_sent
+    report["ready_for_physical_live_run"] = (not execute_requested) and bool(report.get("ok"))
+    report["pre_execution_readiness"] = readiness
+    report["pre_execution_preflight"] = preflight
+    report["execution_payload_preview"] = {key: value for key, value in payload.items() if key not in {"locators", "sequence"}}
+    if req.include_screenshot and not execute_sent:
+        touched_endpoints.append("/screenshot")
+        screenshot = bridge.screenshot(
+            {
+                "runtime_mode": "live",
+                "force_live_bridge": True,
+                "run_id": run_id,
+                "checkpoint": "live_validation_pre_execute",
+            }
+        )
+        evidence = report.get("evidence") if isinstance(report.get("evidence"), dict) else {}
+        evidence = dict(evidence)
+        evidence["non_actuating_screenshot"] = screenshot
+        report["evidence"] = evidence
+        report["screenshot"] = screenshot
+        report["touched_endpoints"] = list(dict.fromkeys(touched_endpoints))
+    report = _persist_windows_utm_live_validation(report)
+    runtime_promotion: dict[str, object] = {}
+    if execute_requested:
+        runtime_promotion = _windows_utm_runtime_metadata_from_live_validation_report(report, run_id=run_id)
+        promotion_summary = {
+            "verified": bool(runtime_promotion.get("verified")),
+            "promoted_keys": [
+                key
+                for key in ("equipment_result", "equipment_report", "utm_data_ready", "equipment_handoff")
+                if isinstance(runtime_promotion.get(key), dict)
+            ],
+            "result_file": str(
+                runtime_promotion.get("equipment_result", {}).get("result_file", "")
+                if isinstance(runtime_promotion.get("equipment_result"), dict)
+                else ""
+            ),
+            "analysis_handoff_status": str(
+                runtime_promotion.get("equipment_handoff", {}).get("status", "")
+                if isinstance(runtime_promotion.get("equipment_handoff"), dict)
+                else ""
+            ),
+        }
+        report["runtime_promotion"] = promotion_summary
+        if runtime_promotion.get("verified") is True:
+            for key in ("equipment_result", "equipment_report", "utm_data_ready", "equipment_handoff"):
+                value = runtime_promotion.get(key)
+                if isinstance(value, dict):
+                    controller._state.run_metadata[key] = value
+            controller._state.run_metadata["last_windows_utm_runtime_promotion"] = runtime_promotion
+        report = _persist_windows_utm_live_validation(report)
+    controller._state.run_metadata["last_windows_utm_live_validation"] = report
+    if execute_requested:
+        controller._state.run_metadata["last_windows_utm_physical_validation"] = report
+    await controller.emit_workspace_result(
+        workspace="equipment",
+        tool="equipment.pyautogui.live_validation",
+        result=report,
+        stage=Stage.EQUIPMENT,
+        module_id="equipment",
+        agent="equipment_agent",
+        workflow="windows_utm_physical_live_validation" if execute_requested else "windows_utm_live_validation",
+        node_event=True,
+    )
+    return report
+
+
+def _equipment_skill_registry() -> EquipmentSkillRegistry:
+    return EquipmentSkillRegistry(EQUIPMENT_SKILL_ROOT)
+
+
+def _equipment_runtime_service() -> EquipmentRuntimeService:
+    return EquipmentRuntimeService(EQUIPMENT_RUNTIME_ROOT)
+
+
+def _equipment_skill_authoring_job_manager() -> EquipmentSkillAuthoringJobManager:
+    return EquipmentSkillAuthoringJobManager(EQUIPMENT_SKILL_AUTHORING_JOB_ROOT)
+
+
+_EQUIPMENT_SKILL_AUTHORING_THREADS: dict[str, threading.Thread] = {}
+_EQUIPMENT_SKILL_AUTHORING_THREADS_LOCK = threading.Lock()
+_EQUIPMENT_SKILL_DEPLOYMENT_THREADS: dict[str, threading.Thread] = {}
+_EQUIPMENT_SKILL_DEPLOYMENT_THREADS_LOCK = threading.Lock()
+
+
+class _EquipmentSkillDeploymentStopped(RuntimeError):
+    """Internal cooperative-stop signal raised only at deployment boundaries."""
+
+
+class _EquipmentSkillAuthoringStopped(RuntimeError):
+    """Internal cooperative-stop signal raised between persisted analysis chunks."""
+
+
+def _stop_equipment_skill_authoring_at_boundary(
+    manager: EquipmentSkillAuthoringJobManager,
+    job_id: str,
+    runtime_service: EquipmentRuntimeService,
+    runtime: dict[str, Any] | None,
+) -> bool:
+    job = manager.get(job_id)
+    if not job.get("stop_requested"):
+        return False
+    if runtime and str(runtime.get("lifecycle") or "").upper() not in TERMINAL_STATUSES | {"BLOCKED", "ABORTED"}:
+        runtime_service.transition(
+            runtime["execution_id"],
+            "ABORTED",
+            status="stopped",
+            detail="Skill authoring stopped at a safe stage boundary",
+            completion={"ok": False, "status": "stopped"},
+            metadata={"agentic_progress": "STOPPED", "recording_id": job["recording_id"]},
+        )
+    manager.mark_stopped(job_id, "Stopped at a safe stage boundary")
+    return True
+
+
+def _run_equipment_skill_authoring_job(job_id: str) -> None:
+    """Transfer, structure, annotate, and verify one Skill outside the request thread."""
+    manager = _equipment_skill_authoring_job_manager()
+    runtime_service = _equipment_runtime_service()
+    job = manager.get(job_id)
+    runtime: dict[str, Any] | None = None
+    try:
+        if _stop_equipment_skill_authoring_at_boundary(manager, job_id, runtime_service, runtime):
+            return
+        manager.update(
+            job_id,
+            stage="TRANSFERRING",
+            progress=25,
+            status_text="Transferring recording from selected Windows Worker",
+        )
+        sequence_id = f"recording-import-{job_id}"
+        runtime = runtime_service.begin(
+            sequence_id=sequence_id,
+            run_id=sequence_id,
+            experiment_id="equipment-skill-authoring",
+            specimen_id="skill-package",
+            profile_id=job["target_profile"],
+            mode="live",
+            worker={"worker_id": job["bridge_id"], "kind": "windows_pyautogui"},
+            execution_ref={
+                "type": "skill",
+                "skill_id": job["skill_id"],
+                "version": job["version"],
+                "operation": "recording_import",
+            },
+            model_snapshot=_equipment_skill_model_snapshot(),
+            metadata={"agentic_progress": "TRANSFERRING", "recording_id": job["recording_id"]},
+        )
+        runtime = runtime_service.transition(
+            runtime["execution_id"],
+            "PREFLIGHT",
+            status="transferring",
+            detail="selected worker recording accepted for transfer",
+        )
+        if _stop_equipment_skill_authoring_at_boundary(manager, job_id, runtime_service, runtime):
+            return
+        worker_result = _equipment_bridge().get_recording(
+            {
+                "recording_id": job["recording_id"],
+                "bridge_id": job["bridge_id"],
+                "force_live_bridge": True,
+            }
+        )
+        if not worker_result.get("ok"):
+            failure_code = str(worker_result.get("failure_code") or "PYAUTOGUI_RECORDING_TRANSFER_FAILED")
+            message = str(worker_result.get("message") or "Selected worker recording transfer failed.")
+            runtime_service.transition(
+                runtime["execution_id"],
+                "BLOCKED",
+                status="blocked",
+                detail=message,
+                failure={"failure_code": failure_code},
+                completion={"ok": False, "status": "blocked"},
+                metadata={"agentic_progress": "FAILED", "recording_id": job["recording_id"]},
+            )
+            manager.update(
+                job_id,
+                stage="FAILED",
+                progress=25,
+                status_text=message,
+                status="FAILED",
+                error={"failure_code": failure_code, "message": message},
+            )
+            return
+        recording = {key: value for key, value in worker_result.items() if key not in {"ok", "tool", "mode", "bridge"}}
+        if str(recording.get("recording_id") or "") != job["recording_id"]:
+            raise SkillContractError("Selected worker returned a different recording identity.")
+        if _stop_equipment_skill_authoring_at_boundary(manager, job_id, runtime_service, runtime):
+            return
+        manager.update(job_id, stage="STRUCTURING", progress=45, status_text="Structuring recorded actions into Skill steps")
+        runtime = runtime_service.transition(
+            runtime["execution_id"],
+            "EXECUTING",
+            status="building_skill",
+            detail="saved recording transferred; building Linux Skill draft",
+            evidence=[
+                {
+                    "kind": "equipment_recording",
+                    "recording_id": job["recording_id"],
+                    "sha256": canonical_sha256(recording),
+                    "timeline_id": str(recording.get("timeline_id") or ""),
+                }
+            ],
+            metadata={"agentic_progress": "STRUCTURING", "recording_id": job["recording_id"]},
+        )
+        registry = _equipment_skill_registry()
+        package = _equipment_skill_registry().create_draft(
+            recording=recording,
+            skill_id=job["skill_id"],
+            version=job["version"],
+            target_profile=job["target_profile"],
+            model_snapshot=_equipment_skill_model_snapshot(),
+        )
+        manager.update(job_id, stage="ANNOTATING", progress=70, status_text="Annotating Skill steps with the selected LLM")
+        try:
+            def update_annotation_progress(stage: str, completed: int, total: int) -> None:
+                if stage == "ANALYZING_TIMELINE":
+                    progress = 70 + int(15 * completed / max(1, total))
+                    status_text = f"Analyzing recording timeline chunk {completed}/{total}"
+                else:
+                    progress = 86
+                    status_text = "Synthesizing complete Skill annotation"
+                manager.update(job_id, stage=stage, progress=progress, status_text=status_text)
+
+            annotations, model_snapshot = asyncio.run(
+                _annotate_equipment_skill_with_selected_model(
+                    package,
+                    progress_callback=update_annotation_progress,
+                    stop_requested=lambda: bool(manager.get(job_id).get("stop_requested")),
+                )
+            )
+            package = registry.annotate(
+                job["skill_id"],
+                job["version"],
+                annotations,
+                model_snapshot=model_snapshot,
+            )
+        except _EquipmentSkillAuthoringStopped:
+            raise
+        except Exception:
+            try:
+                registry.delete(job["skill_id"], job["version"])
+            except SkillContractError:
+                pass
+            raise
+        if _stop_equipment_skill_authoring_at_boundary(manager, job_id, runtime_service, runtime):
+            return
+        manager.update(
+            job_id,
+            stage="VALIDATING",
+            progress=90,
+            status_text="Validating recording provenance and annotation coverage",
+        )
+        runtime = runtime_service.transition(
+            runtime["execution_id"],
+            "VERIFYING",
+            status="verifying",
+            detail="Skill identity, recording provenance, and annotation coverage verified",
+            metadata={"agentic_progress": "VALIDATING", "recording_id": job["recording_id"]},
+        )
+        if _stop_equipment_skill_authoring_at_boundary(manager, job_id, runtime_service, runtime):
+            return
+        runtime = runtime_service.transition(
+            runtime["execution_id"],
+            "COMPLETED",
+            status="verified_complete",
+            detail="recording transfer and annotated Skill creation completed",
+            completion={"ok": True, "status": "verified_complete"},
+            handoff={"status": "skill_ready_for_compile"},
+            metadata={"agentic_progress": "READY", "recording_id": job["recording_id"]},
+        )
+        result = _equipment_skill_success(
+            {
+                **package,
+                "transfer": {
+                    "recording_id": job["recording_id"],
+                    "source_worker": job["bridge_id"],
+                    "fallback_used": False,
+                },
+                "equipment_runtime_execution": runtime,
+                "equipment_runtime_projection": EquipmentRuntimeService.project(runtime),
+            }
+        )
+        manager.update(
+            job_id,
+            stage="COMPLETED",
+            progress=100,
+            status_text=f"Annotated Skill {job['skill_id']}@{job['version']} is ready",
+            status="COMPLETED",
+            result=result,
+        )
+    except Exception as exc:
+        current = manager.get(job_id)
+        if current.get("stop_requested"):
+            _stop_equipment_skill_authoring_at_boundary(manager, job_id, runtime_service, runtime)
+            return
+        message = str(exc) or exc.__class__.__name__
+        if runtime and str(runtime.get("lifecycle") or "").upper() not in {"COMPLETED", "BLOCKED", "ABORTED"}:
+            try:
+                runtime_service.transition(
+                    runtime["execution_id"],
+                    "BLOCKED",
+                    status="blocked",
+                    detail=message,
+                    failure={"failure_code": "SKILL_AUTHORING_FAILED"},
+                    completion={"ok": False, "status": "blocked"},
+                    metadata={"agentic_progress": "FAILED", "recording_id": job["recording_id"]},
+                )
+            except EquipmentRuntimeContractError:
+                pass
+        manager.update(
+            job_id,
+            stage="FAILED",
+            progress=int(current.get("progress") or 0),
+            status_text=message,
+            status="FAILED",
+            error={"failure_code": "SKILL_AUTHORING_FAILED", "message": message},
+        )
+
+
+def _launch_equipment_skill_authoring_job(job_id: str) -> None:
+    def run_and_release() -> None:
+        try:
+            _run_equipment_skill_authoring_job(job_id)
+        finally:
+            with _EQUIPMENT_SKILL_AUTHORING_THREADS_LOCK:
+                _EQUIPMENT_SKILL_AUTHORING_THREADS.pop(job_id, None)
+
+    thread = threading.Thread(target=run_and_release, name=f"skill-authoring-{job_id[-8:]}", daemon=True)
+    with _EQUIPMENT_SKILL_AUTHORING_THREADS_LOCK:
+        _EQUIPMENT_SKILL_AUTHORING_THREADS[job_id] = thread
+    thread.start()
+
+
+def _run_equipment_skill_deployment_job(job_id: str) -> None:
+    """Deploy one exact validated Skill while persisting stage progress."""
+    manager = _equipment_skill_authoring_job_manager()
+    job = manager.get(job_id)
+
+    def update_progress(stage: str, progress: int, status_text: str) -> None:
+        manager.update(job_id, stage=stage, progress=progress, status_text=status_text)
+
+    def stop_requested() -> bool:
+        return bool(manager.get(job_id).get("stop_requested"))
+
+    try:
+        if stop_requested():
+            manager.mark_stopped(job_id, "Deployment stopped before preflight")
+            return
+        result = _execute_equipment_skill_deployment(
+            job["skill_id"],
+            job["version"],
+            EquipmentSkillDeploymentRequest(bridge_id=job["bridge_id"]),
+            progress_callback=update_progress,
+            stop_requested=stop_requested,
+        )
+        manager.update(
+            job_id,
+            stage="DEPLOYED",
+            progress=100,
+            status_text=f"Skill {job['skill_id']}@{job['version']} deployed",
+            status="COMPLETED",
+            result=result,
+        )
+    except _EquipmentSkillDeploymentStopped as exc:
+        manager.mark_stopped(job_id, str(exc))
+    except Exception as exc:
+        current = manager.get(job_id)
+        detail = exc.detail if isinstance(exc, HTTPException) and isinstance(exc.detail, dict) else {}
+        message = str(detail.get("message") or str(exc) or exc.__class__.__name__)
+        manager.update(
+            job_id,
+            stage="FAILED",
+            progress=int(current.get("progress") or 0),
+            status_text=message,
+            status="FAILED",
+            error={
+                "failure_code": str(detail.get("failure_code") or "SKILL_DEPLOYMENT_FAILED"),
+                "message": message,
+            },
+        )
+
+
+def _launch_equipment_skill_deployment_job(job_id: str) -> None:
+    def run_and_release() -> None:
+        try:
+            _run_equipment_skill_deployment_job(job_id)
+        finally:
+            with _EQUIPMENT_SKILL_DEPLOYMENT_THREADS_LOCK:
+                _EQUIPMENT_SKILL_DEPLOYMENT_THREADS.pop(job_id, None)
+
+    thread = threading.Thread(target=run_and_release, name=f"skill-deployment-{job_id[-8:]}", daemon=True)
+    with _EQUIPMENT_SKILL_DEPLOYMENT_THREADS_LOCK:
+        _EQUIPMENT_SKILL_DEPLOYMENT_THREADS[job_id] = thread
+    thread.start()
+
+
+@app.get("/api/equipment/runtime/executions")
+async def get_equipment_runtime_executions(limit: int = 100) -> dict[str, Any]:
+    executions = _equipment_runtime_service().list(limit=limit)
+    return {
+        "ok": True,
+        "executions": executions,
+        "projections": [EquipmentRuntimeService.project(item) for item in executions],
+    }
+
+
+@app.get("/api/equipment/runtime/current")
+async def get_current_equipment_runtime_execution(
+    run_id: str = "",
+    profile_id: str = "",
+    execution_id: str = "",
+) -> dict[str, Any]:
+    """Return the latest Equipment execution scoped to the active run when supplied."""
+    execution = _equipment_runtime_service().latest(
+        run_id=run_id,
+        profile_id=profile_id,
+        execution_id=execution_id,
+    )
+    return {
+        "ok": True,
+        "execution": execution,
+        "projection": EquipmentRuntimeService.project(execution) if execution else None,
+    }
+
+
+@app.get("/api/equipment/runtime/executions/{execution_id}")
+async def get_equipment_runtime_execution(execution_id: str) -> dict[str, Any]:
+    try:
+        execution = _equipment_runtime_service().get(execution_id)
+    except EquipmentRuntimeContractError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"ok": False, "failure_code": "EQUIPMENT_EXECUTION_NOT_FOUND", "message": str(exc)},
+        ) from exc
+    return {
+        "ok": True,
+        "execution": execution,
+        "projection": EquipmentRuntimeService.project(execution),
+    }
+
+
+def _equipment_skill_success(package: dict[str, Any]) -> dict[str, Any]:
+    """Return one lifecycle package with the success flag expected by both GUIs."""
+    return {"ok": True, **package}
+
+
+def _equipment_skill_model_snapshot() -> dict[str, Any]:
+    """Snapshot the server-authoritative first inference route without secrets."""
+    ctx = controller._deps.agent_context
+    api_settings = _read_api_key_settings(import_env=False)
+    provider = "openai" if api_settings.get("enabled") and "openai" in ctx.primary_backends else ctx.active_backend
+    router = ctx.model_routers.get(provider, ctx.model_router)
+    selection = router.select("tool_formatting")
+    runtime_profile = dict(ctx.runtime_profiles.get(provider, {}))
+    backend_profile = runtime_profile.get("backend") if isinstance(runtime_profile.get("backend"), dict) else {}
+    model_profiles = runtime_profile.get("models") if isinstance(runtime_profile.get("models"), dict) else {}
+    selected_profile = (
+        model_profiles.get(selection.role)
+        if isinstance(model_profiles.get(selection.role), dict)
+        else {}
+    )
+    role_capabilities = (
+        selected_profile.get("capabilities")
+        if isinstance(selected_profile.get("capabilities"), dict)
+        else {}
+    )
+    return {
+        "provider": provider,
+        "model": selection.primary,
+        "role": selection.role,
+        "endpoint_profile": str(backend_profile.get("label") or provider),
+        "capabilities": {
+            "text": bool(role_capabilities.get("text", True)),
+            "vision": bool(
+                role_capabilities.get("vision")
+                or backend_profile.get("vision")
+                or runtime_profile.get("vision")
+            ),
+        },
+        "snapshotted_at": datetime.now(timezone.utc).isoformat(),
+        "fallback_allowed": False,
+    }
+
+
+def _equipment_skill_synthesis_evidence(
+    evidence: SkillVisionEvidence,
+    *,
+    timeline_chunk_count: int,
+) -> SkillVisionEvidence:
+    """Avoid resending state frames after their storyboard chunks were analyzed."""
+    if timeline_chunk_count < 1:
+        return evidence
+    retained_indexes = sorted(
+        {
+            int(step.get("image_index") or 0)
+            for step in evidence.steps
+            if isinstance(step, dict) and int(step.get("image_index") or 0) > 0
+        }
+    )
+    index_map = {old: new for new, old in enumerate(retained_indexes, start=1)}
+    images = [
+        evidence.images[index - 1]
+        for index in retained_indexes
+        if 0 < index <= len(evidence.images)
+    ]
+    steps = [
+        dict(step) | {"image_index": index_map[int(step["image_index"])]}
+        for step in evidence.steps
+        if isinstance(step, dict) and int(step.get("image_index") or 0) in index_map
+    ]
+    timeline = [
+        dict(item) | {"image_index": index_map[int(item["image_index"])]}
+        for item in evidence.timeline
+        if isinstance(item, dict) and int(item.get("image_index") or 0) in index_map
+    ]
+    return SkillVisionEvidence(images=images, steps=steps, timeline=timeline)
+
+
+async def _complete_equipment_json_with_retry(
+    backend: Any,
+    *,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    metadata: dict[str, Any],
+    images: list[Any],
+) -> tuple[dict[str, Any], Any]:
+    """Request strict JSON and retry the same selected model once on malformed syntax."""
+    structured_metadata = dict(metadata)
+    structured_metadata["response_format"] = "json_object"
+    response = await backend.complete(
+        model=model,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        metadata=structured_metadata,
+        images=images,
+    )
+    try:
+        return _extract_json_object(response.text), response
+    except (json.JSONDecodeError, ValueError):
+        retry_metadata = dict(structured_metadata)
+        retry_metadata["json_retry_attempt"] = 1
+        retry_response = await backend.complete(
+            model=model,
+            system_prompt=(
+                f"{system_prompt}\n\n"
+                "Your previous response was not valid JSON. Retry the same analysis and return exactly one "
+                "strict RFC 8259 JSON object. Use double-quoted keys and strings, include every required comma "
+                "and closing delimiter, and do not include Markdown fences or commentary."
+            ),
+            user_prompt=user_prompt,
+            metadata=retry_metadata,
+            images=images,
+        )
+        try:
+            payload = _extract_json_object(retry_response.text)
+        except (json.JSONDecodeError, ValueError):
+            payload = repair_json(retry_response.text, return_objects=True)
+            if not isinstance(payload, dict):
+                raise ValueError("repaired LLM response JSON must be an object")
+        return payload, retry_response
+
+
+def _equipment_skill_synthesis_workflow(workflow: dict[str, Any]) -> dict[str, Any]:
+    """Keep executable semantics while omitting image data already sent as visual evidence."""
+    compact = strip_inline_image_payloads(workflow)
+    for step in compact.get("steps", []):
+        if not isinstance(step, dict):
+            continue
+        action = step.get("action")
+        if isinstance(action, dict):
+            action.pop("image_candidates", None)
+    return compact
+
+
+def _complete_equipment_annotation_payload(
+    payload: dict[str, Any],
+    *,
+    workflow: dict[str, Any],
+    current_annotations: dict[str, Any],
+) -> tuple[dict[str, Any], int]:
+    """Preserve every recorded step when the selected model omits annotation rows."""
+    completed = copy.deepcopy(payload)
+    model_steps = {
+        str(item.get("step_id") or ""): item
+        for item in payload.get("steps", [])
+        if isinstance(item, dict) and str(item.get("step_id") or "")
+    }
+    current_steps = {
+        str(item.get("step_id") or ""): item
+        for item in current_annotations.get("steps", [])
+        if isinstance(item, dict) and str(item.get("step_id") or "")
+    }
+    merged_steps: list[dict[str, Any]] = []
+    fallback_count = 0
+    for workflow_step in workflow.get("steps", []):
+        if not isinstance(workflow_step, dict):
+            continue
+        step_id = str(workflow_step.get("step_id") or "").strip()
+        if not step_id:
+            continue
+        base = copy.deepcopy(
+            current_steps.get(
+                step_id,
+                {
+                    "step_id": step_id,
+                    "label": str(workflow_step.get("label") or step_id),
+                    "confidence": 0.75,
+                    "review_required": False,
+                },
+            )
+        )
+        model_step = model_steps.get(step_id)
+        if model_step is None:
+            fallback_count += 1
+        else:
+            for key in ("label", "confidence", "review_required", "locator", "checkpoint_after"):
+                if key in model_step:
+                    base[key] = copy.deepcopy(model_step[key])
+        base["step_id"] = step_id
+        merged_steps.append(base)
+    completed["steps"] = merged_steps
+    return completed, fallback_count
+
+
+async def _annotate_equipment_skill_with_selected_model(
+    package: dict[str, Any],
+    *,
+    progress_callback: Callable[[str, int, int], None] | None = None,
+    stop_requested: Callable[[], bool] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Analyze the complete timeline with exactly one selected backend/model."""
+    ctx = controller._deps.agent_context
+    snapshot = _equipment_skill_model_snapshot()
+    provider = str(snapshot["provider"])
+    model = str(snapshot["model"])
+    backend = ctx.primary_backends.get(provider)
+    if backend is None:
+        raise RuntimeError(f"selected backend unavailable: {provider}")
+    prepare_model = getattr(backend, "prepare_model", None)
+    if callable(prepare_model):
+        await prepare_model(model)
+    workflow = package.get("workflow") if isinstance(package.get("workflow"), dict) else {}
+    annotations = package.get("annotations") if isinstance(package.get("annotations"), dict) else {}
+    manifest = package.get("manifest") if isinstance(package.get("manifest"), dict) else {}
+    vision_evidence = collect_visual_annotation_evidence(
+        package,
+        allowed_roots=[(RUNTIME_PATHS.artifact_root / "equipment")],
+        max_images=16,
+    )
+    recording = package.get("recording") if isinstance(package.get("recording"), dict) else {}
+    recording_id = str(recording.get("recording_id") or manifest.get("timeline_id") or "recording").strip()
+    safe_recording_id = re.sub(r"[^A-Za-z0-9._-]+", "-", recording_id).strip("-.") or "recording"
+    storyboard_root = (RUNTIME_PATHS.artifact_root / "equipment") / "skill_storyboards" / safe_recording_id
+    storyboards = build_temporal_storyboards(
+        package,
+        allowed_roots=[(RUNTIME_PATHS.artifact_root / "equipment")],
+        output_dir=storyboard_root,
+    )
+    manual_context = _manual_knowledge_context(
+        " ".join(
+            part
+            for part in (
+                "UTM Windows GUI skill authoring",
+                str(manifest.get("target_profile") or ""),
+                str(workflow.get("name") or ""),
+                json.dumps(workflow.get("steps", []), ensure_ascii=False, default=str)[:3000],
+            )
+            if part
+        ),
+        purpose="skill_authoring",
+        product_hint=str(manifest.get("product") or ""),
+        version_hint=str(manifest.get("software_version") or ""),
+    )
+    manual_audit = manual_context_audit(manual_context)
+    snapshot["manual_context"] = manual_audit
+    timeline_chunk_analyses: list[dict[str, Any]] = []
+    if storyboards.chunks:
+        if not bool((snapshot.get("capabilities") or {}).get("vision")):
+            raise RuntimeError(f"selected model does not advertise visual capability: {provider}/{model}")
+        analysis_root = storyboard_root / "analyses"
+        analysis_root.mkdir(parents=True, exist_ok=True)
+        if progress_callback is not None:
+            progress_callback("ANALYZING_TIMELINE", 0, len(storyboards.chunks))
+        for chunk_index, chunk in enumerate(storyboards.chunks, start=1):
+            if stop_requested is not None and stop_requested():
+                raise _EquipmentSkillAuthoringStopped("Skill authoring stopped before the next timeline chunk")
+            chunk_payload = {
+                "chunk": {
+                    "chunk_id": chunk.chunk_id,
+                    "start_ms": chunk.start_ms,
+                    "end_ms": chunk.end_ms,
+                    "tiles": chunk.tiles,
+                }
+            }
+            chunk_analysis, chunk_response = await _complete_equipment_json_with_retry(
+                backend,
+                model=model,
+                system_prompt=(
+                    "Analyze one chronological desktop-recording storyboard. Read every tile in order and return "
+                    "one JSON object only with chunk_id, summary, state_transitions, and source_frame_ids. "
+                    "source_frame_ids must contain every supplied tile frame_id exactly once and in tile order. "
+                    "Describe visible state changes and uncertainty; do not invent actions or credentials."
+                ),
+                user_prompt=json.dumps(chunk_payload, ensure_ascii=False),
+                metadata={
+                    "task_type": "equipment_skill_timeline_chunk",
+                    "role": snapshot["role"],
+                    "no_fallback": True,
+                    "chunk_index": chunk_index,
+                    "chunk_count": len(storyboards.chunks),
+                },
+                images=[chunk.image],
+            )
+            if not str(chunk_response.text or "").strip():
+                raise RuntimeError(f"selected model returned an empty timeline analysis: {chunk.chunk_id}")
+            expected_frame_ids = [str(tile["frame_id"]) for tile in chunk.tiles]
+            returned_frame_ids = [str(item) for item in chunk_analysis.get("source_frame_ids", [])]
+            if returned_frame_ids != expected_frame_ids:
+                raise RuntimeError(f"timeline analysis omitted or reordered source frames: {chunk.chunk_id}")
+            chunk_analysis["chunk_id"] = chunk.chunk_id
+            chunk_analysis["start_ms"] = chunk.start_ms
+            chunk_analysis["end_ms"] = chunk.end_ms
+            chunk_analysis["storyboard_path"] = chunk.path
+            chunk_analysis["model"] = model
+            analysis_path = analysis_root / f"{chunk.chunk_id}.json"
+            temporary_path = analysis_path.with_suffix(".json.tmp")
+            temporary_path.write_text(
+                json.dumps(chunk_analysis, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            temporary_path.replace(analysis_path)
+            timeline_chunk_analyses.append(chunk_analysis)
+            if progress_callback is not None:
+                progress_callback("ANALYZING_TIMELINE", chunk_index, len(storyboards.chunks))
+            if stop_requested is not None and stop_requested():
+                raise _EquipmentSkillAuthoringStopped("Skill authoring stopped after the current timeline chunk")
+        if progress_callback is not None:
+            progress_callback("SYNTHESIZING", len(storyboards.chunks), len(storyboards.chunks))
+    synthesis_evidence = _equipment_skill_synthesis_evidence(
+        vision_evidence,
+        timeline_chunk_count=len(storyboards.chunks),
+    )
+    payload, response = await _complete_equipment_json_with_retry(
+        backend,
+        model=model,
+        system_prompt=(
+            "You reconstruct and annotate one already recorded bounded Windows equipment workflow from its full "
+            "ordered action list and visual timeline. First infer the workflow intent, initial state, causal state "
+            "transitions, completion state, and visible success/failure evidence across the sequence; do not treat "
+            "images as unrelated screenshots. Return one JSON object only with workflow_summary, step_transitions, "
+            "and steps. workflow_summary may contain intent, initial_state, completion_state, and failure_state. "
+            "Each step_transition must preserve step_id and may contain before_state, action_effect, after_state, "
+            "success_evidence, and failure_evidence. Preserve every step_id in steps. For each step provide label, "
+            "confidence from 0 to 1, review_required, optional locator, and checkpoint_after. For every supplied "
+            "pre_action image return locator fields "
+            "search_roi_norm, target_bbox_norm, and context_bbox_norm as [x, y, width, height] values normalized "
+            "to that image. The search ROI may be broad; target_bbox must contain only the actionable control; "
+            "context_bbox must preserve nearby semantic context. Use action_context and state images to explain "
+            "what changed after each action. Do not add executable actions or credentials."
+        ),
+        user_prompt=json.dumps(
+            {
+                "workflow": _equipment_skill_synthesis_workflow(workflow),
+                "current_annotations": annotations,
+                "recording_evidence": {
+                    "schema": str((manifest.get("recording_evidence") or {}).get("schema") or ""),
+                    "timeline_id": str(manifest.get("timeline_id") or ""),
+                    "sampled_frame_count": int(
+                        (manifest.get("recording_evidence") or {}).get("sampled_frame_count") or 0
+                    ),
+                    "persisted_frame_count": int(
+                        (manifest.get("recording_evidence") or {}).get("persisted_frame_count") or 0
+                    ),
+                    "event_frame_count": int(
+                        (manifest.get("recording_evidence") or {}).get("event_frame_count") or 0
+                    ),
+                },
+                "visual_evidence_index": synthesis_evidence.steps,
+                "visual_timeline": synthesis_evidence.timeline,
+                "timeline_chunk_analyses": timeline_chunk_analyses,
+            },
+            ensure_ascii=False,
+        ),
+        metadata={
+            "task_type": "equipment_skill_annotation",
+            "role": snapshot["role"],
+            "no_fallback": True,
+            "max_tokens": 1400,
+            "manual_context_hash": manual_audit["context_hash"],
+        },
+        images=synthesis_evidence.images,
+    )
+    if not str(response.text or "").strip():
+        raise RuntimeError("selected model returned an empty annotation")
+    payload, annotation_step_fallback_count = _complete_equipment_annotation_payload(
+        payload,
+        workflow=workflow,
+        current_annotations=annotations,
+    )
+    if vision_evidence.images:
+        enriched = apply_visual_locator_annotations(
+            package,
+            payload,
+            allowed_roots=[(RUNTIME_PATHS.artifact_root / "equipment")],
+        )
+        executable_by_step = {
+            str(step.get("step_id") or ""): step.get("action")
+            for step in enriched.get("workflow", {}).get("steps", [])
+            if isinstance(step, dict) and isinstance(step.get("action"), dict)
+        }
+        for annotation in payload["steps"]:
+            if not isinstance(annotation, dict) or not isinstance(annotation.get("locator"), dict):
+                continue
+            action = executable_by_step.get(str(annotation.get("step_id") or ""), {})
+            if action.get("locator_backend") != "multimodal_roi_image":
+                continue
+            annotation["locator"].update(
+                {
+                    "image_candidates": action["image_candidates"],
+                    "region_normalized": action["region_normalized"],
+                    "locator_backend": action["locator_backend"],
+                }
+            )
+        snapshot["capabilities"]["vision"] = True
+        snapshot["visual_evidence_count"] = len(vision_evidence.images)
+        snapshot["visual_timeline_count"] = len(vision_evidence.timeline)
+    snapshot["timeline_chunk_count"] = len(storyboards.chunks)
+    snapshot["timeline_source_frame_count"] = storyboards.source_frame_count
+    snapshot["timeline_overview_count"] = len(storyboards.overview_images)
+    snapshot["synthesis_visual_evidence_count"] = len(synthesis_evidence.images)
+    snapshot["annotation_step_fallback_count"] = annotation_step_fallback_count
+    return payload, snapshot
+
+
+def _skill_contract_http_error(exc: SkillContractError) -> HTTPException:
+    message = str(exc)
+    lowered = message.lower()
+    status = 404 if "not found" in lowered else 409 if any(
+        marker in lowered for marker in ("already exists", "revision conflict", "immutable")
+    ) else 400
+    failure_code = (
+        "SKILL_WORKFLOW_REVISION_CONFLICT"
+        if "revision conflict" in lowered
+        else "SKILL_VERSION_IMMUTABLE"
+        if "immutable" in lowered
+        else "SKILL_CONTRACT_INVALID"
+    )
+    return HTTPException(
+        status_code=status,
+        detail={"ok": False, "failure_code": failure_code, "message": message},
+    )
+
+
+@app.get("/api/equipment/skills")
+async def get_equipment_skills() -> dict[str, Any]:
+    return {"ok": True, "skills": _equipment_skill_registry().list(), "root": str(EQUIPMENT_SKILL_ROOT)}
+
+
+@app.get("/api/equipment/workers/{bridge_id}/recordings")
+async def get_equipment_worker_recordings(bridge_id: str) -> dict[str, Any]:
+    """List recordings from one explicitly selected Windows worker."""
+    worker_result = _equipment_bridge().list_recordings(
+        {"bridge_id": bridge_id, "force_live_bridge": True}
+    )
+    if not worker_result.get("ok"):
+        failure_code = str(worker_result.get("failure_code") or "PYAUTOGUI_RECORDING_LIST_FAILED")
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "ok": False,
+                "failure_code": failure_code,
+                "message": str(worker_result.get("message") or "Selected worker recording list failed."),
+                "fallback_used": False,
+            },
+        )
+    recordings = worker_result.get("recordings")
+    recording_summaries: list[dict[str, Any]] = []
+    if isinstance(recordings, list):
+        for item in recordings:
+            if not isinstance(item, dict):
+                continue
+            events = item.get("events")
+            recording_summaries.append(
+                {
+                    "recording_id": str(item.get("recording_id") or ""),
+                    "name": str(item.get("name") or item.get("recording_id") or "Unnamed recording"),
+                    "status": str(item.get("status") or "recorded"),
+                    "duration_ms": int(item.get("duration_ms") or 0),
+                    "event_count": len(events) if isinstance(events, list) else int(item.get("event_count") or 0),
+                    "created_at": str(item.get("created_at") or ""),
+                    "updated_at": str(item.get("updated_at") or ""),
+                }
+            )
+    return {
+        "ok": True,
+        "status": str(worker_result.get("status") or "ready"),
+        "bridge_id": bridge_id,
+        "recordings": recording_summaries,
+    }
+
+
+@app.post("/api/equipment/recordings/{recording_id}/import-skill/start", status_code=202)
+async def post_equipment_recording_import_start(
+    recording_id: str,
+    req: EquipmentRecordingImportRequest,
+) -> dict[str, Any]:
+    manager = _equipment_skill_authoring_job_manager()
+    job = manager.create(
+        recording_id=recording_id,
+        skill_id=req.skill_id,
+        version=req.version,
+        target_profile=req.target_profile,
+        bridge_id=req.bridge_id,
+    )
+    _launch_equipment_skill_authoring_job(job["job_id"])
+    return {"ok": True, "job": job}
+
+
+@app.get("/api/equipment/skill-authoring/jobs/{job_id}")
+async def get_equipment_skill_authoring_job(job_id: str) -> dict[str, Any]:
+    try:
+        job = _equipment_skill_authoring_job_manager().get(job_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"ok": False, "failure_code": "SKILL_AUTHORING_JOB_NOT_FOUND", "message": str(job_id)},
+        ) from exc
+    return {"ok": True, "job": job}
+
+
+@app.get("/api/equipment/skill-authoring/jobs/{job_id}/storyboards")
+async def get_equipment_skill_authoring_storyboards(
+    job_id: str,
+    cursor: int = 0,
+    limit: int = 2,
+) -> dict[str, Any]:
+    """Return a bounded storyboard page without exposing server filesystem paths."""
+    try:
+        job = _equipment_skill_authoring_job_manager().get(job_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"ok": False, "failure_code": "SKILL_AUTHORING_JOB_NOT_FOUND", "message": str(job_id)},
+        ) from exc
+    safe_recording_id = re.sub(r"[^A-Za-z0-9._-]+", "-", str(job.get("recording_id") or "")).strip("-.")
+    artifact_root = (RUNTIME_PATHS.artifact_root / "equipment").resolve()
+    storyboard_root = (artifact_root / "skill_storyboards" / safe_recording_id).resolve()
+    try:
+        storyboard_root.relative_to(artifact_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid recording identity") from exc
+    files = sorted(storyboard_root.glob("chunk-*.jpg")) if storyboard_root.is_dir() else []
+    safe_cursor = max(0, int(cursor))
+    safe_limit = max(1, min(8, int(limit)))
+    page = files[safe_cursor : safe_cursor + safe_limit]
+    items = [
+        {
+            "name": path.name,
+            "media_type": "image/jpeg",
+            "data_base64": base64.b64encode(path.read_bytes()).decode("ascii"),
+        }
+        for path in page
+    ]
+    next_cursor = safe_cursor + len(items)
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "recording_id": str(job.get("recording_id") or ""),
+        "cursor": safe_cursor,
+        "limit": safe_limit,
+        "next_cursor": next_cursor if next_cursor < len(files) else None,
+        "total_count": len(files),
+        "items": items,
+    }
+
+
+@app.post("/api/equipment/skill-authoring/jobs/{job_id}/stop")
+async def post_equipment_skill_authoring_stop(job_id: str) -> dict[str, Any]:
+    try:
+        job = _equipment_skill_authoring_job_manager().request_stop(job_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"ok": False, "failure_code": "SKILL_AUTHORING_JOB_NOT_FOUND", "message": str(job_id)},
+        ) from exc
+    return {"ok": True, "job": job}
+
+
+@app.post("/api/equipment/skills/{skill_id}/{version}/deploy/start", status_code=202)
+async def post_equipment_skill_deployment_start(
+    skill_id: str,
+    version: str,
+    req: EquipmentSkillDeploymentRequest,
+) -> dict[str, Any]:
+    try:
+        _equipment_skill_registry().get(skill_id, version)
+    except SkillContractError as exc:
+        raise _skill_contract_http_error(exc) from exc
+    manager = _equipment_skill_authoring_job_manager()
+    job = manager.create_deployment(skill_id=skill_id, version=version, bridge_id=req.bridge_id)
+    _launch_equipment_skill_deployment_job(job["job_id"])
+    return {"ok": True, "job": job}
+
+
+@app.get("/api/equipment/skill-deployment/jobs/{job_id}")
+async def get_equipment_skill_deployment_job(job_id: str) -> dict[str, Any]:
+    try:
+        job = _equipment_skill_authoring_job_manager().get(job_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"ok": False, "failure_code": "SKILL_DEPLOYMENT_JOB_NOT_FOUND", "message": str(job_id)},
+        ) from exc
+    if job.get("operation") != "deployment":
+        raise HTTPException(
+            status_code=404,
+            detail={"ok": False, "failure_code": "SKILL_DEPLOYMENT_JOB_NOT_FOUND", "message": str(job_id)},
+        )
+    return {"ok": True, "job": job}
+
+
+@app.post("/api/equipment/skill-deployment/jobs/{job_id}/stop")
+async def post_equipment_skill_deployment_stop(job_id: str) -> dict[str, Any]:
+    manager = _equipment_skill_authoring_job_manager()
+    try:
+        job = manager.get(job_id)
+        if job.get("operation") != "deployment":
+            raise KeyError(job_id)
+        job = manager.request_stop(job_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"ok": False, "failure_code": "SKILL_DEPLOYMENT_JOB_NOT_FOUND", "message": str(job_id)},
+        ) from exc
+    return {"ok": True, "job": job}
+
+
+@app.post("/api/equipment/recordings/{recording_id}/import-skill")
+async def post_equipment_recording_import(
+    recording_id: str,
+    req: EquipmentRecordingImportRequest,
+) -> dict[str, Any]:
+    """Pull a saved worker recording and create its authoritative Linux Skill draft."""
+    runtime_service = _equipment_runtime_service()
+    sequence_id = f"recording-import-{recording_id}-{req.skill_id}-{req.version}"
+    runtime = runtime_service.begin(
+        sequence_id=sequence_id,
+        run_id=sequence_id,
+        experiment_id="equipment-skill-authoring",
+        specimen_id="skill-package",
+        profile_id=req.target_profile,
+        mode="live",
+        worker={"worker_id": req.bridge_id, "kind": "windows_pyautogui"},
+        execution_ref={
+            "type": "skill",
+            "skill_id": req.skill_id,
+            "version": req.version,
+            "operation": "recording_import",
+        },
+        model_snapshot=_equipment_skill_model_snapshot(),
+        metadata={"agentic_progress": "TRANSFERRING", "recording_id": recording_id},
+    )
+    if runtime.get("lifecycle") == "RESOLVING":
+        runtime = runtime_service.transition(
+            runtime["execution_id"],
+            "PREFLIGHT",
+            status="transferring",
+            detail="selected worker recording accepted for transfer",
+        )
+    worker_result = _equipment_bridge().get_recording(
+        {"recording_id": recording_id, "bridge_id": req.bridge_id, "force_live_bridge": True}
+    )
+    if not worker_result.get("ok"):
+        failure_code = str(worker_result.get("failure_code") or "PYAUTOGUI_RECORDING_TRANSFER_FAILED")
+        runtime_service.transition(
+            runtime["execution_id"],
+            "BLOCKED",
+            status="blocked",
+            detail=str(worker_result.get("message") or "Selected worker recording transfer failed."),
+            failure={"failure_code": failure_code},
+            completion={"ok": False, "status": "blocked"},
+            metadata={"agentic_progress": "FAILED", "recording_id": recording_id},
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "ok": False,
+                "failure_code": failure_code,
+                "message": str(worker_result.get("message") or "Selected worker recording transfer failed."),
+                "fallback_used": False,
+            },
+        )
+    recording = {key: value for key, value in worker_result.items() if key not in {"ok", "tool", "mode", "bridge"}}
+    if str(recording.get("recording_id") or "") != recording_id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "ok": False,
+                "failure_code": "PYAUTOGUI_RECORDING_ID_MISMATCH",
+                "message": "Selected worker returned a different recording identity.",
+                "fallback_used": False,
+            },
+        )
+    runtime = runtime_service.transition(
+        runtime["execution_id"],
+        "EXECUTING",
+        status="building_skill",
+        detail="saved recording transferred; building Linux Skill draft",
+        evidence=[
+            {
+                "kind": "equipment_recording",
+                "recording_id": recording_id,
+                "sha256": canonical_sha256(recording),
+                "timeline_id": str(recording.get("timeline_id") or ""),
+            }
+        ],
+        metadata={"agentic_progress": "BUILDING_SKILL", "recording_id": recording_id},
+    )
+    try:
+        package = _equipment_skill_registry().create_draft(
+            recording=recording,
+            skill_id=req.skill_id,
+            version=req.version,
+            target_profile=req.target_profile,
+            model_snapshot=_equipment_skill_model_snapshot(),
+        )
+    except SkillContractError as exc:
+        runtime_service.transition(
+            runtime["execution_id"],
+            "BLOCKED",
+            status="blocked",
+            detail=str(exc),
+            failure={"failure_code": "SKILL_CONTRACT_INVALID"},
+            completion={"ok": False, "status": "blocked"},
+            metadata={"agentic_progress": "FAILED", "recording_id": recording_id},
+        )
+        raise _skill_contract_http_error(exc) from exc
+    runtime = runtime_service.transition(
+        runtime["execution_id"],
+        "VERIFYING",
+        status="verifying",
+        detail="Linux Skill draft identity and recording provenance verified",
+        metadata={"agentic_progress": "VALIDATING", "recording_id": recording_id},
+    )
+    runtime = runtime_service.transition(
+        runtime["execution_id"],
+        "COMPLETED",
+        status="verified_complete",
+        detail="recording transfer and Linux Skill draft creation completed",
+        completion={"ok": True, "status": "verified_complete"},
+        handoff={"status": "skill_annotation_ready"},
+        metadata={"agentic_progress": "READY", "recording_id": recording_id},
+    )
+    return _equipment_skill_success(
+        {
+            **package,
+            "transfer": {
+                "recording_id": recording_id,
+                "source_worker": req.bridge_id,
+                "fallback_used": False,
+            },
+            "equipment_runtime_execution": runtime,
+            "equipment_runtime_projection": EquipmentRuntimeService.project(runtime),
+        }
+    )
+
+
+@app.get("/api/equipment/skills/{skill_id}/{version}")
+async def get_equipment_skill(skill_id: str, version: str) -> dict[str, Any]:
+    try:
+        return _equipment_skill_registry().get(skill_id, version)
+    except SkillContractError as exc:
+        raise _skill_contract_http_error(exc) from exc
+
+
+@app.get("/api/equipment/skills/{skill_id}/{version}/workflow")
+async def get_equipment_skill_workflow(skill_id: str, version: str) -> dict[str, Any]:
+    try:
+        package = _equipment_skill_registry().get(skill_id, version)
+    except SkillContractError as exc:
+        raise _skill_contract_http_error(exc) from exc
+    manifest = package["manifest"]
+    return {
+        "ok": True,
+        "manifest": manifest,
+        "workflow": package["workflow"],
+        "annotations": package["annotations"],
+        "workflow_sha256": str(manifest.get("workflow_sha256") or ""),
+        "editable": str(manifest.get("lifecycle") or "") not in {"deployed", "disabled"},
+    }
+
+
+@app.post("/api/equipment/skills/{skill_id}/{version}/workflow/check")
+async def post_equipment_skill_workflow_check(
+    skill_id: str,
+    version: str,
+    req: EquipmentSkillWorkflowCheckRequest,
+) -> dict[str, Any]:
+    try:
+        package = _equipment_skill_registry().get(skill_id, version)
+    except SkillContractError as exc:
+        raise _skill_contract_http_error(exc) from exc
+    workflow = dict(req.workflow)
+    if workflow.get("skill_id") != package["manifest"].get("skill_id") or workflow.get("version") != package["manifest"].get("version"):
+        raise _skill_contract_http_error(SkillContractError("workflow identity does not match exact Skill version"))
+    return validate_editable_workflow(workflow)
+
+
+@app.put("/api/equipment/skills/{skill_id}/{version}/workflow")
+async def put_equipment_skill_workflow(
+    skill_id: str,
+    version: str,
+    req: EquipmentSkillWorkflowUpdateRequest,
+) -> dict[str, Any]:
+    try:
+        package = _equipment_skill_registry().update_workflow(
+            skill_id,
+            version,
+            dict(req.workflow),
+            expected_workflow_sha256=req.expected_workflow_sha256,
+        )
+    except SkillContractError as exc:
+        raise _skill_contract_http_error(exc) from exc
+    return _equipment_skill_success(package)
+
+
+@app.post("/api/equipment/skills/{skill_id}/{version}/workflow/steps/{step_id}/test")
+async def post_equipment_skill_workflow_step_test(
+    skill_id: str,
+    version: str,
+    step_id: str,
+    req: EquipmentSkillWorkflowStepTestRequest,
+) -> dict[str, Any]:
+    if req.confirm_execute is not True:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "ok": False,
+                "failure_code": "SKILL_STEP_TEST_CONFIRMATION_REQUIRED",
+                "message": "Single-step live test requires explicit confirmation.",
+            },
+        )
+    try:
+        package = _equipment_skill_registry().get(skill_id, version)
+    except SkillContractError as exc:
+        raise _skill_contract_http_error(exc) from exc
+    step = next(
+        (
+            item
+            for item in package["workflow"].get("steps", [])
+            if isinstance(item, dict) and str(item.get("step_id") or "") == step_id
+        ),
+        None,
+    )
+    if not isinstance(step, dict) or not isinstance(step.get("action"), dict):
+        raise HTTPException(
+            status_code=404,
+            detail={"ok": False, "failure_code": "SKILL_STEP_NOT_FOUND", "message": step_id},
+        )
+    checked = validate_editable_workflow(
+        {**package["workflow"], "steps": [step], "program_ids": []},
+        locator_root=None,
+    )
+    if not checked["ok"]:
+        raise HTTPException(
+            status_code=400,
+            detail={"ok": False, "failure_code": "SKILL_STEP_INVALID", "issues": checked["issues"]},
+        )
+    result = _equipment_bridge().run(
+        {
+            "bridge_id": req.bridge_id,
+            "force_live_bridge": True,
+            "confirm_execute": True,
+            "run_id": f"skill-step-test-{skill_id}-{version}",
+            "specimen_id": step_id,
+            "sequence": [copy.deepcopy(step["action"])],
+        }
+    )
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "ok": False,
+                "failure_code": str(result.get("failure_code") or "SKILL_STEP_TEST_FAILED"),
+                "message": str(result.get("message") or "Single-step test failed."),
+                "result": result,
+            },
+        )
+    return {"ok": True, "step_id": step_id, "result": result}
+
+
+def _equipment_skill_locator_source(skill_id: str, version: str, step_id: str) -> dict[str, Any]:
+    registry = _equipment_skill_registry()
+    try:
+        package = registry.get(skill_id, version)
+        package["recording"] = registry.get_recording(skill_id, version)
+    except SkillContractError as exc:
+        raise _skill_contract_http_error(exc) from exc
+    source = resolve_visual_locator_source(
+        package,
+        step_id,
+        allowed_roots=[(RUNTIME_PATHS.artifact_root / "equipment")],
+    )
+    if source is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "ok": False,
+                "failure_code": "SKILL_LOCATOR_SOURCE_UNAVAILABLE",
+                "message": "The verified pre-action source frame is unavailable for this step.",
+            },
+        )
+    return source
+
+
+@app.get("/api/equipment/skills/{skill_id}/{version}/workflow/steps/{step_id}/locator-source")
+async def get_equipment_skill_workflow_locator_source(
+    skill_id: str,
+    version: str,
+    step_id: str,
+) -> dict[str, Any]:
+    source = _equipment_skill_locator_source(skill_id, version, step_id)
+    return {
+        "ok": True,
+        "step_id": step_id,
+        "locator_id": source["locator_id"],
+        "source_size": source["source_size"],
+        "source_sha256": source["source_sha256"],
+        "target_bbox_norm": source["target_bbox_norm"],
+        "ai_target_bbox_norm": source["ai_target_bbox_norm"],
+        "image_url": (
+            f"/api/equipment/skills/{quote(skill_id, safe='')}/{quote(version, safe='')}"
+            f"/workflow/steps/{quote(step_id, safe='')}/locator-source/image"
+        ),
+    }
+
+
+@app.get("/api/equipment/skills/{skill_id}/{version}/workflow/steps/{step_id}/locator-source/image")
+async def get_equipment_skill_workflow_locator_source_image(
+    skill_id: str,
+    version: str,
+    step_id: str,
+) -> Response:
+    source = _equipment_skill_locator_source(skill_id, version, step_id)
+    return Response(
+        content=source["raw"],
+        media_type=source["media_type"],
+        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
+    )
+
+
+@app.post("/api/equipment/skills/drafts")
+async def post_equipment_skill_draft(req: EquipmentSkillDraftRequest) -> dict[str, Any]:
+    try:
+        return _equipment_skill_success(
+            _equipment_skill_registry().create_draft(
+                recording=dict(req.recording),
+                skill_id=req.skill_id,
+                version=req.version,
+                target_profile=req.target_profile,
+                model_snapshot=_equipment_skill_model_snapshot(),
+            )
+        )
+    except SkillContractError as exc:
+        raise _skill_contract_http_error(exc) from exc
+
+
+@app.post("/api/equipment/skills/{skill_id}/{version}/annotate")
+async def post_equipment_skill_annotation(
+    skill_id: str,
+    version: str,
+    req: EquipmentSkillAnnotationRequest,
+) -> dict[str, Any]:
+    registry = _equipment_skill_registry()
+    try:
+        package = registry.get(skill_id, version)
+        annotations = dict(req.annotations)
+        snapshot = _equipment_skill_model_snapshot()
+        if req.use_model:
+            try:
+                annotations, snapshot = await _annotate_equipment_skill_with_selected_model(package)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "ok": False,
+                        "failure_code": "SKILL_SELECTED_MODEL_UNAVAILABLE",
+                        "message": str(exc),
+                        "fallback_used": False,
+                        "model_snapshot": snapshot,
+                    },
+                ) from exc
+        return _equipment_skill_success(registry.annotate(skill_id, version, annotations, model_snapshot=snapshot))
+    except SkillContractError as exc:
+        raise _skill_contract_http_error(exc) from exc
+
+
+@app.post("/api/equipment/skills/{skill_id}/{version}/compile")
+async def post_equipment_skill_compile(skill_id: str, version: str) -> dict[str, Any]:
+    try:
+        return _equipment_skill_success(_equipment_skill_registry().compile(skill_id, version))
+    except SkillContractError as exc:
+        raise _skill_contract_http_error(exc) from exc
+
+
+@app.post("/api/equipment/skills/{skill_id}/{version}/validate")
+async def post_equipment_skill_validate(skill_id: str, version: str) -> dict[str, Any]:
+    try:
+        return _equipment_skill_registry().validate(skill_id, version)
+    except SkillContractError as exc:
+        raise _skill_contract_http_error(exc) from exc
+
+
+def _execute_equipment_skill_deployment(
+    skill_id: str,
+    version: str,
+    req: EquipmentSkillDeploymentRequest,
+    *,
+    progress_callback: Any = None,
+    stop_requested: Any = None,
+) -> dict[str, Any]:
+    registry = _equipment_skill_registry()
+    try:
+        if callable(progress_callback):
+            progress_callback("COMPILING", 10, "Compiling saved Skill workflow")
+        package = registry.compile(skill_id, version)
+        if callable(stop_requested) and stop_requested():
+            raise _EquipmentSkillDeploymentStopped("Skill deployment stopped after compile")
+        if callable(progress_callback):
+            progress_callback("VALIDATING", 25, "Validating exact compiled Skill package")
+        package = registry.validate(skill_id, version)["package"]
+        if callable(stop_requested) and stop_requested():
+            raise _EquipmentSkillDeploymentStopped("Skill deployment stopped after validation")
+        programs = [dict(item) for item in package.get("programs", []) if isinstance(item, dict)]
+        if not programs:
+            raise SkillContractError("Skill has no compiled programs to deploy")
+        expected_hashes = {str(item.get("program_id") or ""): canonical_sha256(item) for item in programs}
+        deployment_digest = canonical_sha256(expected_hashes)
+        if callable(progress_callback):
+            progress_callback("PACKAGING", 35, f"Prepared {len(programs)} exact program segment(s)")
+        if req.deployment_sha256 and req.deployment_sha256.lower() != deployment_digest:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "ok": False,
+                    "failure_code": "SKILL_DEPLOYMENT_HASH_MISMATCH",
+                    "message": "Requested deployment hash does not match the validated Skill package.",
+                    "expected_sha256": deployment_digest,
+                },
+            )
+        runtime_service = _equipment_runtime_service()
+        runtime_execution = runtime_service.begin(
+            sequence_id=f"skill-deploy-{skill_id}-{version}-{deployment_digest[:12]}",
+            run_id=f"skill-deploy-{skill_id}-{version}",
+            experiment_id="equipment-skill-deployment",
+            specimen_id="skill-package",
+            profile_id=str(package["manifest"].get("target_profile") or "generic_equipment"),
+            mode="live",
+            worker={"worker_id": req.bridge_id, "kind": "windows_pyautogui"},
+            execution_ref={"type": "skill", "skill_id": skill_id, "version": version, "operation": "deploy"},
+            metadata={
+                "operation": "deploy",
+                "deployment": {
+                    "bridge_id": req.bridge_id,
+                    "sha256": deployment_digest,
+                    "program_sha256": expected_hashes,
+                },
+            },
+        )
+        if runtime_execution.get("lifecycle") == "RESOLVING":
+            runtime_execution = runtime_service.transition(
+                runtime_execution["execution_id"],
+                "PREFLIGHT",
+                status="preflight",
+                detail="validated Skill package and exact deployment hashes accepted",
+            )
+            runtime_execution = runtime_service.transition(
+                runtime_execution["execution_id"],
+                "EXECUTING",
+                status="deploying",
+                detail=f"registering {len(programs)} deterministic program segment(s)",
+            )
+        bridge = _equipment_bridge()
+        registered: list[str] = []
+        for index, program in enumerate(programs, start=1):
+            if callable(stop_requested) and stop_requested():
+                for registered_id in reversed(registered):
+                    bridge.delete_program(
+                        {
+                            "program_id": registered_id,
+                            "bridge_id": req.bridge_id,
+                            "force_live_bridge": True,
+                        }
+                    )
+                runtime_service.transition(
+                    runtime_execution["execution_id"],
+                    "ABORTED",
+                    status="stopped",
+                    detail="Skill deployment stopped at a program boundary",
+                    completion={"ok": False, "status": "stopped"},
+                )
+                raise _EquipmentSkillDeploymentStopped("Skill deployment stopped before the next program segment")
+            program_id = str(program.get("program_id") or "")
+            if callable(progress_callback):
+                progress_callback(
+                    "REGISTERING",
+                    35 + int((index - 1) * 50 / max(1, len(programs))),
+                    f"Registering program segment {index}/{len(programs)}",
+                )
+            result = bridge.register_program(
+                {"program": program, "bridge_id": req.bridge_id, "force_live_bridge": True}
+            )
+            actual_hash = str(result.get("program_sha256") or "").lower()
+            if not result.get("ok") or actual_hash != expected_hashes.get(program_id):
+                for registered_id in reversed(registered):
+                    bridge.delete_program(
+                        {
+                            "program_id": registered_id,
+                            "bridge_id": req.bridge_id,
+                            "force_live_bridge": True,
+                        }
+                    )
+                runtime_service.transition(
+                    runtime_execution["execution_id"],
+                    "BLOCKED",
+                    status="blocked",
+                    detail=str(result.get("message") or f"Bridge rejected exact program {program_id}."),
+                    failure={
+                        "failure_code": "SKILL_DEPLOYMENT_HASH_MISMATCH"
+                        if result.get("ok")
+                        else "SKILL_BRIDGE_REGISTRATION_FAILED",
+                        "program_id": program_id,
+                    },
+                    completion={"ok": False, "status": "blocked"},
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "ok": False,
+                        "failure_code": "SKILL_DEPLOYMENT_HASH_MISMATCH"
+                        if result.get("ok")
+                        else "SKILL_BRIDGE_REGISTRATION_FAILED",
+                        "message": str(result.get("message") or f"Bridge rejected exact program {program_id}."),
+                        "program_id": program_id,
+                        "expected_sha256": expected_hashes.get(program_id),
+                        "actual_sha256": actual_hash,
+                    },
+                )
+            registered.append(program_id)
+            if callable(progress_callback):
+                progress_callback(
+                    "REGISTERING",
+                    35 + int(index * 50 / max(1, len(programs))),
+                    f"Registered program segment {index}/{len(programs)}",
+                )
+        if callable(progress_callback):
+            progress_callback("VERIFYING", 90, "Verifying Worker hashes against the validated Skill")
+        runtime_execution = runtime_service.transition(
+            runtime_execution["execution_id"],
+            "VERIFYING",
+            status="verifying",
+            detail="worker hashes match the validated Skill package",
+            evidence=[
+                {"kind": "deployed_program", "program_id": program_id, "sha256": expected_hashes[program_id]}
+                for program_id in registered
+            ],
+        )
+        deployed = registry.mark_deployed(
+            skill_id,
+            version,
+            bridge_id=req.bridge_id,
+            deployment_sha256=deployment_digest,
+            program_sha256=expected_hashes,
+        )
+        runtime_execution = runtime_service.transition(
+            runtime_execution["execution_id"],
+            "COMPLETED",
+            status="verified_complete",
+            detail="validated Skill programs deployed with exact hashes",
+            completion={"ok": True, "status": "verified_complete"},
+            handoff={"status": "deployment_ready", "worker_id": req.bridge_id},
+            metadata={
+                **dict(runtime_execution.get("metadata") or {}),
+                "deployment": dict(deployed["manifest"]["deployment"]),
+            },
+        )
+        if callable(progress_callback):
+            progress_callback("DEPLOYED", 100, "Validated Skill deployed with exact Worker hashes")
+        return _equipment_skill_success(
+            {
+                **deployed,
+                "equipment_runtime_execution": runtime_execution,
+                "equipment_runtime_projection": EquipmentRuntimeService.project(runtime_execution),
+            }
+        )
+    except SkillContractError as exc:
+        raise _skill_contract_http_error(exc) from exc
+
+
+@app.post("/api/equipment/skills/{skill_id}/{version}/deploy")
+async def post_equipment_skill_deploy(
+    skill_id: str,
+    version: str,
+    req: EquipmentSkillDeploymentRequest,
+) -> dict[str, Any]:
+    return _execute_equipment_skill_deployment(skill_id, version, req)
+
+
+@app.post("/api/equipment/skills/{skill_id}/{version}/enabled")
+async def post_equipment_skill_enabled(
+    skill_id: str,
+    version: str,
+    req: EquipmentSkillEnabledRequest,
+) -> dict[str, Any]:
+    try:
+        return _equipment_skill_success(_equipment_skill_registry().set_enabled(skill_id, version, req.enabled))
+    except SkillContractError as exc:
+        raise _skill_contract_http_error(exc) from exc
+
+
+@app.post("/api/equipment/skills/{skill_id}/{version}/test")
+async def post_equipment_skill_test(
+    skill_id: str,
+    version: str,
+    req: EquipmentSkillTestRequest,
+) -> dict[str, Any]:
+    registry = _equipment_skill_registry()
+    try:
+        package = registry.get(skill_id, version)
+        manifest = package["manifest"]
+        if manifest.get("lifecycle") != "deployed" or manifest.get("enabled") is False:
+            raise SkillContractError("exact Skill version must be deployed and enabled before test")
+        runtime_mode = str(req.runtime_mode or "dry_run").strip().lower()
+        is_raw_csv_skill = skill_id == "utm_save_raw_data"
+        if is_raw_csv_skill:
+            if req.export_context is None:
+                raise HTTPException(status_code=422, detail="utm_save_raw_data requires export_context")
+            if req.export_context.mode != runtime_mode:
+                raise HTTPException(status_code=422, detail="export_context.mode must match runtime_mode")
+            if runtime_mode in {"test", "live"} and not req.confirm_execute:
+                raise HTTPException(status_code=422, detail=f"{runtime_mode} Raw CSV execution requires confirm_execute=true")
+        elif runtime_mode == "live" and not req.confirm_execute:
+            raise SkillContractError("live Skill test requires confirm_execute=true")
+        bridge = _equipment_bridge()
+        bridge_id = str(package.get("manifest", {}).get("deployment", {}).get("bridge_id") or "")
+        results: list[dict[str, Any]] = []
+        for index, program_id in enumerate(package["workflow"].get("program_ids", []), start=1):
+            execution_payload: dict[str, Any] = {
+                "program_id": str(program_id),
+                "runtime_mode": runtime_mode,
+                "confirm_execute": bool(req.confirm_execute),
+                "bridge_id": bridge_id,
+                "force_live_bridge": True,
+                "sequence_id": f"skill-test-{skill_id}-{version}-{index:03d}",
+            }
+            if is_raw_csv_skill and req.export_context is not None:
+                execution_payload["export_context"] = req.export_context.model_dump()
+            runtime_placeholders = set(re.findall(r"\{([A-Za-z][A-Za-z0-9_]*)\}", json.dumps(package.get("workflow", {}), default=str)))
+            runtime_values = {
+                key: value
+                for key, value in (req.runtime_context or {}).items()
+                if key in runtime_placeholders and isinstance(value, (str, int, float, bool))
+            }
+            if runtime_values:
+                execution_payload["runtime_values"] = runtime_values
+            result = bridge.run(execution_payload)
+            results.append(result)
+            if not result.get("ok"):
+                break
+        ok = bool(results) and all(item.get("ok") for item in results)
+        summary = {
+            "schema": "atr.equipment_skill_test.v1",
+            "ok": ok,
+            "status": "passed" if ok else "failed",
+            "runtime_mode": runtime_mode,
+            "program_results": results,
+            "tested_at": datetime.now(timezone.utc).isoformat(),
+        }
+        registry.record_test(skill_id, version, summary)
+        if not ok:
+            raise HTTPException(status_code=409, detail=summary)
+        return summary
+    except SkillContractError as exc:
+        raise _skill_contract_http_error(exc) from exc
+
+
+@app.delete("/api/equipment/skills/{skill_id}/{version}")
+async def delete_equipment_skill(skill_id: str, version: str) -> dict[str, Any]:
+    registry = _equipment_skill_registry()
+    try:
+        package = registry.get(skill_id, version)
+        if package["manifest"].get("lifecycle") == "deployed":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "ok": False,
+                    "failure_code": "SKILL_DISABLE_REQUIRED",
+                    "message": "deployed Skill must be disabled before deletion",
+                },
+            )
+        bridge = _equipment_bridge()
+        bridge_id = str(package.get("manifest", {}).get("deployment", {}).get("bridge_id") or "")
+        for program_id in package["workflow"].get("program_ids", []):
+            result = bridge.delete_program(
+                {
+                    "program_id": str(program_id),
+                    "bridge_id": bridge_id,
+                    "force_live_bridge": True,
+                }
+            )
+            if not result.get("ok") and result.get("failure_code") != "PYAUTOGUI_PROGRAM_NOT_FOUND":
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "ok": False,
+                        "failure_code": "SKILL_BRIDGE_DELETE_FAILED",
+                        "program_id": str(program_id),
+                        "message": result.get("message") or "Bridge program deletion failed.",
+                    },
+                )
+        return registry.delete(skill_id, version)
+    except SkillContractError as exc:
+        raise _skill_contract_http_error(exc) from exc
+
+
+def _equipment_profile_registry() -> EquipmentProfileRegistry:
+    """Return the common equipment registry used by Workspace and Agent adapters."""
+    return EquipmentProfileRegistry.default()
+
+
+def _equipment_skill_flow_store() -> EquipmentSkillFlowStore:
+    """Return the shared Profile-bound Skill Flow store used by both editors."""
+    return EquipmentSkillFlowStore(EQUIPMENT_SKILL_FLOW_PATH)
+
+
+def _equipment_skill_flow_payload(
+    profile_id: str,
+    *,
+    requested_run_id: str = "",
+    migration_notes_override: list[str] | None = None,
+) -> dict[str, object]:
+    """Return one flow, Runtime IDE projection, catalog, and exact-version readiness."""
+    try:
+        profile = _equipment_profile_registry().get(profile_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    store = _equipment_skill_flow_store()
+    try:
+        flow, migration_notes = store.get_with_migration(profile.profile_id)
+        graph = store.as_runtime_graph(profile.profile_id)
+    except EquipmentSkillFlowError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    skills = _equipment_skill_registry().list()
+    catalog = {
+        (str(item.get("skill_id") or ""), str(item.get("version") or "")): item
+        for item in skills
+        if isinstance(item, dict)
+    }
+    block_readiness: list[dict[str, object]] = []
+    ready = bool(flow.get("blocks"))
+    for block in flow.get("blocks", []):
+        if not isinstance(block, dict):
+            continue
+        skill = block.get("skill") if isinstance(block.get("skill"), dict) else {}
+        key = (str(skill.get("skill_id") or ""), str(skill.get("skill_version") or ""))
+        manifest = catalog.get(key)
+        skill_ok = bool(
+            manifest
+            and manifest.get("lifecycle") == "deployed"
+            and manifest.get("enabled") is not False
+            and str(manifest.get("target_profile") or "") == profile.profile_id
+        )
+        vision = block.get("vision") if isinstance(block.get("vision"), dict) else {}
+        vision_task_id = str(vision.get("task_id") or "")
+        vision_task: dict[str, object] = {}
+        if vision_task_id:
+            try:
+                vision_task = get_equipment_vision_task(vision_task_id)
+            except ValueError:
+                vision_task = {}
+        vision_ok = not bool(vision.get("enabled")) or bool(vision_task)
+        node_ok = skill_ok and vision_ok
+        ready = ready and node_ok
+        block_readiness.append(
+            {
+                "block_id": block.get("id", ""),
+                "task": str((block.get("agentic") or {}).get("task") or block.get("label") or ""),
+                "skill_id": key[0],
+                "skill_version": key[1],
+                "vision_task_id": vision_task_id,
+                "vision_task_label": str(vision_task.get("label") or ""),
+                "ready": node_ok,
+                "reason": (
+                    "deployed"
+                    if node_ok
+                    else "Skill Slot is unbound"
+                    if not key[0] and not key[1]
+                    else "Vision Task is unbound"
+                    if not vision_ok and not vision_task_id
+                    else "selected Vision Task is unavailable"
+                    if not vision_ok
+                    else "exact deployed Skill version is unavailable for this Profile"
+                ),
+            }
+        )
+    execution: dict[str, object] = {}
+    execution_path = EQUIPMENT_SKILL_FLOW_RUNTIME_ROOT / f"{profile.profile_id}.json"
+    if execution_path.exists():
+        try:
+            loaded_execution = json.loads(execution_path.read_text(encoding="utf-8"))
+            if isinstance(loaded_execution, dict):
+                execution_run_id = str(loaded_execution.get("run_id") or "")
+                if not requested_run_id or execution_run_id == requested_run_id:
+                    execution = loaded_execution
+        except (OSError, json.JSONDecodeError):
+            execution = {}
+    completed_nodes = {
+        str(item.get("node_id") or "")
+        for item in execution.get("transitions", [])
+        if isinstance(item, dict)
+    }
+    active_node = str(execution.get("active_node") or "")
+    for node in graph.get("nodes", []):
+        if not isinstance(node, dict):
+            continue
+        node_id = str(node.get("id") or "")
+        node["runtime_status"] = "active" if node_id == active_node else ("completed" if node_id in completed_nodes else "idle")
+    return {
+        "ok": True,
+        "profile_id": profile.profile_id,
+        "flow": flow,
+        "graph": graph,
+        "skills": skills,
+        "vision_tasks": list_equipment_vision_tasks(),
+        "agentic_tasks": list_equipment_agentic_tasks(),
+        "flow_templates": [build_utm_compression_flow_template(profile.profile_id)],
+        "migration_notes": list(migration_notes_override if migration_notes_override is not None else migration_notes),
+        "readiness": {"ready": ready, "blocks": block_readiness},
+        "execution": execution,
+        "workspace_settings": _equipment_profile_workspace_settings(profile),
+    }
+
+
+def _equipment_profile_workspace_settings(profile: EquipmentProfile) -> dict[str, object]:
+    """Return the persisted Profile preferences, falling back to Profile defaults."""
+    stored = _read_workspace_settings(EQUIPMENT_WORKSPACE_SETTINGS_PATH)
+    profiles = stored.get("profiles") if isinstance(stored.get("profiles"), dict) else {}
+    profile_settings = profiles.get(profile.profile_id) if isinstance(profiles.get(profile.profile_id), dict) else {}
+    vision_link = profile.vision_link if isinstance(profile.vision_link, dict) else {}
+    has_stored_selection = "vision_link_enabled" in profile_settings
+    return {
+        "vision_link_enabled": (
+            bool(profile_settings.get("vision_link_enabled"))
+            if has_stored_selection
+            else bool(vision_link.get("enabled"))
+        ),
+        "vision_link_source": "stored" if has_stored_selection else "profile_default",
+    }
+
+
+def _write_equipment_profile_workspace_settings(
+    profile: EquipmentProfile,
+    *,
+    vision_link_enabled: bool,
+) -> dict[str, object]:
+    """Persist one Profile's operator preferences without changing its safety contract."""
+    stored = _read_workspace_settings(EQUIPMENT_WORKSPACE_SETTINGS_PATH)
+    profiles = stored.get("profiles") if isinstance(stored.get("profiles"), dict) else {}
+    profiles = dict(profiles)
+    profiles[profile.profile_id] = {"vision_link_enabled": bool(vision_link_enabled)}
+    _write_workspace_settings(
+        EQUIPMENT_WORKSPACE_SETTINGS_PATH,
+        {
+            "schema": "atr.equipment_workspace_settings.v1",
+            "profiles": profiles,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    return _equipment_profile_workspace_settings(profile)
+
+
+def _equipment_profile_state(profile_id: str) -> dict[str, object]:
+    """Build token-safe state for one selected common equipment profile."""
+    try:
+        profile = _equipment_profile_registry().get(profile_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    bridge = _equipment_bridge()
+    connection = bridge.connection_status()
+    readiness = _windows_utm_readiness_from_bridge(bridge)
+    profile_status = bridge.utm_profile_status()
+    return {
+        "ok": True,
+        "profile": profile.to_safe_dict(),
+        "connection": {
+            "selected_candidate": connection.get("selected_candidate", ""),
+            "selected": bool(connection.get("selected")),
+            "token_configured": bool(connection.get("token_configured")),
+            "status": str(connection.get("status") or "unknown"),
+        },
+        "readiness": readiness,
+        "programs": bridge.list_programs({"runtime_mode": "test"}).get("programs", []),
+        "utm_profile": profile_status,
+        "evidence": controller._state.run_metadata.get("last_windows_utm_protocol_result", {}),
+        "workspace_settings": _equipment_profile_workspace_settings(profile),
+    }
+
+
+@app.get("/api/equipment/profiles")
+async def get_equipment_profiles() -> dict[str, object]:
+    """List registered equipment profiles without exposing bridge secrets."""
+    registry = _equipment_profile_registry()
+    return {
+        "ok": True,
+        "selected_profile_id": DEFAULT_UTM_PROFILE_ID,
+        "profiles": [profile.to_safe_dict() for profile in registry.list()],
+    }
+
+
+@app.get("/api/equipment/profiles/{profile_id}/state")
+async def get_equipment_profile_state(profile_id: str) -> dict[str, object]:
+    """Return selected profile connection, readiness, programs, and evidence."""
+    return _equipment_profile_state(profile_id)
+
+
+@app.post("/api/equipment/profiles/{profile_id}/settings")
+async def post_equipment_profile_settings(
+    profile_id: str,
+    req: EquipmentProfileSettingsRequest,
+) -> dict[str, object]:
+    """Persist operator preferences for a registered equipment Profile."""
+    try:
+        profile = _equipment_profile_registry().get(profile_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "profile_id": profile.profile_id,
+        "workspace_settings": _write_equipment_profile_workspace_settings(
+            profile,
+            vision_link_enabled=req.vision_link_enabled,
+        ),
+    }
+
+
+@app.get("/api/equipment/profiles/{profile_id}/skill-flow")
+async def get_equipment_profile_skill_flow(
+    profile_id: str,
+    run_id: str = "",
+) -> dict[str, object]:
+    """Return the canonical Skill Flow shared by Equipment Workspace and Runtime IDE."""
+    return _equipment_skill_flow_payload(profile_id, requested_run_id=run_id)
+
+
+@app.put("/api/equipment/profiles/{profile_id}/skill-flow")
+async def put_equipment_profile_skill_flow(
+    profile_id: str,
+    req: EquipmentSkillFlowSaveRequest,
+) -> dict[str, object]:
+    """Validate and atomically save one Profile-bound Skill Flow."""
+    migration_notes: list[str] = []
+    try:
+        profile = _equipment_profile_registry().get(profile_id)
+        normalized = normalize_equipment_skill_flow(
+            profile.profile_id,
+            req.flow,
+            migration_notes=migration_notes,
+        )
+        catalog = {
+            (str(item.get("skill_id") or ""), str(item.get("version") or "")): item
+            for item in _equipment_skill_registry().list()
+            if isinstance(item, dict)
+        }
+        unavailable: list[str] = []
+        for block in normalized.get("blocks", []):
+            skill = block.get("skill") if isinstance(block.get("skill"), dict) else {}
+            key = (str(skill.get("skill_id") or ""), str(skill.get("skill_version") or ""))
+            if not key[0] and not key[1]:
+                continue
+            manifest = catalog.get(key)
+            if not (
+                manifest
+                and manifest.get("lifecycle") == "deployed"
+                and manifest.get("enabled") is not False
+                and str(manifest.get("target_profile") or "") == profile.profile_id
+            ):
+                unavailable.append(f"{key[0]}@{key[1]}")
+        if unavailable:
+            raise EquipmentSkillFlowError(
+                "exact deployed Skill version is unavailable for this Profile: " + ", ".join(unavailable)
+            )
+        _equipment_skill_flow_store().save(profile_id, normalized)
+    except EquipmentSkillFlowError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _equipment_skill_flow_payload(profile_id, migration_notes_override=migration_notes)
+
+
+@app.get("/api/modules/equipment/equipment-skill-flow")
+async def get_runtime_equipment_skill_flow(profile_id: str = DEFAULT_UTM_PROFILE_ID) -> dict[str, object]:
+    """Expose the same Equipment Skill Flow through the Runtime IDE module namespace."""
+    return _equipment_skill_flow_payload(profile_id)
+
+
+@app.put("/api/modules/equipment/equipment-skill-flow")
+async def put_runtime_equipment_skill_flow(
+    req: EquipmentSkillFlowSaveRequest,
+    profile_id: str = DEFAULT_UTM_PROFILE_ID,
+) -> dict[str, object]:
+    """Save the canonical flow from the Runtime IDE equipment-module editor."""
+    return await put_equipment_profile_skill_flow(profile_id, req)
+
+
+def _equipment_vision_link_request(
+    profile: EquipmentProfile,
+    *,
+    runtime_mode: str,
+    requested: bool | None,
+) -> dict[str, bool]:
+    """Resolve one UI request without weakening a Profile-required Vision gate."""
+    vision_link = profile.vision_link if isinstance(profile.vision_link, dict) else {}
+    profile_enabled = bool(vision_link.get("enabled"))
+    required_modes = {
+        str(mode).strip().lower()
+        for mode in vision_link.get("required_modes", [])
+        if str(mode).strip()
+    }
+    required = str(runtime_mode or "").strip().lower() in required_modes
+    requested_value = profile_enabled if requested is None else bool(requested)
+    return {
+        "requested": requested_value,
+        "profile_enabled": profile_enabled,
+        "required": required,
+        "effective": profile_enabled and (required or requested_value),
+    }
+
+
+@app.post("/api/equipment/profiles/{profile_id}/preflight")
+async def post_equipment_profile_preflight(profile_id: str, req: EquipmentProfileActionRequest) -> dict[str, object]:
+    """Run non-actuating profile readiness checks only."""
+    try:
+        profile = _equipment_profile_registry().get(profile_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    state = _equipment_profile_state(profile_id)
+    workspace_settings = state["workspace_settings"] if isinstance(state.get("workspace_settings"), dict) else {}
+    state["action"] = "preflight"
+    state["non_actuating"] = True
+    state["vision_link_request"] = _equipment_vision_link_request(
+        profile,
+        runtime_mode="test",
+        requested=(
+            req.vision_link_enabled
+            if req.vision_link_enabled is not None
+            else bool(workspace_settings.get("vision_link_enabled"))
+        ),
+    )
+    return state
+
+
+@app.get("/api/equipment/profiles/{profile_id}/agentic-run")
+async def get_equipment_profile_agentic_run(profile_id: str) -> dict[str, object]:
+    """Advertise the server-authoritative runner without executing equipment."""
+    try:
+        _equipment_profile_registry().get(profile_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"ok": True, "available": True, "non_actuating": True, "profile_id": profile_id}
+
+
+def _reset_equipment_agentic_progress(profile_id: str) -> bool:
+    """Archive the latest projection so the GUI returns to an empty progress state."""
+    execution_path = EQUIPMENT_SKILL_FLOW_RUNTIME_ROOT / f"{profile_id}.json"
+    if not execution_path.exists():
+        return True
+    archive_root = EQUIPMENT_SKILL_FLOW_RUNTIME_ROOT.parent / "equipment_skill_flow_archive"
+    archive_root.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    archive_path = archive_root / f"{profile_id}.{timestamp}.{uuid.uuid4().hex[:8]}.json"
+    execution_path.replace(archive_path)
+    return not execution_path.exists()
+
+
+@app.post("/api/equipment/profiles/{profile_id}/agentic-run")
+async def post_equipment_profile_agentic_run(
+    profile_id: str,
+    req: EquipmentAgenticRunRequest,
+) -> dict[str, object]:
+    """Run only the enabled registered Skill Flow through the canonical Lab Equipment Agent."""
+    if not req.confirm_execute:
+        raise HTTPException(status_code=422, detail="confirm_execute=true is required for live Agentic Progress")
+    try:
+        _equipment_profile_registry().get(profile_id)
+        flow = _equipment_skill_flow_store().get(profile_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except EquipmentSkillFlowError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if flow.get("enabled") is False:
+        raise HTTPException(status_code=409, detail="registered Agentic Skill Flow is disabled")
+
+    with _EQUIPMENT_AGENTIC_RUN_GUARD:
+        if profile_id in _EQUIPMENT_AGENTIC_ACTIVE_PROFILES:
+            raise HTTPException(status_code=409, detail="an Agentic Progress run is already active for this profile")
+        cancel_event = threading.Event()
+        _EQUIPMENT_AGENTIC_ACTIVE_PROFILES.add(profile_id)
+        _EQUIPMENT_AGENTIC_CANCEL_EVENTS[profile_id] = cancel_event
+        _EQUIPMENT_AGENTIC_RESET_PROFILES.discard(profile_id)
+
+    try:
+        state = copy.deepcopy(controller._state)
+        state.mode = Mode.LIVE
+        state.stage = Stage.EQUIPMENT
+        state.current_experiment_spec = dict(state.current_experiment_spec or {})
+        for test_flag in (
+            "test_mode_autofill",
+            "test_mode_llm_generated",
+            "test_printer_path",
+            "printer_test_path",
+            "printer_bridge_mode",
+            "printer_test_mode",
+        ):
+            state.current_experiment_spec.pop(test_flag, None)
+        state.current_experiment_spec["equipment_profile_id"] = profile_id
+        state.current_experiment_spec["equipment_agentic_confirm_execute"] = True
+        result = await LabEquipmentAgent()._run_equipment_skill_flow(
+            state,
+            controller._deps.agent_context,
+            flow,
+            cancel_requested=cancel_event.is_set,
+            require_entry_handoff=False,
+        )
+        payload = {"ok": bool(result.success), "summary": result.summary, "data": result.data}
+        await controller.emit_workspace_result(
+            workspace="equipment",
+            tool="equipment_agent.run_registered_skill_flow",
+            result=payload,
+            stage=Stage.EQUIPMENT,
+            module_id="equipment",
+            agent="equipment_agent",
+            workflow="registered_agentic_progress_run",
+            node_event=True,
+        )
+        return payload
+    finally:
+        with _EQUIPMENT_AGENTIC_RUN_GUARD:
+            _EQUIPMENT_AGENTIC_ACTIVE_PROFILES.discard(profile_id)
+            _EQUIPMENT_AGENTIC_CANCEL_EVENTS.pop(profile_id, None)
+            _EQUIPMENT_AGENTIC_RESET_PROFILES.discard(profile_id)
+        _reset_equipment_agentic_progress(profile_id)
+
+
+@app.post("/api/equipment/profiles/{profile_id}/agentic-run/cancel")
+async def post_equipment_profile_agentic_run_cancel(profile_id: str) -> dict[str, object]:
+    """Stop the active UTM action, cancel future Skill dispatch, and reset progress."""
+    try:
+        _equipment_profile_registry().get(profile_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    with _EQUIPMENT_AGENTIC_RUN_GUARD:
+        event = _EQUIPMENT_AGENTIC_CANCEL_EVENTS.get(profile_id)
+        reset_pending = profile_id in _EQUIPMENT_AGENTIC_ACTIVE_PROFILES
+        if event is not None:
+            event.set()
+        if reset_pending:
+            _EQUIPMENT_AGENTIC_RESET_PROFILES.add(profile_id)
+    physical_stop: dict[str, object] = {}
+    if reset_pending and profile_id == DEFAULT_UTM_PROFILE_ID:
+        specimen_id = str(
+            controller._state.current_experiment_spec.get("specimen_id")
+            or "specimen-stop"
+        )
+        physical_stop = await asyncio.to_thread(
+            _equipment_bridge().run,
+            {
+                "runtime_mode": "live",
+                "force_live_bridge": True,
+                "confirm_setup_gui_execute": True,
+                "sequence_id": f"agentic-stop-{profile_id}",
+                "run_id": controller._state.run_id,
+                "specimen_id": specimen_id,
+                "program_id": "utm_stop_or_abort_v1",
+                "command": "Stop active Agentic UTM run",
+                "require_screen_assertions": False,
+                "simulate_utm_protocol": False,
+            },
+        )
+    progress_reset = _reset_equipment_agentic_progress(profile_id)
+    stop_failed = bool(physical_stop) and physical_stop.get("ok") is not True
+    return {
+        "ok": not stop_failed,
+        "profile_id": profile_id,
+        "cancel_requested": event is not None,
+        "progress_reset": progress_reset,
+        "reset_pending": reset_pending,
+        "physical_stop": physical_stop,
+        "status": "stop_failed" if stop_failed else "idle",
+    }
+
+
+@app.post("/api/equipment/profiles/{profile_id}/test")
+async def post_equipment_profile_test(profile_id: str, req: EquipmentProfileActionRequest) -> dict[str, object]:
+    """Run a registered profile through the existing bridge simulation contract."""
+    if not req.confirm_execute:
+        raise HTTPException(status_code=400, detail="confirm_execute=true is required for equipment profile tests")
+    try:
+        profile = _equipment_profile_registry().get(profile_id)
+        contract = build_execution_contract(
+            profile,
+            runtime_mode="test",
+            bridge_config={},
+            program_id=req.program_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404 if profile_id != DEFAULT_UTM_PROFILE_ID else 400, detail=str(exc)) from exc
+    bridge = _equipment_bridge()
+    workspace_settings = _equipment_profile_workspace_settings(profile)
+    vision_link_request = _equipment_vision_link_request(
+        profile,
+        runtime_mode="test",
+        requested=(
+            req.vision_link_enabled
+            if req.vision_link_enabled is not None
+            else bool(workspace_settings.get("vision_link_enabled"))
+        ),
+    )
+    payload: dict[str, object] = {
+        "runtime_mode": "test",
+        "run_id": controller._state.run_id,
+        "sequence_id": f"equipment-profile-test-{profile_id}",
+        "specimen_id": str(controller._state.current_experiment_spec.get("specimen_id") or "specimen-test"),
+        "program_id": contract.program_id,
+        "simulate_utm_protocol": contract.simulate_utm_protocol,
+        "confirm_setup_gui_execute": True,
+        "command": f"{profile.label} simulated protocol test",
+        "vision_link_enabled": vision_link_request["effective"],
+        "vision_link_request": vision_link_request,
+    }
+    result = bridge.run(payload)
+    screenshot_result = bridge.screenshot(
+        {
+            "runtime_mode": "test",
+            "run_id": controller._state.run_id,
+            "checkpoint": f"{profile_id}_protocol_test",
+        }
+    ) if req.include_screenshot else {}
+    request_log = bridge.request_log({"runtime_mode": "test"})
+    screenshot_artifact = screenshot_result.get("artifact") if isinstance(screenshot_result.get("artifact"), dict) else {}
+    evidence = {
+        "screenshot": (
+            result.get("screenshot_path")
+            or result.get("screen_evidence_path")
+            or screenshot_result.get("screenshot_path")
+            or screenshot_result.get("path")
+            or screenshot_result.get("artifact_path")
+            or screenshot_artifact.get("local_path")
+            or screenshot_artifact.get("path")
+            or ""
+        ),
+        "request_log": request_log.get("request_log") or request_log.get("path") or "",
+        "csv": result.get("csv_path") or result.get("utm_csv_path") or result.get("result_file") or "",
+    }
+    missing = [key for key in contract.required_evidence if not evidence.get(key)]
+    response = {
+        "ok": bool(result.get("ok")) and not missing,
+        "profile": contract.to_safe_dict(),
+        "mode": "test",
+        "simulation": True,
+        "result": result,
+        "screenshot_result": screenshot_result,
+        "evidence": evidence,
+        "vision_link_request": vision_link_request,
+        "analysis_handoff": {"status": "ready" if bool(result.get("ok")) and not missing else "blocked", "missing_evidence": missing},
+    }
+    controller._state.run_metadata["last_windows_utm_protocol_result"] = response
+    await controller.emit_workspace_result(
+        workspace="equipment",
+        tool="equipment.profile.test",
+        result=response,
+        stage=Stage.EQUIPMENT,
+        module_id="equipment",
+        agent="equipment_agent",
+        workflow="equipment_profile_test",
+        node_event=True,
+    )
+    return response
+
+
+@app.get("/api/equipment/windows/config")
+async def get_windows_equipment_config() -> dict[str, object]:
+    """Return saved Windows PyAutoGUI bridge configuration status."""
+    bridge = _equipment_bridge()
+    status = bridge.connection_status()
+    programs = bridge.list_programs({"runtime_mode": "test"})
+    profile = bridge.utm_profile_status()
+    readiness = _windows_utm_readiness_from_bridge(bridge)
+    evidence_audit = _windows_utm_evidence_audit_from_metadata(dict(controller._state.run_metadata), run_id=controller._state.run_id)
+    request_audit = _windows_bridge_request_log_from_bridge(bridge, runtime_mode="test", confirm_live=False)
+    live_validation = controller._state.run_metadata.get("last_windows_utm_live_validation")
+    if not isinstance(live_validation, dict):
+        live_validation = {}
+    completion_audit = controller._state.run_metadata.get("last_windows_utm_completion_audit")
+    if not isinstance(completion_audit, dict):
+        completion_audit = {}
+    vision_proof_draft = controller._state.run_metadata.get("last_windows_utm_vision_proof_draft")
+    if not isinstance(vision_proof_draft, dict):
+        vision_proof_draft = {}
+    return {
+        "ok": True,
+        "connection": status,
+        "programs": programs.get("programs", []),
+        "utm_profile": profile,
+        "utm_readiness": readiness,
+        "utm_evidence_audit": evidence_audit,
+        "utm_live_validation": live_validation,
+        "utm_completion_audit": completion_audit,
+        "utm_vision_proof_draft": vision_proof_draft,
+        "request_audit": request_audit,
+    }
+
+
+@app.get("/api/equipment/windows/readiness")
+async def get_windows_equipment_readiness() -> dict[str, object]:
+    """Return passive UTM readiness gates for the Equipment workspace."""
+    return _windows_utm_readiness_from_bridge(_equipment_bridge())
+
+
+@app.get("/api/equipment/windows/evidence-audit")
+async def get_windows_equipment_evidence_audit() -> dict[str, object]:
+    """Return post-run UTM evidence gates from current runtime metadata."""
+    return _windows_utm_evidence_audit_from_metadata(dict(controller._state.run_metadata), run_id=controller._state.run_id)
+
+
+@app.get("/api/equipment/windows/proof-package")
+async def get_windows_equipment_proof_package() -> dict[str, object]:
+    """Return a consolidated non-actuating proof package for the current Windows UTM run."""
+    bridge = _equipment_bridge()
+    readiness = _windows_utm_readiness_from_bridge(bridge)
+    package = _windows_utm_proof_package_from_metadata(
+        dict(controller._state.run_metadata),
+        run_id=controller._state.run_id,
+        passive_readiness=readiness,
+    )
+    package = _persist_windows_utm_proof_package(package)
+    controller._state.run_metadata["last_windows_utm_proof_package"] = package
+    await controller.emit_workspace_result(
+        workspace="equipment",
+        tool="equipment.pyautogui.live_proof_package",
+        result=package,
+        stage=Stage.EQUIPMENT,
+        module_id="equipment",
+        agent="equipment_agent",
+        workflow="windows_utm_proof_package",
+        node_event=False,
+    )
+    return package
+
+
+@app.post("/api/equipment/windows/proof-package/verify")
+async def post_windows_equipment_verify_proof_package(req: WindowsBridgeProofPackageVerifyRequest) -> dict[str, object]:
+    """Re-verify a persisted Windows UTM proof package and its local artifacts."""
+    package, load_info = _load_windows_utm_proof_package_for_verify(req.path, use_current=req.use_current)
+    result = _verify_windows_utm_proof_package(package, load_info=load_info)
+    controller._state.run_metadata["last_windows_utm_proof_package_verification"] = result
+    await controller.emit_workspace_result(
+        workspace="equipment",
+        tool="equipment.pyautogui.live_proof_package.verify",
+        result=result,
+        stage=Stage.EQUIPMENT,
+        module_id="equipment",
+        agent="equipment_agent",
+        workflow="windows_utm_proof_package_verify",
+        node_event=False,
+    )
+    return result
+
+
+@app.post("/api/equipment/windows/completion-audit")
+async def post_windows_equipment_completion_audit(req: WindowsBridgeCompletionAuditRequest) -> dict[str, object]:
+    """Run the strict final Improvement 05 completion audit against a proof package."""
+    result = _windows_utm_completion_audit(req.path, use_current=req.use_current, latest=req.latest)
+    result = _persist_windows_utm_completion_audit(result)
+    controller._state.run_metadata["last_windows_utm_completion_audit"] = result
+    await controller.emit_workspace_result(
+        workspace="equipment",
+        tool="equipment.pyautogui.improvement05_completion_audit",
+        result=result,
+        stage=Stage.EQUIPMENT,
+        module_id="equipment",
+        agent="equipment_agent",
+        workflow="windows_utm_completion_audit",
+        node_event=False,
+    )
+    return result
+
+
+@app.post("/api/equipment/windows/vision-proof-draft")
+async def post_windows_equipment_vision_proof_draft(req: WindowsBridgeVisionProofDraftRequest) -> dict[str, object]:
+    """Build a non-actuating Vision proof JSON draft from current runtime evidence."""
+    result = _windows_utm_vision_proof_draft(
+        dict(controller._state.run_metadata),
+        observations=dict(controller._state.latest_observations),
+        run_id=req.run_id,
+        specimen_id=req.specimen_id,
+    )
+    controller._state.run_metadata["last_windows_utm_vision_proof_draft"] = result
+    await controller.emit_workspace_result(
+        workspace="equipment",
+        tool="equipment.pyautogui.vision_proof_draft",
+        result=result,
+        stage=Stage.EQUIPMENT,
+        module_id="equipment",
+        agent="equipment_agent",
+        workflow="windows_utm_vision_proof_draft",
+        node_event=False,
+    )
+    return result
+
+
+@app.post("/api/equipment/windows/request-log")
+async def post_windows_equipment_request_log(req: WindowsBridgeRequestLogRequest) -> dict[str, object]:
+    """Return Windows bridge request-audit events for setup/live evidence review."""
+    result = _windows_bridge_request_log_from_bridge(
+        _equipment_bridge(),
+        runtime_mode=req.runtime_mode,
+        confirm_live=req.confirm_live,
+    )
+    await controller.emit_workspace_result(
+        workspace="equipment",
+        tool="equipment.pyautogui.request_log",
+        result=result,
+        stage=Stage.EQUIPMENT,
+        module_id="equipment",
+        agent="equipment_agent",
+        workflow="windows_request_audit",
+        node_event=True,
+    )
+    return result
+
+
+@app.get("/api/printer/status")
+async def get_printer_status(mode: Literal["live", "test"] = "live", emit: bool = False) -> dict[str, object]:
+    """Return selected-printer fleet/device status for GUI display."""
+    manager = _printer_bridge_manager()
+    health = await asyncio.to_thread(
+        manager.prepare,
+        {
+            "runtime_mode": mode,
+            "health_only": True,
+            "status_only": True,
+            "skip_ftps_probe": True,
+        },
+    )
+    connection = _redacted_selected_printer_connection(manager)
+    profile = _selected_print_profile(manager)
+    config = manager.config
+    result = {
+        "ok": bool(health.get("ok")),
+        "tool": "printer.status",
+        "status": health.get("state") or health.get("status") or ("ready" if health.get("ok") else "blocked"),
+        "failure_code": health.get("failure_code", ""),
+        "mode": mode,
+        "provider": health.get("provider", config.default_profile.provider),
+        "selected_printer": health.get("selected_printer", {}),
+        "available_printers": health.get("available_printers", manager.available_printers()),
+        "automatic_fallback": bool(health.get("automatic_fallback", config.allow_automatic_fallback)),
+        "connection": connection,
+        "live_gates": {
+            "allow_status": True,
+            "allow_upload": bool(health.get("device_screen", {}).get("actions", {}).get("can_upload", False)),
+            "allow_start_print": bool(health.get("device_screen", {}).get("actions", {}).get("can_start_print", False)),
+            "allow_ejection": bool(health.get("autoejection", {}).get("enabled", False)),
+        },
+        "auto_ejection": {
+            "enabled": bool(health.get("autoejection", {}).get("enabled", False)),
+            "method": health.get("autoejection", {}).get("provider", "none"),
+            "mode": health.get("autoejection", {}).get("status", "not_configured"),
+        },
+        "slicer": _selected_printer_slicer_payload(manager, _printer_workflow().config),
+        "profile": profile,
+        "profile_path": str(RUNTIME_PATHS.memory_root / "prusa_print_profile.json"),
+        "device_screen": health.get("device_screen", {}),
+        "preprint_gate": health.get("preprint_gate", {}),
+        "operator_actions": health.get("operator_actions", []),
+        "health": health,
+    }
+    if emit:
+        await controller.emit_workspace_result(
+            workspace="printer",
+            tool="printer.status",
+            result=result,
+            stage=Stage.SPECIMEN,
+            module_id="specimen",
+            agent="specimen_agent",
+            workflow="printer_status_monitor",
+            event_type="workspace_monitor_snapshot",
+            mirror_live_message=False,
+        )
+    return result
+
+
+@app.get("/api/printer/video-status")
+async def get_printer_video_status() -> dict[str, object]:
+    """Probe selected Bambu live-view readiness without exposing access-code secrets."""
+    manager = await asyncio.to_thread(_printer_bridge_manager)
+    return _sanitize_bambu_video_payload(await asyncio.to_thread(manager.video_status, {}))
+
+
+def _sanitize_bambu_video_payload(payload: dict[str, object]) -> dict[str, object]:
+    """Remove binary camera frame bytes from JSON API payloads."""
+    safe = dict(payload or {})
+    if "snapshot_bytes" in safe:
+        safe.pop("snapshot_bytes", None)
+    video_status = safe.get("video_status")
+    if isinstance(video_status, dict):
+        safe["video_status"] = {key: value for key, value in video_status.items() if key != "snapshot_bytes"}
+    return safe
+
+
+_BAMBU_VIDEO_PROCESS_LOCK = threading.Lock()
+_BAMBU_VIDEO_STREAM_PROCESSES: set[subprocess.Popen] = set()
+
+
+def _terminate_bambu_video_process(process: subprocess.Popen, *, timeout_sec: float = 2.0) -> None:
+    """Terminate one registered Bambu ffmpeg stream process."""
+    with _BAMBU_VIDEO_PROCESS_LOCK:
+        _BAMBU_VIDEO_STREAM_PROCESSES.discard(process)
+    try:
+        if process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=timeout_sec)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=timeout_sec)
+    except Exception:
+        pass
+
+
+def _is_bambu_mjpeg_ffmpeg_cmdline(cmdline: str) -> bool:
+    """Return true for AX4LAB-created long-lived Bambu MJPEG proxy processes."""
+    return (
+        "ffmpeg" in cmdline
+        and "/streaming/live/1" in cmdline
+        and "mpjpeg" in cmdline
+        and "rtsps://" in cmdline
+    )
+
+
+def _cleanup_orphan_bambu_video_ffmpeg() -> None:
+    """Clean old AX4LAB Bambu video proxies left after browser/server disconnects."""
+    proc_root = Path("/proc")
+    if not proc_root.exists():
+        return
+    current_pid = os.getpid()
+    for cmdline_path in proc_root.glob("[0-9]*/cmdline"):
+        try:
+            pid = int(cmdline_path.parent.name)
+        except ValueError:
+            continue
+        if pid == current_pid:
+            continue
+        try:
+            raw = cmdline_path.read_bytes()
+        except OSError:
+            continue
+        cmdline = raw.replace(b"\x00", b" ").decode("utf-8", errors="replace")
+        if not _is_bambu_mjpeg_ffmpeg_cmdline(cmdline):
+            continue
+        # The original ATR server may be running alongside this checkout.
+        # Never infer ownership from a common camera URL/ffmpeg command alone.
+        try:
+            process_cwd = (cmdline_path.parent / "cwd").resolve(strict=True)
+        except OSError:
+            continue
+        if process_cwd != RUNTIME_PATHS.runtime_root.resolve():
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            continue
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if not (proc_root / str(pid)).exists():
+                break
+            time.sleep(0.05)
+        if (proc_root / str(pid)).exists():
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+
+def _cleanup_bambu_video_stream_processes(*, include_orphans: bool = False) -> None:
+    """Terminate registered Bambu video proxies and optionally old orphan proxies."""
+    with _BAMBU_VIDEO_PROCESS_LOCK:
+        processes = list(_BAMBU_VIDEO_STREAM_PROCESSES)
+    for process in processes:
+        _terminate_bambu_video_process(process)
+    if include_orphans:
+        _cleanup_orphan_bambu_video_ffmpeg()
+
+
+def _selected_bambu_video_connection(manager: PrinterDeviceBridgeManager) -> tuple[str, str]:
+    """Return selected Bambu host/access-code for local video proxy routes."""
+    selected_profile, _reason = manager.fleet_selection()
+    if selected_profile.provider != "bambulab_x2d":
+        raise HTTPException(status_code=400, detail="BAMBU_VIDEO_STREAM_REQUIRES_BAMBU_PROFILE")
+    memory = BambuConnectionMemory(selected_profile.connection_memory_path)
+    raw_connection = memory.load()
+    raw_auth = raw_connection.get("auth") if isinstance(raw_connection.get("auth"), dict) else {}
+    host = str(raw_connection.get("host") or "").strip()
+    access_code = str(raw_auth.get("access_code") or "")
+    if not host or not access_code:
+        raise HTTPException(status_code=400, detail="BAMBU_VIDEO_CONNECTION_INFO_INCOMPLETE")
+    return host, access_code
+
+
+def _bambu_video_config(manager: PrinterDeviceBridgeManager) -> dict:
+    """Prepare decoder configuration without starting it in the control process."""
+    host, access_code = _selected_bambu_video_connection(manager)
+    ffmpeg_path = shutil.which("ffmpeg")
+    if not ffmpeg_path:
+        raise HTTPException(status_code=503, detail="BAMBU_VIDEO_PROXY_FFMPEG_MISSING")
+
+    stream_url = f"rtsps://bblp:{quote(access_code, safe='')}@{host}:{manager.config.video.rtsps_port}/streaming/live/1"
+    command = [
+        ffmpeg_path,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-rtsp_transport",
+        "tcp",
+        "-i",
+        stream_url,
+        "-an",
+        "-vf",
+        "fps=30,scale=960:-1",
+        "-q:v",
+        "5",
+        "-f",
+        "image2pipe",
+        "-vcodec",
+        "mjpeg",
+        "-",
+    ]
+    # LAN RTSPS negotiation + the first keyframe can exceed the old one-shot
+    # six-second budget. Waiting happens off-loop and subsequent reads are warm.
+    return {"command": command, "timeout": max(60.0, float(manager.config.video.timeout_sec) + 3.0)}
+
+
+def _shared_bambu_video(manager: PrinterDeviceBridgeManager):
+    config = _bambu_video_config(manager)
+    return shared_video(config["command"], config["timeout"])
+
+
+def _local_monitor_client(request: Request) -> bool:
+    # A remote browser cannot reach the server's loopback port. Retain its
+    # existing same-origin route, and never expose a controller replica.
+    return (os.environ.get("ATR_MONITOR_WORKERS", "1") != "0"
+            and request.client is not None
+            and request.client.host in {"127.0.0.1", "::1"}
+            and request.url.hostname in {"127.0.0.1", "localhost", "::1"}
+            and request.url.scheme == "http")
+
+
+def _capture_bambu_video_frame_bytes(manager: PrinterDeviceBridgeManager) -> bytes:
+    try:
+        worker = existing_monitor_process("video", paths=RUNTIME_PATHS)
+        if worker is not None and worker.config == _bambu_video_config(manager):
+            # GUI/evidence snapshots share the already-open worker decoder.
+            # Otherwise the printer would get a second concurrent RTSPS reader.
+            from urllib.request import urlopen
+            from urllib.error import URLError
+            try:
+                with urlopen(worker.url("frame.jpg"), timeout=worker.config["timeout"] + 3) as response:
+                    return response.read(4 * 1024 * 1024)
+            except URLError as exc:
+                raise RuntimeError("BAMBU_VIDEO_WORKER_UNAVAILABLE") from exc
+        return _shared_bambu_video(manager).read()[1]
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="BAMBU_VIDEO_FRAME_TIMEOUT") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail="BAMBU_VIDEO_FRAME_CAPTURE_FAILED") from exc
+
+
+@app.get("/api/printer/video-frame.jpg")
+async def get_printer_video_frame() -> Response:
+    """Return one Bambu camera frame as JPEG for reliable browser preview cards."""
+    manager = await asyncio.to_thread(_printer_bridge_manager)
+    frame_bytes = await asyncio.to_thread(_capture_bambu_video_frame_bytes, manager)
+    return Response(
+        content=frame_bytes,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store, max-age=0"},
+    )
+
+
+@app.get("/api/printer/video-stream.mjpeg")
+async def get_printer_video_stream(request: Request) -> StreamingResponse:
+    """Proxy selected Bambu RTSPS live view as MJPEG for the browser device panel."""
+    manager = await asyncio.to_thread(_printer_bridge_manager)
+    if _local_monitor_client(request):
+        from fastapi.responses import RedirectResponse
+        config = await asyncio.to_thread(_bambu_video_config, manager)
+        worker = await asyncio.to_thread(monitor_process, "video", config, paths=RUNTIME_PATHS)
+        return RedirectResponse(worker.url("stream.mjpeg"), status_code=307,
+                                headers={"Cache-Control": "no-store"})
+    video = await asyncio.to_thread(_shared_bambu_video, manager)
+
+    async def iter_mjpeg() -> object:
+        sequence = 0
+        while not await request.is_disconnected():
+            try:
+                sequence, frame = await asyncio.to_thread(video.read, sequence)
+            except (TimeoutError, RuntimeError):
+                break
+            yield (b"--ffmpeg\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                   + str(len(frame)).encode() + b"\r\n\r\n" + frame + b"\r\n")
+
+    return StreamingResponse(iter_mjpeg(), media_type="multipart/x-mixed-replace; boundary=ffmpeg")
+
+
+@app.get("/api/printer/fleet")
+async def get_printer_fleet() -> dict[str, object]:
+    """Return selectable printer profiles and the active operator-selected profile."""
+    manager = _printer_bridge_manager()
+    return manager.fleet_payload()
+
+
+@app.post("/api/printer/fleet")
+async def post_printer_fleet(req: PrinterFleetSelectionRequest) -> dict[str, object]:
+    """Persist the active printer profile without enabling automatic fallback."""
+    manager = _printer_bridge_manager()
+    try:
+        return manager.save_fleet_selection(req.profile_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/printer/connection")
+async def get_printer_connection() -> dict[str, object]:
+    """Return editable selected-printer bridge connection fields without secrets."""
+    manager = _printer_bridge_manager()
+    selected_profile, _reason = manager.fleet_selection()
+    if selected_profile.provider == "bambulab_x2d":
+        return {"ok": True, "connection": _redacted_selected_printer_connection(manager)}
+    workflow = _printer_workflow()
+    workflow.connection_memory.ensure_template(workflow.config.live)
+    return {"ok": True, "connection": _redacted_printer_connection(workflow)}
+
+
+@app.post("/api/printer/connection")
+async def post_printer_connection(req: PrinterConnectionRequest) -> dict[str, object]:
+    """Persist selected-printer bridge connection memory from the 3D GUI."""
+    manager = _printer_bridge_manager()
+    selected_profile, _reason = manager.fleet_selection()
+    if selected_profile.provider == "bambulab_x2d":
+        memory = BambuConnectionMemory(selected_profile.connection_memory_path)
+        memory.save_from_payload(
+            {
+                "host": req.host.strip(),
+                "model": req.model.strip() or "Bambu Lab X2D",
+                "serial": req.serial.strip(),
+                "printer_name": req.printer_name.strip(),
+                "lan_mode_confirmed": req.lan_mode_confirmed,
+                "developer_mode_confirmed": req.developer_mode_confirmed,
+                "auth": {
+                    "mode": "lan_access_code",
+                    "username": req.username.strip() or "bblp",
+                    "access_code": req.access_code or req.password,
+                },
+                "mqtt_port": 8883,
+                "ftps_port": 990,
+            }
+        )
+        return {
+            "ok": True,
+            "connection": memory.redacted(),
+            "message": "Bambu Lab bridge connection saved.",
+        }
+
+    workflow = _printer_workflow()
+    connection_info: dict[str, object] = {
+        "host": req.host.strip(),
+        "scheme": req.scheme,
+        "port": int(req.port),
+        "storage": req.storage.strip() or "usb",
+        "auth": {
+            "mode": req.auth_mode,
+            "username": req.username.strip(),
+            "password": req.password,
+            "api_key": req.api_key,
+            "api_key_header": req.api_key_header.strip() or "X-Api-Key",
+        },
+    }
+    workflow.connection_memory.save_from_payload({"connection_info": connection_info})
+    return {
+        "ok": True,
+        "connection": _redacted_printer_connection(workflow),
+        "message": "PrusaLink bridge connection saved.",
+    }
+
+
+@app.post("/api/printer/upload-path-probe")
+async def post_printer_upload_path_probe(req: PrinterUploadPathProbeRequest) -> dict[str, object]:
+    """Probe Bambu FTPS candidate upload paths using a small marker file that is deleted immediately."""
+    manager = _printer_bridge_manager()
+    selected_profile, selection_reason = manager.fleet_selection()
+    if selected_profile.provider != "bambulab_x2d":
+        return {
+            "ok": False,
+            "provider": selected_profile.provider,
+            "failure_code": "BAMBU_UPLOAD_PATH_PROBE_NOT_APPLICABLE",
+            "message": "Upload path probing is only implemented for the Bambu Lab bridge.",
+        }
+    memory = BambuConnectionMemory(selected_profile.connection_memory_path)
+    connection = memory.load()
+    auth = connection.get("auth") if isinstance(connection.get("auth"), dict) else {}
+    result = manager.ftps_client.probe_upload_paths(
+        host=str(connection.get("host") or ""),
+        username=str(auth.get("username") or "bblp"),
+        access_code=str(auth.get("access_code") or ""),
+        timeout_sec=float(req.timeout_sec),
+        candidate_dirs=[str(item) for item in req.candidate_dirs],
+    )
+    return {
+        **result,
+        "tool": "printer.bambu.upload_path_probe",
+        "provider": selected_profile.provider,
+        "selected_printer": manager._selected_printer_payload(selected_profile, selection_reason),
+        "connection": memory.redacted(),
+    }
+
+
+def _priority_project_file_draft(manager, req, **kwargs):
+    root = getattr(manager, "repo_root", resolve_path("."))
+    try:
+        policy = load_priority(path=(RUNTIME_PATHS.memory_root / "bambu_material_priority.json"))
+    except (OSError, ValueError):
+        return {"ok": False, "failure_code": "BAMBU_MATERIAL_PRIORITY_INVALID", "will_publish": False, "start_enabled": False}
+    selection = {"ok": True, "enabled": False}
+    if policy["enabled"] and getattr(req, "mode", "live") == "test":
+        return {**build_bambu_project_file_command_draft(**kwargs),
+                "material_selection": {"ok": True, "enabled": False, "status": "deferred_virtual"}}
+    if policy["enabled"]:
+        selection = manager.resolve_material_selection(req.model_dump())
+        path = material_artifact_path(getattr(req, "artifact_path", "") or kwargs.get("remote_path"), root, paths=RUNTIME_PATHS)
+        selection = bind_artifact(selection, path, kwargs.get("plate_id", 1))
+        if not selection["ok"]:
+            return {"ok": False, "failure_code": selection["failure_code"], "material_selection": selection,
+                    "will_publish": False, "start_enabled": False}
+        kwargs["use_ams"] = bool(selection.get("enabled"))
+        kwargs["ams_mapping"] = selection.get("ams_mapping")
+    return {**build_bambu_project_file_command_draft(**kwargs), "material_selection": selection}
+
+
+@app.post("/api/printer/start-command-draft")
+async def post_printer_start_command_draft(req: PrinterStartCommandDraftRequest) -> dict[str, object]:
+    """Build a Bambu MQTT project_file command draft without publishing or starting a print."""
+    manager = _printer_bridge_manager()
+    selected_profile, selection_reason = manager.fleet_selection()
+    if selected_profile.provider != "bambulab_x2d":
+        return {
+            "ok": False,
+            "provider": selected_profile.provider,
+            "failure_code": "BAMBU_START_COMMAND_DRAFT_NOT_APPLICABLE",
+            "message": "Start command drafts are only implemented for the Bambu Lab bridge.",
+            "will_publish": False,
+            "start_enabled": False,
+        }
+    memory = BambuConnectionMemory(selected_profile.connection_memory_path)
+    connection = memory.redacted()
+    draft = _priority_project_file_draft(manager, req,
+        serial=str(connection.get("serial") or ""),
+        remote_path=req.remote_path,
+        subtask_name=req.subtask_name,
+        plate_id=req.plate_id,
+        use_ams=req.use_ams,
+        ams_mapping=req.ams_mapping,
+        timelapse=req.timelapse,
+        bed_leveling=req.bed_leveling,
+        flow_cali=req.flow_cali,
+        vibration_cali=req.vibration_cali,
+        layer_inspect=req.layer_inspect,
+    )
+    return {
+        **draft,
+        "tool": "printer.bambu.start_command_draft",
+        "provider": selected_profile.provider,
+        "selected_printer": manager._selected_printer_payload(selected_profile, selection_reason),
+        "connection": connection,
+    }
+
+
+def _bambu_start_gate_blockers(
+    *,
+    draft: dict[str, object],
+    prepare_result: dict[str, object],
+    operator_confirmed: bool,
+    guardian_approved: bool,
+    dry_run: bool,
+) -> tuple[list[str], dict[str, object]]:
+    """Return deterministic publish blockers for Bambu start-command preflight."""
+    device_screen = prepare_result.get("device_screen") if isinstance(prepare_result.get("device_screen"), dict) else {}
+    actions = device_screen.get("actions") if isinstance(device_screen.get("actions"), dict) else {}
+    preprint_gate = prepare_result.get("preprint_gate") if isinstance(prepare_result.get("preprint_gate"), dict) else {}
+    checks = preprint_gate.get("checks") if isinstance(preprint_gate.get("checks"), dict) else {}
+    blockers: list[str] = []
+
+    def add(code: str) -> None:
+        if code and code not in blockers:
+            blockers.append(code)
+
+    if not draft.get("ok"):
+        add(str(draft.get("failure_code") or "BAMBU_START_DRAFT_INVALID"))
+    requested_material = draft.get("material_selection") or {}
+    prepared_material = prepare_result.get("material_selection") or {}
+    if requested_material.get("enabled") or prepared_material.get("enabled"):
+        if (not requested_material.get("ok") or not prepared_material.get("ok")
+                or requested_material.get("ams_mapping") != prepared_material.get("ams_mapping")
+                or requested_material.get("slot_id") != prepared_material.get("slot_id")
+                or not requested_material.get("artifact_material_verified")
+                or not prepared_material.get("artifact_material_verified")):
+            add("BAMBU_MATERIAL_SELECTION_CHANGED")
+    for code in preprint_gate.get("blockers", []) if isinstance(preprint_gate.get("blockers"), list) else []:
+        add(str(code))
+    if dry_run:
+        add("BAMBU_START_DRY_RUN")
+    if not operator_confirmed:
+        add("BAMBU_OPERATOR_CONFIRMATION_REQUIRED")
+    if not guardian_approved:
+        add("BAMBU_GUARDIAN_APPROVAL_REQUIRED")
+    if not bool(actions.get("can_start_print", False)):
+        add("BAMBU_DEVICE_SCREEN_START_DISABLED")
+
+    required_check_codes = {
+        "mqtt_authenticated_or_virtual": "BAMBU_MQTT_NOT_AUTHENTICATED",
+        "latest_report_fresh": "BAMBU_MQTT_REPORT_NOT_FRESH",
+        "storage_transfer_path_verified": "BAMBU_STORAGE_TRANSFER_PATH_NOT_VERIFIED",
+        "printer_safe_state_verified": "BAMBU_PRINTER_SAFE_STATE_NOT_VERIFIED",
+        "start_command_draft_prepared": "BAMBU_START_COMMAND_DRAFT_NOT_PREPARED",
+    }
+    for key, code in required_check_codes.items():
+        if key in checks and not bool(checks.get(key)):
+            add(code)
+
+    gate_checks = {
+        "draft_valid": bool(draft.get("ok")),
+        "operator_confirmed": bool(operator_confirmed),
+        "guardian_approved": bool(guardian_approved),
+        "dry_run": bool(dry_run),
+        "device_screen_can_start_print": bool(actions.get("can_start_print", False)),
+        "device_screen_can_prepare_start_command": bool(actions.get("can_prepare_start_command", False)),
+        "preprint_gate_state": preprint_gate.get("state", ""),
+        "preprint_gate_checks": checks,
+    }
+    return blockers, gate_checks
+
+
+def _append_bambu_bed_clear_blocker(blockers: list[str], manager: PrinterDeviceBridgeManager) -> dict[str, object]:
+    """Add the post-ejection bed-clear blocker to a start-like gate when required."""
+    bed_clear = manager.bed_clear_status()
+    bed_clear_blocker = str(bed_clear.get("blocking_code") or "")
+    if bed_clear_blocker and bed_clear_blocker not in blockers:
+        blockers.append(bed_clear_blocker)
+    return bed_clear
+
+
+def _bambu_autoejection_camera_gate(manager: PrinterDeviceBridgeManager, remote_path: str) -> dict[str, object]:
+    """Require visible camera evidence before publishing an autoeject artifact."""
+    if ".autoeject" not in str(remote_path or "").lower():
+        return {}
+    try:
+        probe = manager.video_status({})
+    except Exception as exc:
+        probe = {
+            "ok": False,
+            "status": "blocked",
+            "failure_code": "BAMBU_AUTOEJECTION_CAMERA_STATUS_FAILED",
+            "message": str(exc),
+            "video_status": {
+                "ok": False,
+                "status": "blocked",
+                "failure_code": "BAMBU_AUTOEJECTION_CAMERA_STATUS_FAILED",
+                "snapshot_url": "",
+                "blockers": ["BAMBU_AUTOEJECTION_CAMERA_STATUS_FAILED"],
+            },
+            "device_screen": {},
+        }
+    video_status = probe.get("video_status") if isinstance(probe.get("video_status"), dict) else {}
+    device_screen = probe.get("device_screen") if isinstance(probe.get("device_screen"), dict) else {}
+    camera_panel = device_screen.get("camera_panel") if isinstance(device_screen.get("camera_panel"), dict) else {}
+    snapshot_url = str(video_status.get("snapshot_url") or camera_panel.get("snapshot_url") or "")
+    frame_available = bool(probe.get("ok") and snapshot_url)
+    snapshot_bytes = video_status.get("snapshot_bytes")
+    if not isinstance(snapshot_bytes, (bytes, bytearray)) and frame_available:
+        try:
+            snapshot_bytes = _capture_bambu_video_frame_bytes(manager)
+        except Exception:
+            snapshot_bytes = None
+    camera_snapshot_path = ""
+    if isinstance(snapshot_bytes, (bytes, bytearray)) and snapshot_bytes:
+        evidence_dir = RUNTIME_PATHS.artifact_root / "bambu_camera_evidence"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        evidence_path = evidence_dir / f"bambu-camera-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}-{uuid.uuid4().hex[:8]}.jpg"
+        evidence_path.write_bytes(bytes(snapshot_bytes))
+        camera_snapshot_path = str(evidence_path)
+    safe_video_status = {key: value for key, value in video_status.items() if key != "snapshot_bytes"}
+    return {
+        **safe_video_status,
+        "camera_frame_available": frame_available,
+        "snapshot_url": snapshot_url,
+        "camera_snapshot_path": camera_snapshot_path or snapshot_url,
+        "camera_snapshot_evidence_saved": bool(camera_snapshot_path),
+        "blockers": [] if frame_available else ["BAMBU_AUTOEJECTION_CAMERA_FRAME_REQUIRED"],
+        "device_screen": device_screen,
+    }
+
+
+def _bambu_autoejection_operator_checklist(req: PrinterStartGateRequest, remote_path: str) -> dict[str, object]:
+    """Report operator-managed Bambu ejection context without blocking motion."""
+    required = ".autoeject" in str(remote_path or "").lower()
+    checklist = {
+        "door_or_front_path_clear": True,
+        "ejection_ramp_or_bin_ready": True,
+        "toolhead_cover_secured": True,
+        "release_surface_confirmed": True,
+        "release_surface_profile": str(req.release_surface_profile or "operator-admin-managed").strip(),
+        "first_ejection_supervised": True,
+        "operator_managed": True,
+    }
+    return {
+        "required": required,
+        "ok": True,
+        "blockers": [],
+        **checklist,
+    }
+
+
+def _bambu_post_publish_status(observation: dict[str, object]) -> dict[str, object]:
+    """Classify a fresh post-MQTT observation so publish ack is not mistaken for print start."""
+    if not observation:
+        return {
+            "status": "timeout",
+            "failure_code": "BAMBU_POST_PUBLISH_OBSERVATION_MISSING",
+            "message": "No fresh printer observation was available after MQTT publish.",
+        }
+    if not bool(observation.get("ok")):
+        return {
+            "status": "failed",
+            "failure_code": str(observation.get("failure_code") or "BAMBU_POST_PUBLISH_OBSERVATION_FAILED"),
+            "message": str(observation.get("message") or observation.get("error") or "Post-publish observation failed."),
+        }
+    device_screen = observation.get("device_screen") if isinstance(observation.get("device_screen"), dict) else {}
+    progress_panel = device_screen.get("progress_panel") if isinstance(device_screen.get("progress_panel"), dict) else {}
+    preprint_gate = observation.get("preprint_gate") if isinstance(observation.get("preprint_gate"), dict) else {}
+    state = str(
+        progress_panel.get("gcode_state")
+        or progress_panel.get("state")
+        or preprint_gate.get("state")
+        or ""
+    ).strip()
+    normalized = state.upper()
+    running_states = {"RUNNING", "PRINTING", "PREPARE", "PREPARING", "HEATING", "SLICING"}
+    idle_states = {"IDLE", "FINISH", "FINISHED", "READY", "UNKNOWN", "UPLOADED_NOT_STARTED", "HTTP_ARTIFACT_READY_NOT_STARTED"}
+    failed_states = {"FAILED", "FAIL", "ERROR", "CANCELLED", "CANCELED", "ABORTED"}
+    if normalized in running_states:
+        return {"status": "running", "failure_code": "", "message": "Printer reported an active print/preparation state."}
+    if normalized in failed_states:
+        return {
+            "status": "failed",
+            "failure_code": "BAMBU_PROJECT_FILE_START_FAILED",
+            "message": f"Printer reported a failed post-publish state: {state or 'unknown'}.",
+        }
+    if normalized in idle_states or not normalized:
+        return {
+            "status": "idle",
+            "failure_code": "BAMBU_PROJECT_FILE_ACCEPTED_BUT_NOT_STARTED",
+            "message": "MQTT project_file publish was acknowledged, but the fresh printer observation did not show RUNNING/PRINTING/PREPARE.",
+        }
+    return {
+        "status": "timeout",
+        "failure_code": "BAMBU_PROJECT_FILE_START_STATE_UNKNOWN",
+        "message": f"Post-publish printer state was not classified as running: {state}.",
+    }
+
+
+def _bambu_direct_standalone_gcode(standalone_artifact: dict[str, object]) -> dict[str, object]:
+    """Build a direct MQTT gcode_line payload from a standalone autoejection artifact."""
+    path = Path(str(standalone_artifact.get("patched_artifact_path") or "")).expanduser()
+    try:
+        gcode_text = path.read_text(encoding="utf-8")
+    except Exception as exc:
+        return {
+            "ok": False,
+            "failure_code": "BAMBU_STANDALONE_GCODE_READ_FAILED",
+            "message": str(exc),
+            "source_path": str(path),
+        }
+    direct_lines: list[str] = []
+    skipped_wait_commands: list[str] = []
+    cooldown_threshold_c: float | None = None
+    for raw_line in gcode_text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(";"):
+            continue
+        cooldown_match = re.search(r"^\s*M190\b.*\b[RS]\s*(-?\d+(?:\.\d+)?)", line, flags=re.IGNORECASE)
+        if cooldown_match:
+            skipped_wait_commands.append(line)
+            try:
+                cooldown_threshold_c = float(cooldown_match.group(1))
+            except (TypeError, ValueError):
+                cooldown_threshold_c = None
+            continue
+        direct_lines.append(line)
+    if not direct_lines:
+        return {
+            "ok": False,
+            "failure_code": "BAMBU_STANDALONE_GCODE_EMPTY",
+            "source_path": str(path),
+        }
+    return {
+        "ok": True,
+        "schema": "bambu_direct_standalone_gcode.v1",
+        "source_path": str(path),
+        "line_count": len(direct_lines),
+        "skipped_wait_commands": skipped_wait_commands,
+        "cooldown_threshold_c": cooldown_threshold_c,
+        "gcode": "\n".join(direct_lines).rstrip() + "\n",
+    }
+
+
+def _bambu_direct_bed_cooldown_status(
+    *,
+    direct_gcode: dict[str, object],
+    prepare_result: dict[str, object],
+    waited_sec: float = 0.0,
+    attempts: int = 1,
+) -> dict[str, object]:
+    """Return whether direct standalone motion is allowed by current bed temperature."""
+    threshold = direct_gcode.get("cooldown_threshold_c")
+    if not isinstance(threshold, (int, float)):
+        return {
+            "ok": True,
+            "status": "not_required",
+            "bed_current_c": None,
+            "cooldown_threshold_c": None,
+            "waited_sec": float(waited_sec),
+            "attempts": int(attempts),
+        }
+    device_screen = prepare_result.get("device_screen") if isinstance(prepare_result.get("device_screen"), dict) else {}
+    thermal = device_screen.get("thermal") if isinstance(device_screen.get("thermal"), dict) else {}
+    raw_bed = thermal.get("bed_current_c")
+    try:
+        bed_current = float(raw_bed)
+    except (TypeError, ValueError):
+        return {
+            "ok": False,
+            "status": "unknown",
+            "failure_code": "BAMBU_BED_TEMPERATURE_UNKNOWN",
+            "bed_current_c": raw_bed,
+            "cooldown_threshold_c": float(threshold),
+            "waited_sec": float(waited_sec),
+            "attempts": int(attempts),
+        }
+    clear = bed_current <= float(threshold) + 0.5
+    return {
+        "ok": clear,
+        "status": "clear" if clear else "cooldown_pending",
+        "failure_code": "" if clear else "BAMBU_BED_COOLDOWN_PENDING",
+        "bed_current_c": bed_current,
+        "cooldown_threshold_c": float(threshold),
+        "waited_sec": float(waited_sec),
+        "attempts": int(attempts),
+    }
+
+
+def _wait_for_bambu_direct_bed_cooldown(
+    *,
+    manager: PrinterDeviceBridgeManager,
+    direct_gcode: dict[str, object],
+    initial_prepare_result: dict[str, object],
+    prepare_payload: dict[str, object],
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Poll Bambu MQTT telemetry until direct standalone ejection is cool enough."""
+    status = _bambu_direct_bed_cooldown_status(
+        direct_gcode=direct_gcode,
+        prepare_result=initial_prepare_result,
+        waited_sec=0.0,
+        attempts=1,
+    )
+    if status.get("ok") or status.get("status") == "not_required":
+        return initial_prepare_result, status
+
+    waited = 0.0
+    attempts = 1
+    max_wait = max(0.0, float(globals().get("_BAMBU_DIRECT_COOLDOWN_MAX_WAIT_SEC", BAMBU_DIRECT_COOLDOWN_MAX_WAIT_SEC)))
+    poll = max(0.0, float(globals().get("_BAMBU_DIRECT_COOLDOWN_POLL_SEC", BAMBU_DIRECT_COOLDOWN_POLL_SEC)))
+    latest_prepare = initial_prepare_result
+    while waited < max_wait:
+        sleep_for = min(poll, max_wait - waited)
+        if sleep_for > 0:
+            time.sleep(sleep_for)
+            waited += sleep_for
+        attempts += 1
+        latest_prepare = manager.prepare(prepare_payload)
+        status = _bambu_direct_bed_cooldown_status(
+            direct_gcode=direct_gcode,
+            prepare_result=latest_prepare,
+            waited_sec=waited,
+            attempts=attempts,
+        )
+        if status.get("ok"):
+            return latest_prepare, status
+        if status.get("status") == "unknown":
+            return latest_prepare, status
+        if poll <= 0 and waited >= max_wait:
+            break
+        if poll <= 0 and not status.get("ok"):
+            # Test paths can set zero delay; still avoid a tight infinite loop.
+            waited = max_wait
+    return latest_prepare, {
+        **status,
+        "ok": False,
+        "status": "timeout",
+        "failure_code": "BAMBU_BED_COOLDOWN_TIMEOUT",
+        "waited_sec": float(waited),
+        "attempts": int(attempts),
+    }
+
+
+def _bambu_direct_gcode_gate_blockers(
+    *,
+    direct_gcode: dict[str, object],
+    prepare_result: dict[str, object],
+    bed_cooldown: dict[str, object] | None = None,
+    operator_confirmed: bool,
+    guardian_approved: bool,
+    dry_run: bool,
+) -> tuple[list[str], dict[str, object]]:
+    """Return publish blockers for direct MQTT gcode_line motion.
+
+    Direct gcode_line motion does not need FTPS storage, a Bambu project_file
+    draft, or the device-screen print-start action. It still requires fresh
+    MQTT telemetry, a safe printer state, and explicit operator/Guardian gates.
+    """
+    device_screen = prepare_result.get("device_screen") if isinstance(prepare_result.get("device_screen"), dict) else {}
+    connection = device_screen.get("connection") if isinstance(device_screen.get("connection"), dict) else {}
+    preprint_gate = prepare_result.get("preprint_gate") if isinstance(prepare_result.get("preprint_gate"), dict) else {}
+    checks = preprint_gate.get("checks") if isinstance(preprint_gate.get("checks"), dict) else {}
+    blockers: list[str] = []
+
+    def add(code: str) -> None:
+        if code and code not in blockers:
+            blockers.append(code)
+
+    if not direct_gcode.get("ok"):
+        add(str(direct_gcode.get("failure_code") or "BAMBU_DIRECT_GCODE_INVALID"))
+    if dry_run:
+        add("BAMBU_START_DRY_RUN")
+    if not operator_confirmed:
+        add("BAMBU_OPERATOR_CONFIRMATION_REQUIRED")
+    if not guardian_approved:
+        add("BAMBU_GUARDIAN_APPROVAL_REQUIRED")
+    if connection.get("mqtt") not in {"connected", "virtual"}:
+        add("BAMBU_MQTT_NOT_AUTHENTICATED")
+    required_check_codes = {
+        "mqtt_authenticated_or_virtual": "BAMBU_MQTT_NOT_AUTHENTICATED",
+        "latest_report_fresh": "BAMBU_MQTT_REPORT_NOT_FRESH",
+        "printer_safe_state_verified": "BAMBU_PRINTER_SAFE_STATE_NOT_VERIFIED",
+    }
+    for key, code in required_check_codes.items():
+        if key in checks and not bool(checks.get(key)):
+            add(code)
+    if bed_cooldown is None:
+        bed_cooldown = _bambu_direct_bed_cooldown_status(
+            direct_gcode=direct_gcode,
+            prepare_result=prepare_result,
+        )
+    if not bed_cooldown.get("ok"):
+        add(str(bed_cooldown.get("failure_code") or "BAMBU_BED_COOLDOWN_PENDING"))
+    return blockers, {
+        "direct_gcode_valid": bool(direct_gcode.get("ok")),
+        "operator_confirmed": bool(operator_confirmed),
+        "guardian_approved": bool(guardian_approved),
+        "dry_run": bool(dry_run),
+        "mqtt": connection.get("mqtt", "unknown"),
+        "preprint_gate_state": preprint_gate.get("state", ""),
+        "preprint_gate_checks": checks,
+        "bed_cooldown": bed_cooldown,
+        "project_file_storage_ignored": True,
+    }
+
+
+@app.post("/api/printer/start-gate")
+async def post_printer_start_gate(req: PrinterStartGateRequest) -> dict[str, object]:
+    """Evaluate the guarded Bambu start gate without publishing by default."""
+    manager = _printer_bridge_manager()
+    selected_profile, selection_reason = manager.fleet_selection()
+    if selected_profile.provider != "bambulab_x2d":
+        return {
+            "ok": False,
+            "tool": "printer.bambu.start_gate",
+            "provider": selected_profile.provider,
+            "failure_code": "BAMBU_START_GATE_NOT_APPLICABLE",
+            "message": "Start gate checks are only implemented for the Bambu Lab bridge.",
+            "will_publish": False,
+            "start_enabled": False,
+            "ready_to_publish": False,
+        }
+    memory = BambuConnectionMemory(selected_profile.connection_memory_path)
+    connection = memory.redacted()
+    draft = _priority_project_file_draft(manager, req,
+        serial=str(connection.get("serial") or ""),
+        remote_path=req.remote_path,
+        subtask_name=req.subtask_name,
+        plate_id=req.plate_id,
+        use_ams=req.use_ams,
+        ams_mapping=req.ams_mapping,
+        timelapse=req.timelapse,
+        bed_leveling=req.bed_leveling,
+        flow_cali=req.flow_cali,
+        vibration_cali=req.vibration_cali,
+        layer_inspect=req.layer_inspect,
+    )
+    prepare_payload = {
+        "runtime_mode": "live",
+        **({"material": req.material} if req.material else {}),
+        "health_only": False,
+        "bambu_artifact_url": req.remote_path,
+        "subtask_name": req.subtask_name,
+        "plate_id": req.plate_id,
+        "use_ams": req.use_ams,
+        "ams_mapping": req.ams_mapping,
+        "timelapse": req.timelapse,
+        "bed_leveling": req.bed_leveling,
+        "flow_cali": req.flow_cali,
+        "vibration_cali": req.vibration_cali,
+        "layer_inspect": req.layer_inspect,
+    }
+    prepare_result = manager.prepare(prepare_payload)
+    blockers, gate_checks = _bambu_start_gate_blockers(
+        draft=draft,
+        prepare_result=prepare_result,
+        operator_confirmed=req.operator_confirmed,
+        guardian_approved=req.guardian_approved,
+        dry_run=req.dry_run,
+    )
+    camera_status = _bambu_autoejection_camera_gate(manager, req.remote_path)
+    for code in camera_status.get("blockers", []) if isinstance(camera_status.get("blockers"), list) else []:
+        if code and code not in blockers:
+            blockers.append(str(code))
+    autoejection_operator_checklist = _bambu_autoejection_operator_checklist(req, req.remote_path)
+    for code in (
+        autoejection_operator_checklist.get("blockers", [])
+        if isinstance(autoejection_operator_checklist.get("blockers"), list)
+        else []
+    ):
+        if code and code not in blockers:
+            blockers.append(str(code))
+    bed_clear = _append_bambu_bed_clear_blocker(blockers, manager)
+    ready_to_publish = not blockers
+    return {
+        "ok": True,
+        "tool": "printer.bambu.start_gate",
+        "provider": selected_profile.provider,
+        "selected_printer": manager._selected_printer_payload(selected_profile, selection_reason),
+        "connection": connection,
+        "draft": draft,
+        "preprint_gate": prepare_result.get("preprint_gate", {}),
+        "device_screen": prepare_result.get("device_screen", {}),
+        "operator_actions": prepare_result.get("operator_actions", []),
+        "checks": gate_checks,
+        "camera_status": camera_status,
+        "autoejection_operator_checklist": autoejection_operator_checklist,
+        "bed_clear": bed_clear,
+        "blockers": blockers,
+        "ready_to_publish": ready_to_publish,
+        "will_publish": False,
+        "start_enabled": ready_to_publish,
+        "message": (
+            "Bambu start gate is ready, but this endpoint does not publish by itself."
+            if ready_to_publish
+            else "Bambu start gate blocked; no MQTT publish was attempted."
+        ),
+    }
+
+
+@app.post("/api/printer/start-publish")
+async def post_printer_start_publish(req: PrinterStartGateRequest) -> dict[str, object]:
+    """Publish the Bambu project_file command only after every guarded start gate passes."""
+    manager = _printer_bridge_manager()
+    selected_profile, selection_reason = manager.fleet_selection()
+    if selected_profile.provider != "bambulab_x2d":
+        return {
+            "ok": False,
+            "tool": "printer.bambu.start_publish",
+            "provider": selected_profile.provider,
+            "failure_code": "BAMBU_START_PUBLISH_NOT_APPLICABLE",
+            "message": "Start publish is only implemented for the Bambu Lab bridge.",
+            "will_publish": False,
+            "published": False,
+            "ready_to_publish": False,
+        }
+    memory = BambuConnectionMemory(selected_profile.connection_memory_path)
+    raw_connection = memory.load()
+    raw_auth = raw_connection.get("auth") if isinstance(raw_connection.get("auth"), dict) else {}
+    connection = memory.redacted()
+    draft = _priority_project_file_draft(manager, req,
+        serial=str(connection.get("serial") or ""),
+        remote_path=req.remote_path,
+        subtask_name=req.subtask_name,
+        plate_id=req.plate_id,
+        use_ams=req.use_ams,
+        ams_mapping=req.ams_mapping,
+        timelapse=req.timelapse,
+        bed_leveling=req.bed_leveling,
+        flow_cali=req.flow_cali,
+        vibration_cali=req.vibration_cali,
+        layer_inspect=req.layer_inspect,
+    )
+    prepare_payload = {
+        "runtime_mode": "live",
+        **({"material": req.material} if req.material else {}),
+        "health_only": False,
+        "bambu_artifact_url": req.remote_path,
+        "subtask_name": req.subtask_name,
+        "plate_id": req.plate_id,
+        "use_ams": req.use_ams,
+        "ams_mapping": req.ams_mapping,
+        "timelapse": req.timelapse,
+        "bed_leveling": req.bed_leveling,
+        "flow_cali": req.flow_cali,
+        "vibration_cali": req.vibration_cali,
+        "layer_inspect": req.layer_inspect,
+    }
+    prepare_result = manager.prepare(prepare_payload)
+    blockers, gate_checks = _bambu_start_gate_blockers(
+        draft=draft,
+        prepare_result=prepare_result,
+        operator_confirmed=req.operator_confirmed,
+        guardian_approved=req.guardian_approved,
+        dry_run=req.dry_run,
+    )
+    camera_status = _bambu_autoejection_camera_gate(manager, req.remote_path)
+    for code in camera_status.get("blockers", []) if isinstance(camera_status.get("blockers"), list) else []:
+        if code and code not in blockers:
+            blockers.append(str(code))
+    autoejection_operator_checklist = _bambu_autoejection_operator_checklist(req, req.remote_path)
+    for code in (
+        autoejection_operator_checklist.get("blockers", [])
+        if isinstance(autoejection_operator_checklist.get("blockers"), list)
+        else []
+    ):
+        if code and code not in blockers:
+            blockers.append(str(code))
+    bed_clear = _append_bambu_bed_clear_blocker(blockers, manager)
+    ready_to_publish = not blockers
+    base_payload: dict[str, object] = {
+        "tool": "printer.bambu.start_publish",
+        "provider": selected_profile.provider,
+        "selected_printer": manager._selected_printer_payload(selected_profile, selection_reason),
+        "connection": connection,
+        "draft": draft,
+        "preprint_gate": prepare_result.get("preprint_gate", {}),
+        "device_screen": prepare_result.get("device_screen", {}),
+        "operator_actions": prepare_result.get("operator_actions", []),
+        "checks": gate_checks,
+        "camera_status": camera_status,
+        "autoejection_operator_checklist": autoejection_operator_checklist,
+        "blockers": blockers,
+        "ready_to_publish": ready_to_publish,
+    }
+    if not ready_to_publish:
+        return {
+            **base_payload,
+            "ok": False,
+            "failure_code": "BAMBU_START_GATE_BLOCKED",
+            "will_publish": False,
+            "published": False,
+            "start_enabled": False,
+            "message": "Bambu start publish blocked by start-gate checks; no MQTT command was sent.",
+        }
+
+    publish_result = manager.mqtt_client.publish_project_file_command(
+        host=str(raw_connection.get("host") or ""),
+        serial=str(connection.get("serial") or ""),
+        username=str(connection.get("username") or "bblp"),
+        access_code=str(raw_auth.get("access_code") or ""),
+        topic=str(draft.get("topic") or ""),
+        payload=draft.get("payload") if isinstance(draft.get("payload"), dict) else {},
+        timeout_sec=manager.config.mqtt.publish_timeout_sec,
+    )
+    published = bool(publish_result.get("ok"))
+    post_publish_observation: dict[str, object] = {}
+    if published:
+        try:
+            post_publish_observation = manager.prepare({**prepare_payload, "post_publish_observation": True})
+        except Exception as exc:
+            post_publish_observation = {
+                "ok": False,
+                "failure_code": "BAMBU_POST_PUBLISH_OBSERVATION_FAILED",
+                "message": str(exc),
+            }
+    post_publish_state = _bambu_post_publish_status(post_publish_observation) if published else {
+        "status": "failed",
+        "failure_code": str(publish_result.get("failure_code") or "BAMBU_MQTT_PUBLISH_FAILED"),
+        "message": "MQTT publish failed before post-publish observation.",
+    }
+    post_publish_failure_code = str(post_publish_state.get("failure_code") or "")
+    start_observed = bool(published and post_publish_state.get("status") == "running")
+    if published and ".autoeject" in str(req.remote_path or ""):
+        publish_evidence = _bambu_bed_clear_publish_evidence(
+            remote_path=req.remote_path,
+            subtask_name=req.subtask_name,
+            publish_result=publish_result,
+            post_publish_state=post_publish_state,
+        )
+        bed_clear = manager.save_bed_clear_evidence(
+            {
+                "bed_clear_required": True,
+                "bed_clear_verified": False,
+                "verification_method": "pending_post_print_verification",
+                "camera_snapshot_path": str(camera_status.get("camera_snapshot_path") or camera_status.get("snapshot_url") or ""),
+                **publish_evidence,
+            }
+        )
+    effective_ok = bool(published and not post_publish_failure_code)
+    return {
+        **base_payload,
+        "ok": effective_ok,
+        "failure_code": "" if effective_ok else post_publish_failure_code,
+        "will_publish": published,
+        "published": published,
+        "start_enabled": effective_ok,
+        "publish_result": publish_result,
+        "post_publish_observation": post_publish_observation,
+        "post_publish_state": post_publish_state,
+        "post_publish_status": str(post_publish_state.get("status") or ""),
+        "post_publish_failure_code": post_publish_failure_code,
+        "bed_clear": bed_clear,
+        "message": (
+            "Bambu MQTT project_file command was published and active start was observed."
+            if effective_ok
+            else str(post_publish_state.get("message") or "Bambu start publish did not reach an observed running state.")
+        ),
+    }
+
+
+def _readiness_section(
+    *,
+    section_id: str,
+    label: str,
+    status: str,
+    detail: str,
+    blockers: list[str] | None = None,
+) -> dict[str, object]:
+    """Return a compact operator-facing readiness section."""
+    return {
+        "id": section_id,
+        "label": label,
+        "status": status,
+        "detail": detail,
+        "blockers": blockers or [],
+    }
+
+
+def _spc_action_for_code(code: str, *, source: str = "gate") -> dict[str, object]:
+    """Map backend gate codes into operator-facing actions without inventing status."""
+    labels = {
+        "BAMBU_FTPS_WRITE_FAILED": (
+            "Fix Bambu transfer path",
+            "FTPS read works but marker write failed. Confirm LAN/Developer mode, writable storage, or use a verified HTTP artifact route.",
+        ),
+        "BAMBU_FTPS_TOO_MANY_CONNECTIONS": (
+            "Close stale Bambu FTPS sessions",
+            "The printer reports too many FTPS connections. Close Bambu Studio/FTP clients or wait for stale sessions to expire, then retry.",
+        ),
+        "BAMBU_STORAGE_TRANSFER_PATH_NOT_VERIFIED": (
+            "Verify sliced-artifact transfer",
+            "Run Upload Path Probe or Prepare HTTP Artifact, then rerun SPC Readiness.",
+        ),
+        "BAMBU_START_DRY_RUN": (
+            "Keep dry-run until final approval",
+            "Dry-run blocks MQTT publish by design. Disable it only for the final explicit start command.",
+        ),
+        "BAMBU_OPERATOR_CONFIRMATION_REQUIRED": (
+            "Confirm operator start",
+            "The operator must explicitly confirm that the Bambu job may be started.",
+        ),
+        "BAMBU_GUARDIAN_APPROVAL_REQUIRED": (
+            "Wait for Guardian approval",
+            "Guardian must approve the artifact, printer state, and safety gate before publish.",
+        ),
+        "BAMBU_DEVICE_SCREEN_START_DISABLED": (
+            "Wait for printer start-ready state",
+            "The live device screen does not currently report that start is allowed.",
+        ),
+        "BAMBU_DEVELOPER_MODE_NOT_CONFIRMED": (
+            "Confirm Developer Mode",
+            "Save the Bambu connection setting after confirming the printer allows local write/control.",
+        ),
+        "BAMBU_LAN_MODE_NOT_CONFIRMED": (
+            "Confirm LAN-only mode",
+            "Save the Bambu connection setting after confirming local LAN control is enabled.",
+        ),
+        "BAMBU_AUTOEJECTION_NOT_REQUESTED": (
+            "Configure autoejection provider",
+            "Autonomous loop readiness needs a verified provider routine and pre/post eject vision evidence.",
+        ),
+        "BAMBU_POST_EJECT_BED_NOT_CLEAR": (
+            "Verify Bambu bed-clear",
+            "A previous autoejection run still requires bed-clear evidence. Use camera/vision or Mark Bed Clear before starting the next job.",
+        ),
+    }
+    label, detail = labels.get(code, ("Review printer gate", "Inspect the corresponding backend gate evidence before proceeding."))
+    return {
+        "code": code,
+        "label": label,
+        "detail": detail,
+        "severity": "blocking" if "REQUIRED" in code or "FAILED" in code or "DISABLED" in code else "warning",
+        "source": source,
+    }
+
+
+def _spc_next_actions(
+    *,
+    blockers: list[str],
+    operator_actions: list[object],
+    autoejection_blockers: list[str],
+) -> list[dict[str, object]]:
+    """Build a de-duplicated operator action list from actual backend evidence."""
+    ordered_codes: list[tuple[str, str]] = []
+    for code in blockers:
+        ordered_codes.append((str(code), "start_gate"))
+    for item in operator_actions:
+        if isinstance(item, dict) and item.get("code"):
+            ordered_codes.append((str(item.get("code")), "operator_action"))
+    for code in autoejection_blockers:
+        ordered_codes.append((str(code), "autoejection_gate"))
+    seen: set[str] = set()
+    actions: list[dict[str, object]] = []
+    for code, source in ordered_codes:
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        actions.append(_spc_action_for_code(code, source=source))
+    return actions[:8]
+
+
+def _spc_readiness_level(
+    *,
+    level_id: str,
+    label: str,
+    status: str,
+    detail: str,
+    blocking_codes: list[str] | None = None,
+    evidence: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Return one operator-facing readiness level derived from backend gates."""
+    return {
+        "id": level_id,
+        "label": label,
+        "status": status,
+        "detail": detail,
+        "blocking_codes": blocking_codes or [],
+        "evidence": evidence or {},
+    }
+
+
+def _looks_like_local_policy_ref(policy_ref: str) -> bool:
+    """Return whether a policy reference should be proven on local disk."""
+    text = str(policy_ref or "").strip()
+    if not text or text.startswith("fake://"):
+        return False
+    return text.startswith(("/", "./", "../", "~", "outputs/", "artifacts/", "runs/"))
+
+
+def _bambu_manipulation_consumer_readiness(*, mode: str = "live") -> dict[str, object]:
+    """Verify that Bambu autoejection has an actual Manipulation Agent consumer path."""
+    profile_path = (RUNTIME_PATHS.memory_root / "manipulation_agent_bridge.json")
+    profile_saved = profile_path.exists()
+    raw: dict[str, object] = {}
+    if profile_saved:
+        try:
+            loaded = json.loads(profile_path.read_text(encoding="utf-8"))
+            raw = loaded if isinstance(loaded, dict) else {}
+        except Exception:
+            raw = {}
+    profile = normalize_manipulation_agent_profile(raw)
+    strategy = str(profile.get("manipulation_strategy") or "")
+    task_id = str(profile.get("task_id") or profile.get("skill_id") or "")
+    profile_id = str(profile.get("profile_id") or "")
+    policy_path = str(profile.get("policy_path") or "")
+    policy_checkpoint_path = str(profile.get("policy_checkpoint_path") or "")
+    policy_repo_id = str(profile.get("policy_repo_id") or "")
+    policy_ref = policy_path or policy_checkpoint_path or policy_repo_id
+    blockers: list[str] = []
+    if not profile_saved:
+        blockers.append("MANIPULATION_AGENT_DEFAULTS_NOT_SAVED")
+    if strategy not in {"pi05_lerobot_policy", "lerobot_policy"}:
+        blockers.append("MANIPULATION_AGENT_STRATEGY_NOT_ROLLOUT")
+    if task_id != "transfer_to_utm":
+        blockers.append("MANIPULATION_AGENT_TASK_NOT_3DP_TO_UTM")
+    if not profile_id:
+        blockers.append("MANIPULATION_AGENT_PROFILE_ID_REQUIRED")
+    if not policy_ref:
+        blockers.append("MANIPULATION_POLICY_REFERENCE_REQUIRED")
+    if policy_ref.startswith("fake://") and str(mode).lower() == "live":
+        blockers.append("MANIPULATION_FAKE_POLICY_NOT_ALLOWED_IN_LIVE")
+    policy_local_path = ""
+    if _looks_like_local_policy_ref(policy_ref):
+        local_path = Path(policy_ref).expanduser()
+        if not local_path.is_absolute():
+            local_path = resolve_path(str(local_path))
+        policy_local_path = str(local_path)
+        if not local_path.exists():
+            blockers.append("MANIPULATION_POLICY_LOCAL_PATH_NOT_FOUND")
+    ready = not blockers
+    return {
+        "schema": "bambu_autoejection_consumer_readiness.v1",
+        "ready": ready,
+        "mode": str(mode or "live"),
+        "profile_saved": profile_saved,
+        "profile_path": str(profile_path),
+        "profile_id": profile_id,
+        "strategy": strategy,
+        "task_id": task_id,
+        "skill_id": str(profile.get("skill_id") or ""),
+        "source_location": str(profile.get("source_location") or ""),
+        "target_location": str(profile.get("target_location") or ""),
+        "policy_type": str(profile.get("policy_type") or ""),
+        "policy_backend": str(profile.get("policy_backend") or ""),
+        "policy_ref": policy_ref,
+        "policy_local_path": policy_local_path,
+        "blockers": blockers,
+    }
+
+
+def _bambu_native_gcode_consumer_readiness() -> dict[str, object]:
+    """Report that native Bambu G-code patch ejection does not need a robot consumer."""
+    return {
+        "schema": "bambu_autoejection_consumer_readiness.v1",
+        "ready": True,
+        "mode": "native_gcode_patch",
+        "profile_saved": False,
+        "profile_path": "",
+        "profile_id": "bambu_gcode_patch",
+        "strategy": "deterministic_gcode_patch",
+        "task_id": "post_print_bed_clear",
+        "skill_id": "bambu_native_autoejection",
+        "source_location": "bambu_build_plate",
+        "target_location": "front_clearance_zone",
+        "policy_type": "none",
+        "policy_backend": "printer_gcode",
+        "policy_ref": "",
+        "policy_local_path": "",
+        "blockers": [],
+    }
+
+
+def _bambu_autoejection_handoff_payload(
+    autoejection: dict[str, object],
+    *,
+    position: str = "post_print",
+    object_size_mm: list[float] | None = None,
+    mode: str = "live",
+    consumer_readiness: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Build the safe Bambu autoejection provider handoff packet without starting motion."""
+    if not autoejection.get("can_run_test"):
+        return {}
+    consumer = consumer_readiness or _bambu_manipulation_consumer_readiness(mode=mode)
+    if not consumer.get("ready"):
+        return {}
+    return {
+        "schema": "bambu_autoejection_provider_handoff.v1",
+        "status": "provider_handoff_ready",
+        "provider": str(autoejection.get("provider") or "none"),
+        "routine_id": str(autoejection.get("verified_routine_id") or ""),
+        "pre_eject_vision_profile": str(autoejection.get("pre_eject_vision_profile") or ""),
+        "post_eject_vision_profile": str(autoejection.get("post_eject_vision_profile") or ""),
+        "position": position,
+        "object_size_mm": [float(item) for item in object_size_mm] if object_size_mm else [],
+        "mode": mode,
+        "next_owner": "ManipulationAgent",
+        "recommended_consumer_agent": "ManipulationAgent",
+        "next_tool": "lerobot.manipulation-agent.run",
+        "requires_provider_executor": True,
+        "requires_guardian_approval": True,
+        "requires_operator_confirmation": True,
+        "motion_started": False,
+        "dry_run_only": True,
+        "consumer_readiness": consumer,
+        "consumer_profile_id": str(consumer.get("profile_id") or ""),
+        "consumer_policy_ref": str(consumer.get("policy_ref") or ""),
+    }
+
+
+@app.post("/api/printer/spc-readiness")
+async def post_printer_spc_readiness(req: PrinterSpcReadinessRequest) -> dict[str, object]:
+    """Aggregate real printer gates for the Specimen Making Agent without publishing."""
+    manager = _printer_bridge_manager()
+    selected_profile, selection_reason = manager.fleet_selection()
+    if selected_profile.provider != "bambulab_x2d":
+        return {
+            "ok": False,
+            "tool": "printer.spc_readiness",
+            "provider": selected_profile.provider,
+            "failure_code": "SPC_READINESS_NOT_APPLICABLE",
+            "message": "SPC readiness aggregation is currently implemented for the Bambu Lab device bridge.",
+            "ready_for_live_print": False,
+            "autonomous_cycle_ready": False,
+            "will_publish": False,
+            "sections": [],
+        }
+
+    memory = BambuConnectionMemory(selected_profile.connection_memory_path)
+    connection = memory.redacted()
+    draft = _priority_project_file_draft(manager, req,
+        serial=str(connection.get("serial") or ""),
+        remote_path=req.remote_path,
+        subtask_name=req.subtask_name,
+        plate_id=req.plate_id,
+        use_ams=req.use_ams,
+        ams_mapping=req.ams_mapping,
+        timelapse=req.timelapse,
+        bed_leveling=req.bed_leveling,
+        flow_cali=req.flow_cali,
+        vibration_cali=req.vibration_cali,
+        layer_inspect=req.layer_inspect,
+    )
+    prepare_result = manager.prepare(
+        {
+            "runtime_mode": req.mode,
+            "health_only": False,
+            **({"material": req.material} if req.material else {}),
+            "bambu_artifact_url": req.remote_path,
+            "subtask_name": req.subtask_name,
+            "plate_id": req.plate_id,
+            "use_ams": req.use_ams,
+            "ams_mapping": req.ams_mapping,
+            "timelapse": req.timelapse,
+            "bed_leveling": req.bed_leveling,
+            "flow_cali": req.flow_cali,
+            "vibration_cali": req.vibration_cali,
+            "layer_inspect": req.layer_inspect,
+        }
+    )
+    blockers, gate_checks = _bambu_start_gate_blockers(
+        draft=draft,
+        prepare_result=prepare_result,
+        operator_confirmed=req.operator_confirmed,
+        guardian_approved=req.guardian_approved,
+        dry_run=req.dry_run,
+    )
+    bed_clear = _append_bambu_bed_clear_blocker(blockers, manager)
+    bed_clear_blocker = str(bed_clear.get("blocking_code") or "")
+    device_screen = prepare_result.get("device_screen") if isinstance(prepare_result.get("device_screen"), dict) else {}
+    device_connection = device_screen.get("connection") if isinstance(device_screen.get("connection"), dict) else {}
+    preprint_gate = prepare_result.get("preprint_gate") if isinstance(prepare_result.get("preprint_gate"), dict) else {}
+    raw_preprint_blockers = preprint_gate.get("blockers", [])
+    preprint_blockers = [str(item) for item in raw_preprint_blockers] if isinstance(raw_preprint_blockers, list) else []
+    autoejection = manager.autoejection_status()
+    raw_autoejection_blockers = autoejection.get("blockers", [])
+    autoejection_blockers = [str(item) for item in raw_autoejection_blockers] if isinstance(raw_autoejection_blockers, list) else []
+    connection_ready = bool(connection.get("host")) and bool(connection.get("serial")) and bool(connection.get("access_code_set"))
+    mqtt_ready = device_connection.get("mqtt") in {"connected", "virtual"}
+    transfer_ready = device_connection.get("transfer") in {"connected", "virtual"}
+    ready_for_live_print = not blockers
+    approval_blockers = [
+        code
+        for code in blockers
+        if code in {"BAMBU_START_DRY_RUN", "BAMBU_OPERATOR_CONFIRMATION_REQUIRED", "BAMBU_GUARDIAN_APPROVAL_REQUIRED"}
+    ]
+    technical_blockers = [code for code in blockers if code not in set(approval_blockers)]
+    technical_ready_for_start = not technical_blockers
+    approval_ready_for_start = not approval_blockers
+    autoejection_ready = bool(autoejection.get("can_run_test", False))
+    native_patch = bool(autoejection.get("native_gcode_patch"))
+    consumer_readiness = (
+        _bambu_native_gcode_consumer_readiness()
+        if native_patch
+        else _bambu_manipulation_consumer_readiness(mode=req.mode)
+    )
+    autoejection_handoff = (
+        {}
+        if native_patch
+        else _bambu_autoejection_handoff_payload(
+            autoejection,
+            position="post_print",
+            mode=req.mode,
+            consumer_readiness=consumer_readiness,
+        )
+    )
+    if autoejection_ready and not native_patch and not consumer_readiness.get("ready"):
+        autoejection_blockers = [*autoejection_blockers, *[str(item) for item in consumer_readiness.get("blockers", [])]]
+        autoejection_ready = False
+        autoejection_handoff = {}
+    autonomous_cycle_ready = ready_for_live_print and autoejection_ready
+    status = "ready" if ready_for_live_print else "blocked"
+    operator_actions = prepare_result.get("operator_actions", [])
+    operator_actions_list = operator_actions if isinstance(operator_actions, list) else []
+    next_actions = _spc_next_actions(
+        blockers=blockers,
+        operator_actions=operator_actions_list,
+        autoejection_blockers=autoejection_blockers,
+    )
+    primary_blocker = blockers[0] if blockers else (autoejection_blockers[0] if autoejection_blockers else "")
+    operator_summary = {
+        "title": "Ready for explicit Bambu start" if ready_for_live_print else "Blocked before Bambu start",
+        "severity": "ready" if ready_for_live_print else "blocked",
+        "primary_blocker": primary_blocker,
+        "print_gate": "ready" if ready_for_live_print else "blocked",
+        "technical_gate": "ready" if technical_ready_for_start else "blocked",
+        "approval_gate": "ready" if approval_ready_for_start else "waiting",
+        "autonomous_loop": "ready" if autonomous_cycle_ready else "attention",
+        "publish_policy": "no MQTT publish from SPC readiness",
+    }
+    evidence = {
+        "device_connection": {
+            "mqtt": device_connection.get("mqtt", "unknown"),
+            "transfer": device_connection.get("transfer", "unknown"),
+            "video": device_connection.get("video", "unknown"),
+        },
+        "job": device_screen.get("job", {}) if isinstance(device_screen.get("job"), dict) else {},
+        "preprint_gate_state": preprint_gate.get("state", "unknown"),
+        "autoejection_status": autoejection.get("status", "unknown"),
+        "autoejection_handoff": autoejection_handoff,
+        "autoejection_consumer_readiness": consumer_readiness,
+        "bed_clear": bed_clear,
+    }
+    preprint_checks = preprint_gate.get("checks") if isinstance(preprint_gate.get("checks"), dict) else {}
+    transfer_blockers = [
+        code
+        for code in blockers
+        if code
+        in {
+            "BAMBU_FTPS_WRITE_FAILED",
+            "BAMBU_STORAGE_TRANSFER_PATH_NOT_VERIFIED",
+            "BAMBU_START_COMMAND_DRAFT_NOT_PREPARED",
+            "BAMBU_START_DRAFT_INVALID",
+        }
+    ]
+    connection_blockers: list[str] = []
+    if not connection_ready:
+        connection_blockers.append("BAMBU_CONNECTION_MEMORY_INCOMPLETE")
+    if not mqtt_ready:
+        connection_blockers.append("BAMBU_MQTT_NOT_AUTHENTICATED")
+    transfer_verified = bool(preprint_checks.get("storage_transfer_path_verified", False)) and transfer_ready
+    readiness_levels = [
+        _spc_readiness_level(
+            level_id="connection",
+            label="Printer connection",
+            status="ready" if connection_ready and mqtt_ready else "blocked",
+            detail=f"mqtt={device_connection.get('mqtt', 'unknown')} · host={connection.get('host') or 'missing'}",
+            blocking_codes=connection_blockers,
+            evidence={
+                "host": connection.get("host", ""),
+                "serial": connection.get("serial", ""),
+                "mqtt": device_connection.get("mqtt", "unknown"),
+                "access_code_set": bool(connection.get("access_code_set")),
+            },
+        ),
+        _spc_readiness_level(
+            level_id="transfer_path",
+            label="Sliced artifact transfer",
+            status="ready" if transfer_verified and not transfer_blockers else "blocked",
+            detail=f"transfer={device_connection.get('transfer', 'unknown')} · storage_verified={bool(preprint_checks.get('storage_transfer_path_verified', False))}",
+            blocking_codes=transfer_blockers,
+            evidence={
+                "transfer": device_connection.get("transfer", "unknown"),
+                "preprint_gate_state": preprint_gate.get("state", "unknown"),
+                "storage_transfer_path_verified": bool(preprint_checks.get("storage_transfer_path_verified", False)),
+            },
+        ),
+        _spc_readiness_level(
+            level_id="start_approval",
+            label="Operator / Guardian approval",
+            status="ready" if approval_ready_for_start else "waiting",
+            detail=(
+                f"operator={bool(req.operator_confirmed)} · guardian={bool(req.guardian_approved)}"
+                f" · dry_run={bool(req.dry_run)}"
+            ),
+            blocking_codes=approval_blockers,
+            evidence={
+                "operator_confirmed": bool(req.operator_confirmed),
+                "guardian_approved": bool(req.guardian_approved),
+                "dry_run": bool(req.dry_run),
+            },
+        ),
+        _spc_readiness_level(
+            level_id="publish_command",
+            label="MQTT publish command",
+            status="ready" if ready_for_live_print else "blocked",
+            detail="ready to publish from explicit Publish Start" if ready_for_live_print else "no MQTT command will be published",
+            blocking_codes=blockers,
+            evidence={
+                "draft_valid": bool(draft.get("ok")),
+                "device_screen_can_start_print": bool(gate_checks.get("device_screen_can_start_print")),
+                "will_publish_from_spc": False,
+            },
+        ),
+        _spc_readiness_level(
+            level_id="bed_clear",
+            label="Post-ejection bed-clear",
+            status="blocked" if bed_clear_blocker else "ready",
+            detail=(
+                f"required={bool(bed_clear.get('bed_clear_required'))}"
+                f" · verified={bool(bed_clear.get('bed_clear_verified'))}"
+                f" · method={bed_clear.get('verification_method') or 'not recorded'}"
+            ),
+            blocking_codes=[bed_clear_blocker] if bed_clear_blocker else [],
+            evidence=bed_clear,
+        ),
+        _spc_readiness_level(
+            level_id="autoejection",
+            label="Autoejection loop",
+            status="ready" if autoejection_ready else "warning",
+            detail=f"status={autoejection.get('status', 'unknown')} · provider={autoejection.get('provider') or 'none'}",
+            blocking_codes=autoejection_blockers,
+            evidence={
+                "can_run_test": bool(autoejection.get("can_run_test", False)),
+                "routine": autoejection.get("verified_routine_id", ""),
+                "pre_vision": autoejection.get("pre_eject_vision_profile", ""),
+                "post_vision": autoejection.get("post_eject_vision_profile", ""),
+                "handoff": autoejection_handoff,
+                "consumer_readiness": consumer_readiness,
+            },
+        ),
+    ]
+
+    sections = [
+        _readiness_section(
+            section_id="printer_connection",
+            label="Printer connection",
+            status="ready" if connection_ready else "blocked",
+            detail=f"{connection.get('host') or 'host missing'} · {connection.get('serial') or 'serial missing'}",
+            blockers=[] if connection_ready else ["BAMBU_CONNECTION_MEMORY_INCOMPLETE"],
+        ),
+        _readiness_section(
+            section_id="device_screen",
+            label="Live device screen",
+            status="ready" if mqtt_ready and transfer_ready else "blocked",
+            detail=f"mqtt={device_connection.get('mqtt', 'unknown')} · transfer={device_connection.get('transfer', 'unknown')}",
+            blockers=[] if mqtt_ready and transfer_ready else ["BAMBU_DEVICE_SCREEN_NOT_READY"],
+        ),
+        _readiness_section(
+            section_id="preprint_gate",
+            label="Pre-print communication gate",
+            status="ready" if not preprint_blockers else "blocked",
+            detail=f"state={preprint_gate.get('state', 'unknown')}",
+            blockers=preprint_blockers,
+        ),
+        _readiness_section(
+            section_id="start_gate",
+            label="MQTT start-command gate",
+            status="ready" if ready_for_live_print else "blocked",
+            detail="ready to publish after explicit run command" if ready_for_live_print else "publish blocked; no MQTT command sent",
+            blockers=blockers,
+        ),
+        _readiness_section(
+            section_id="bed_clear_gate",
+            label="Post-ejection bed-clear",
+            status="blocked" if bed_clear_blocker else "ready",
+            detail=(
+                "bed clear verified"
+                if not bed_clear_blocker
+                else "previous autoejection requires bed-clear evidence"
+            ),
+            blockers=[bed_clear_blocker] if bed_clear_blocker else [],
+        ),
+        _readiness_section(
+            section_id="autoejection_gate",
+            label="Autoejection gate",
+            status="ready" if autoejection_ready else "warning",
+            detail=(
+                f"routine={autoejection.get('verified_routine_id') or 'not configured'}"
+                f" · provider={autoejection.get('provider') or 'none'}"
+            ),
+            blockers=autoejection_blockers,
+        ),
+    ]
+
+    return {
+        "ok": True,
+        "tool": "printer.spc_readiness",
+        "provider": selected_profile.provider,
+        "selected_printer": manager._selected_printer_payload(selected_profile, selection_reason),
+        "connection": connection,
+        "status": status,
+        "technical_ready_for_start": technical_ready_for_start,
+        "approval_ready_for_start": approval_ready_for_start,
+        "ready_for_live_print": ready_for_live_print,
+        "autonomous_cycle_ready": autonomous_cycle_ready,
+        "will_publish": False,
+        "start_enabled": ready_for_live_print,
+        "draft": draft,
+        "device_screen": device_screen,
+        "preprint_gate": preprint_gate,
+        "start_gate": {
+            "checks": gate_checks,
+            "blockers": blockers,
+            "ready_to_publish": ready_for_live_print,
+            "will_publish": False,
+        },
+        "autoejection": autoejection,
+        "bed_clear": bed_clear,
+        "autoejection_handoff": autoejection_handoff,
+        "consumer_readiness": consumer_readiness,
+        "operator_summary": operator_summary,
+        "readiness_levels": readiness_levels,
+        "next_actions": next_actions,
+        "evidence": evidence,
+        "sections": sections,
+        "blockers": blockers,
+        "operator_actions": operator_actions_list,
+        "message": (
+            "Specimen Making Agent can hand off to live print start after explicit operator run command."
+            if ready_for_live_print
+            else "Specimen Making Agent is waiting on printer readiness gates; no print command was published."
+        ),
+    }
+
+
+@app.post("/api/printer/bambu-slice-artifact")
+async def post_printer_bambu_slice_artifact(req: PrinterBambuSliceArtifactRequest) -> dict[str, object]:
+    """Create a real Bambu sliced artifact from STL/3MF without upload or print start."""
+    manager = _printer_bridge_manager()
+    selected_profile, selection_reason = manager.fleet_selection()
+    if selected_profile.provider != "bambulab_x2d":
+        return {
+            "ok": False,
+            "tool": "printer.bambu.slice_artifact",
+            "provider": selected_profile.provider,
+            "selected_printer": manager._selected_printer_payload(selected_profile, selection_reason),
+            "failure_code": "BAMBU_SLICE_ARTIFACT_NOT_APPLICABLE",
+            "message": "Bambu Studio slicing is only implemented for the Bambu Lab bridge.",
+            "will_publish": False,
+            "start_enabled": False,
+        }
+    runner = BambuStudioSlicerRunner(manager.config.slicer, repo_root=RUNTIME_PATHS.repository_root, paths=RUNTIME_PATHS)
+    placement = req.specimen_placement.model_dump() if req.specimen_placement is not None else load_prusa_print_profile(path=RUNTIME_PATHS.memory_root / "prusa_print_profile.json").get("specimen_placement")
+    result = runner.slice(
+        source_path=req.source_path,
+        specimen_placement=placement,
+        specimen_id=req.specimen_id,
+        load_settings=req.load_settings or None,
+        load_filaments=req.load_filaments or None,
+        extra_args=req.extra_args,
+        timeout_sec=req.timeout_sec,
+    )
+    artifact = {
+        "source_path": result.get("source_path", req.source_path),
+        "sliced_artifact_path": result.get("sliced_artifact_path", ""),
+        "size_bytes": result.get("size_bytes", 0),
+        "sha256": result.get("sha256", ""),
+    }
+    return {
+        **result,
+        "provider": selected_profile.provider,
+        "selected_printer": manager._selected_printer_payload(selected_profile, selection_reason),
+        "slicer": result.get("slicer") or _selected_printer_slicer_payload(manager, _printer_workflow().config),
+        "artifact": artifact,
+        "will_publish": False,
+        "start_enabled": False,
+    }
+
+
+@app.post("/api/printer/bambu-autoejection-patch")
+async def post_printer_bambu_autoejection_patch(req: PrinterBambuAutoejectionPatchRequest) -> dict[str, object]:
+    """Patch a Bambu sliced artifact with native G-code autoejection without publishing."""
+    manager = _printer_bridge_manager()
+    result = manager.patch_bambu_autoejection_artifact(
+        source_path=req.artifact_path,
+        specimen_id=req.specimen_id,
+        position=req.position,
+        plate_id=req.plate_id,
+        loop_index=req.loop_index,
+        run_id=req.run_id,
+        validate_only=req.validate_only,
+    )
+    return result
+
+
+@app.post("/api/printer/http-artifact-route")
+async def post_printer_http_artifact_route(req: PrinterHttpArtifactRouteRequest, request: Request) -> dict[str, object]:
+    """Expose a sliced Bambu artifact through an HTTP URL the printer can fetch."""
+    manager = _printer_bridge_manager()
+    selected_profile, selection_reason = manager.fleet_selection()
+    if selected_profile.provider != "bambulab_x2d":
+        return {
+            "ok": False,
+            "provider": selected_profile.provider,
+            "failure_code": "BAMBU_HTTP_ARTIFACT_ROUTE_NOT_APPLICABLE",
+            "message": "HTTP artifact routing is only implemented for the Bambu Lab bridge.",
+        }
+    memory = BambuConnectionMemory(selected_profile.connection_memory_path)
+    connection = memory.redacted()
+    source = _safe_bambu_http_artifact_source(req.artifact_path)
+    artifact_plate_validation = validate_bambu_project_file_local_artifact(source, plate_id=req.plate_id)
+    if not artifact_plate_validation.get("ok"):
+        raise HTTPException(
+            status_code=400,
+            detail=str(artifact_plate_validation.get("failure_code") or "BAMBU_PROJECT_FILE_PARAM_MISMATCH"),
+        )
+    token = uuid.uuid4().hex
+    filename = _safe_bambu_http_filename(source)
+    export_path = _safe_bambu_http_export_path(token, filename)
+    export_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, export_path)
+    source_manifest = Path(f"{source}.manifest.json")
+    export_manifest = Path(f"{export_path}.manifest.json")
+    if source_manifest.exists() and source_manifest.is_file():
+        shutil.copy2(source_manifest, export_manifest)
+    digest = hashlib.sha256(export_path.read_bytes()).hexdigest()
+    public_base = _bambu_http_public_base_url(
+        request,
+        printer_host=str(connection.get("host") or ""),
+        override=req.public_base_url,
+    )
+    url_path = f"/printer-artifacts/bambu/{token}/{quote(filename, safe='')}"
+    artifact_url = f"{public_base}{url_path}"
+    draft = _priority_project_file_draft(manager, req,
+        serial=str(connection.get("serial") or ""),
+        remote_path=artifact_url,
+        subtask_name=req.subtask_name or source.stem,
+        plate_id=req.plate_id,
+        use_ams=req.use_ams,
+        ams_mapping=req.ams_mapping,
+        timelapse=req.timelapse,
+        bed_leveling=req.bed_leveling,
+        flow_cali=req.flow_cali,
+        vibration_cali=req.vibration_cali,
+        layer_inspect=req.layer_inspect,
+    )
+    if not draft.get("ok"):
+        raise HTTPException(status_code=400, detail=str(draft.get("failure_code") or "BAMBU_HTTP_ARTIFACT_DRAFT_FAILED"))
+    fetch_probe = (
+        await _probe_bambu_http_artifact_fetch(
+            artifact_url,
+            expected_sha256=digest,
+            timeout_sec=req.fetch_timeout_sec,
+        )
+        if req.verify_fetch
+        else {
+            "ok": False,
+            "skipped": True,
+            "failure_code": "BAMBU_HTTP_ARTIFACT_FETCH_PROBE_SKIPPED",
+            "message": "Artifact URL fetch probe was skipped by request.",
+        }
+    )
+    printer_fetch_ready = bool(fetch_probe.get("ok"))
+    operator_actions = [
+        {
+            "code": "BAMBU_HTTP_ARTIFACT_FETCH_VERIFIED",
+            "severity": "info",
+            "message": "AX4LAB served the prepared artifact URL and sha256 matched. MQTT publish is still disabled until explicit approval.",
+        }
+    ] if printer_fetch_ready else [
+        {
+            "code": str(fetch_probe.get("failure_code") or "BAMBU_HTTP_ARTIFACT_SERVER_BIND_CHECK_REQUIRED"),
+            "severity": "warning",
+            "message": (
+                f"{fetch_probe.get('message') or 'Artifact URL fetch probe failed.'} "
+                "Ensure the AX4LAB server is bound to a LAN-reachable host/port before publishing this draft to the printer."
+            ),
+        }
+    ]
+    return {
+        "ok": True,
+        "tool": "printer.bambu.http_artifact_route",
+        "provider": selected_profile.provider,
+        "selected_printer": manager._selected_printer_payload(selected_profile, selection_reason),
+        "connection": connection,
+        "artifact": {
+            "source_path": str(source),
+            "export_path": str(export_path),
+            "filename": filename,
+            "size_bytes": export_path.stat().st_size,
+            "sha256": digest,
+            "manifest_path": str(export_manifest) if export_manifest.exists() else "",
+        },
+        "artifact_plate_validation": artifact_plate_validation,
+        "artifact_url": artifact_url,
+        "artifact_url_path": url_path,
+        "server_fetch_probe": fetch_probe,
+        "printer_fetch_ready": printer_fetch_ready,
+        "start_command_draft": draft,
+        "will_publish": False,
+        "start_enabled": False,
+        "operator_actions": operator_actions,
+    }
+
+
+def _bambu_prestart_step(step_id: str, label: str, result: dict[str, object], *, ok: bool | None = None) -> dict[str, object]:
+    """Compact one backend result into an operator-facing pre-start step."""
+    resolved_ok = bool(result.get("ok")) if ok is None else bool(ok)
+    detail = (
+        result.get("failure_code")
+        or result.get("status")
+        or result.get("message")
+        or result.get("artifact_url")
+        or result.get("sliced_artifact_path")
+        or ""
+    )
+    return {
+        "id": step_id,
+        "label": label,
+        "status": "ok" if resolved_ok else "blocked",
+        "ok": resolved_ok,
+        "detail": str(detail),
+    }
+
+
+@app.post("/api/printer/bambu-prestart-check")
+async def post_printer_bambu_prestart_check(req: PrinterBambuPrestartCheckRequest, request: Request) -> dict[str, object]:
+    """Run the Bambu pre-start path up to guarded start readiness without publishing."""
+    manager = _printer_bridge_manager()
+    selected_profile, selection_reason = manager.fleet_selection()
+    selected_printer = manager._selected_printer_payload(selected_profile, selection_reason)
+    if selected_profile.provider != "bambulab_x2d":
+        return {
+            "ok": False,
+            "tool": "printer.bambu.prestart_check",
+            "provider": selected_profile.provider,
+            "selected_printer": selected_printer,
+            "status": "blocked",
+            "failure_code": "BAMBU_PRESTART_CHECK_NOT_APPLICABLE",
+            "message": "Bambu pre-start check is only implemented for the Bambu Lab bridge.",
+            "will_publish": False,
+            "published": False,
+            "start_enabled": False,
+        }
+
+    steps: list[dict[str, object]] = []
+    try:
+        camera_probe = manager.video_status({})
+    except Exception as exc:
+        camera_probe = {
+            "ok": False,
+            "tool": "printer.bambu.video_status",
+            "status": "blocked",
+            "failure_code": "BAMBU_PRESTART_CAMERA_STATUS_FAILED",
+            "message": str(exc),
+            "video_status": {
+                "ok": False,
+                "status": "blocked",
+                "failure_code": "BAMBU_PRESTART_CAMERA_STATUS_FAILED",
+                "blockers": ["BAMBU_PRESTART_CAMERA_STATUS_FAILED"],
+            },
+            "device_screen": {},
+        }
+    camera_probe = _sanitize_bambu_video_payload(camera_probe)
+    video_status = camera_probe.get("video_status") if isinstance(camera_probe.get("video_status"), dict) else {}
+    camera_device_screen = camera_probe.get("device_screen") if isinstance(camera_probe.get("device_screen"), dict) else {}
+    steps.append(_bambu_prestart_step("camera_status", "Bambu camera/video status", camera_probe))
+    source_path = str(req.source_path or "").strip()
+    artifact_path = str(req.artifact_path or "").strip()
+    slice_result: dict[str, object] = {}
+    if source_path:
+        slice_result = await post_printer_bambu_slice_artifact(
+            PrinterBambuSliceArtifactRequest(
+                source_path=source_path,
+                specimen_placement=req.specimen_placement,
+                specimen_id=req.specimen_id,
+                load_settings=req.load_settings,
+                load_filaments=req.load_filaments,
+                extra_args=req.extra_args,
+                timeout_sec=req.timeout_sec,
+            )
+        )
+        steps.append(_bambu_prestart_step("slice_artifact", "Bambu Studio slicing", slice_result))
+        artifact_path = str(slice_result.get("sliced_artifact_path") or "")
+        if not slice_result.get("ok"):
+            return {
+                "ok": False,
+                "tool": "printer.bambu.prestart_check",
+                "provider": selected_profile.provider,
+                "selected_printer": selected_printer,
+                "status": "blocked",
+                "failure_code": str(slice_result.get("failure_code") or "BAMBU_PRESTART_SLICE_FAILED"),
+                "steps": steps,
+                "video_status": video_status,
+                "device_screen": camera_device_screen,
+                "slice_artifact": slice_result,
+                "sliced_artifact_path": artifact_path,
+                "will_publish": False,
+                "published": False,
+                "start_enabled": False,
+                "message": "Bambu pre-start check stopped before transfer because slicing failed.",
+            }
+    else:
+        steps.append(
+            {
+                "id": "slice_artifact",
+                "label": "Bambu Studio slicing",
+                "status": "skipped" if artifact_path else "blocked",
+                "ok": bool(artifact_path),
+                "detail": "using existing sliced artifact" if artifact_path else "source_path or artifact_path required",
+            }
+        )
+        if not artifact_path:
+            return {
+                "ok": False,
+                "tool": "printer.bambu.prestart_check",
+                "provider": selected_profile.provider,
+                "selected_printer": selected_printer,
+                "status": "blocked",
+                "failure_code": "BAMBU_PRESTART_ARTIFACT_REQUIRED",
+                "steps": steps,
+                "video_status": video_status,
+                "device_screen": camera_device_screen,
+                "will_publish": False,
+                "published": False,
+                "start_enabled": False,
+                "message": "Provide a source STL/3MF or an existing sliced artifact path.",
+            }
+
+    placement = req.specimen_placement.model_dump() if req.specimen_placement is not None else load_prusa_print_profile(path=RUNTIME_PATHS.memory_root / "prusa_print_profile.json").get("specimen_placement")
+    # Retain the effective machine area proven by this slice, rather than
+    # reinterpreting a custom profile against the default X2D region.
+    sliced_placement_check = slice_result.get("placement_validation") or {}
+    slice_area = {key: sliced_placement_check[key] for key in ("bed_bounds_xy_mm", "allowed_bounds_xy_mm")
+                  if key in sliced_placement_check}
+    placement_check = validate_sliced_placement(Path(artifact_path), placement, area=slice_area or None)
+    steps.append(_bambu_prestart_step("specimen_placement", "Specimen center validation", placement_check))
+    if not placement_check["ok"]:
+        return {"ok": False, "status": "blocked", "failure_code": placement_check["failure_code"],
+                "steps": steps, "placement_validation": placement_check, "will_publish": False,
+                "published": False, "start_enabled": False}
+
+    autoejection_patch: dict[str, object] = {}
+    autoejection_status = manager.autoejection_status()
+    if autoejection_status.get("can_run_test") and autoejection_status.get("native_gcode_patch"):
+        autoejection_patch = manager.patch_bambu_autoejection_artifact(
+            source_path=artifact_path,
+            specimen_id=req.specimen_id,
+            plate_id=req.plate_id,
+            run_id=req.run_id or _current_run_id(),
+        )
+        steps.append(_bambu_prestart_step("autoejection_patch", "Bambu G-code autoejection patch", autoejection_patch))
+        artifact_path = str(autoejection_patch.get("patched_artifact_path") or "")
+        if not autoejection_patch.get("ok") or not artifact_path:
+            return {
+                "ok": False,
+                "tool": "printer.bambu.prestart_check",
+                "provider": selected_profile.provider,
+                "selected_printer": selected_printer,
+                "status": "blocked",
+                "failure_code": str(autoejection_patch.get("failure_code") or "BAMBU_PRESTART_AUTOEJECTION_PATCH_FAILED"),
+                "steps": steps,
+                "video_status": video_status,
+                "device_screen": camera_device_screen,
+                "slice_artifact": slice_result,
+                "autoejection_patch": autoejection_patch,
+                "sliced_artifact_path": artifact_path,
+                "will_publish": False,
+                "published": False,
+                "start_enabled": False,
+                "message": "Bambu pre-start check stopped before transfer because native autoejection patching failed.",
+            }
+
+    try:
+        http_route = await post_printer_http_artifact_route(
+            PrinterHttpArtifactRouteRequest(
+                material=req.material,
+                artifact_path=artifact_path,
+                public_base_url=req.public_base_url,
+                subtask_name=req.subtask_name or req.specimen_id or "atr-bambu-prestart",
+                plate_id=req.plate_id,
+                use_ams=req.use_ams,
+                ams_mapping=req.ams_mapping,
+                timelapse=req.timelapse,
+                bed_leveling=req.bed_leveling,
+                flow_cali=req.flow_cali,
+                vibration_cali=req.vibration_cali,
+                layer_inspect=req.layer_inspect,
+                verify_fetch=req.verify_fetch,
+                fetch_timeout_sec=req.fetch_timeout_sec,
+            ),
+            request,
+        )
+    except HTTPException as exc:
+        http_route = {
+            "ok": False,
+            "tool": "printer.bambu.http_artifact_route",
+            "failure_code": str(exc.detail),
+            "message": str(exc.detail),
+            "printer_fetch_ready": False,
+        }
+    http_ok = bool(http_route.get("ok")) and bool(http_route.get("printer_fetch_ready"))
+    steps.append(_bambu_prestart_step("http_artifact_route", "HTTP artifact route", http_route, ok=http_ok))
+    if not http_ok:
+        return {
+            "ok": False,
+            "tool": "printer.bambu.prestart_check",
+            "provider": selected_profile.provider,
+            "selected_printer": selected_printer,
+            "status": "blocked",
+            "failure_code": str(
+                http_route.get("failure_code")
+                or (http_route.get("server_fetch_probe", {}) if isinstance(http_route.get("server_fetch_probe"), dict) else {}).get("failure_code")
+                or "BAMBU_PRESTART_HTTP_ARTIFACT_NOT_VERIFIED"
+            ),
+            "steps": steps,
+            "video_status": video_status,
+            "device_screen": camera_device_screen,
+            "slice_artifact": slice_result,
+            "autoejection_patch": autoejection_patch,
+            "http_artifact_route": http_route,
+            "sliced_artifact_path": artifact_path,
+            "artifact_url": str(http_route.get("artifact_url") or ""),
+            "will_publish": False,
+            "published": False,
+            "start_enabled": False,
+            "message": "Bambu pre-start check stopped before start gate because the printer-reachable artifact route is not verified.",
+        }
+
+    artifact_url = str(http_route.get("artifact_url") or "")
+    start_req = PrinterStartGateRequest(
+        material=req.material,
+        remote_path=artifact_url,
+        subtask_name=req.subtask_name or req.specimen_id or "atr-bambu-prestart",
+        plate_id=req.plate_id,
+        use_ams=req.use_ams,
+        ams_mapping=req.ams_mapping,
+        timelapse=req.timelapse,
+        bed_leveling=req.bed_leveling,
+        flow_cali=req.flow_cali,
+        vibration_cali=req.vibration_cali,
+        layer_inspect=req.layer_inspect,
+        operator_confirmed=req.operator_confirmed,
+        guardian_approved=req.guardian_approved,
+        dry_run=req.dry_run,
+        door_or_front_path_clear=req.door_or_front_path_clear,
+        ejection_ramp_or_bin_ready=req.ejection_ramp_or_bin_ready,
+        toolhead_cover_secured=req.toolhead_cover_secured,
+        release_surface_confirmed=req.release_surface_confirmed,
+        release_surface_profile=req.release_surface_profile,
+        first_ejection_supervised=req.first_ejection_supervised,
+    )
+    start_gate = await post_printer_start_gate(start_req)
+    steps.append(_bambu_prestart_step("start_gate", "Guarded start gate", start_gate, ok=bool(start_gate.get("ready_to_publish"))))
+    spc_readiness = await post_printer_spc_readiness(
+        PrinterSpcReadinessRequest(
+            mode=req.mode,
+            **start_req.model_dump(),
+        )
+    )
+    steps.append(
+        _bambu_prestart_step(
+            "spc_readiness",
+            "SPC readiness report",
+            spc_readiness,
+            ok=bool(spc_readiness.get("ready_for_live_print")),
+        )
+    )
+    autoejection_handoff = (
+        spc_readiness.get("autoejection_handoff") if isinstance(spc_readiness.get("autoejection_handoff"), dict) else {}
+    )
+    if autoejection_handoff:
+        steps.append(
+            {
+                "id": "autoejection_handoff",
+                "label": "Autoejection handoff",
+                "status": "ok",
+                "ok": True,
+                "detail": str(autoejection_handoff.get("routine_id") or "configured"),
+            }
+        )
+    ready_to_publish = bool(start_gate.get("ready_to_publish"))
+    return {
+        "ok": bool(http_ok and ready_to_publish),
+        "tool": "printer.bambu.prestart_check",
+        "provider": selected_profile.provider,
+        "selected_printer": selected_printer,
+        "status": "ready_to_publish_not_started" if ready_to_publish else "blocked",
+        "steps": steps,
+        "video_status": video_status,
+        "device_screen": camera_device_screen,
+        "slice_artifact": slice_result,
+        "autoejection_patch": autoejection_patch,
+        "http_artifact_route": http_route,
+        "start_gate": start_gate,
+        "spc_readiness": spc_readiness,
+        "autoejection_handoff": autoejection_handoff,
+        "sliced_artifact_path": artifact_path,
+        "artifact_url": artifact_url,
+        "ready_to_publish": ready_to_publish,
+        "will_publish": False,
+        "published": False,
+        "start_enabled": ready_to_publish,
+        "message": (
+            "Bambu artifact, HTTP route, and guarded start gate are ready. No MQTT command was published."
+            if ready_to_publish
+            else "Bambu pre-start check completed with blockers. No MQTT command was published."
+        ),
+    }
+
+
+@app.get("/printer-artifacts/bambu/{token}/{filename}")
+async def get_bambu_http_artifact(token: str, filename: str) -> FileResponse:
+    """Serve a copied Bambu sliced artifact for printer-side HTTP fetch tests."""
+    path = _safe_bambu_http_export_path(token, filename)
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Bambu HTTP artifact not found")
+    return FileResponse(path, media_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream", filename=path.name)
+
+
+@app.get("/api/printer/material-priority")
+async def get_printer_material_priority() -> dict[str, object]:
+    manager = _printer_bridge_manager()
+    try:
+        return {"ok": True, "priority": load_priority(path=(RUNTIME_PATHS.memory_root / "bambu_material_priority.json"))}
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=409, detail="BAMBU_MATERIAL_PRIORITY_INVALID") from exc
+
+
+@app.post("/api/printer/material-priority")
+async def post_printer_material_priority(req: MaterialPriority) -> dict[str, object]:
+    manager = _printer_bridge_manager()
+    profile, _reason = manager.fleet_selection()
+    if profile.provider != "bambulab_x2d":
+        raise HTTPException(status_code=400, detail="BAMBU_MATERIAL_PRIORITY_NOT_APPLICABLE")
+    return {"ok": True, "priority": save_priority(req.model_dump(), path=(RUNTIME_PATHS.memory_root / "bambu_material_priority.json")), "will_publish": False}
+
+
+@app.get("/api/printer/profile")
+async def get_printer_profile() -> dict[str, object]:
+    """Return operator-controlled 3DP print profile defaults."""
+    manager = _printer_bridge_manager()
+    workflow = _printer_workflow()
+    config = workflow.config
+    profile = _selected_print_profile(manager)
+    selected_profile, selection_reason = manager.fleet_selection()
+    return {
+        "ok": True,
+        "profile": profile,
+        "profile_path": str(RUNTIME_PATHS.memory_root / "prusa_print_profile.json"),
+        "selected_printer": manager._selected_printer_payload(selected_profile, selection_reason),
+        "connection_memory_path": str(selected_profile.connection_memory_path),
+        "live_gates": _selected_printer_profile_live_gates(manager, config),
+        "auto_ejection": _selected_printer_autoejection_payload(manager, config, profile),
+        "slicer": _selected_printer_slicer_payload(manager, config),
+    }
+
+
+@app.post("/api/printer/profile")
+async def post_printer_profile(req: PrinterProfileRequest) -> dict[str, object]:
+    """Persist operator-controlled 3DP print profile defaults."""
+    manager = _printer_bridge_manager()
+    workflow = _printer_workflow()
+    config = workflow.config
+    profile = save_prusa_print_profile(req.model_dump(), path=RUNTIME_PATHS.memory_root / "prusa_print_profile.json")
+    profile = _selected_print_profile(manager)
+    selected_profile, selection_reason = manager.fleet_selection()
+    return {
+        "ok": True,
+        "profile": profile,
+        "profile_path": str(RUNTIME_PATHS.memory_root / "prusa_print_profile.json"),
+        "selected_printer": manager._selected_printer_payload(selected_profile, selection_reason),
+        "connection_memory_path": str(selected_profile.connection_memory_path),
+        "live_gates": _selected_printer_profile_live_gates(manager, config),
+        "auto_ejection": _selected_printer_autoejection_payload(manager, config, profile),
+        "slicer": _selected_printer_slicer_payload(manager, config),
+        "message": "3DP print profile saved for the active printer bridge.",
+    }
+
+
+@app.get("/api/printer/autoejection-status")
+async def get_printer_autoejection_status() -> dict[str, object]:
+    """Return selected-printer autoejection capability without running hardware motion."""
+    manager = _printer_bridge_manager()
+    selected_profile, selection_reason = manager.fleet_selection()
+    if selected_profile.provider == "bambulab_x2d":
+        status = manager.autoejection_status()
+        native_patch = bool(status.get("native_gcode_patch"))
+        consumer_readiness = (
+            _bambu_native_gcode_consumer_readiness()
+            if native_patch
+            else _bambu_manipulation_consumer_readiness(mode="live")
+        )
+        blockers = [str(item) for item in status.get("blockers", [])] if isinstance(status.get("blockers"), list) else []
+        if status.get("can_run_test") and not native_patch and not consumer_readiness.get("ready"):
+            blockers = [*blockers, *[str(item) for item in consumer_readiness.get("blockers", [])]]
+        return {
+            "ok": True,
+            "tool": "printer.autoejection_status",
+            "provider": selected_profile.provider,
+            "selected_printer": manager._selected_printer_payload(selected_profile, selection_reason),
+            "autoejection": status,
+            "consumer_readiness": consumer_readiness,
+            "can_run_test": bool(status.get("can_run_test", False) and (native_patch or consumer_readiness.get("ready"))),
+            "blockers": blockers,
+            "settings_path": str(manager.config.autoejection_memory_path),
+            "message": (
+                "Bambu Native G-code patch provider is configured and testable."
+                if status.get("can_run_test") and native_patch
+                else "Bambu autoejection routine and Manipulation Agent consumer are configured and testable."
+                if status.get("can_run_test") and consumer_readiness.get("ready")
+                else "Bambu autoejection provider is configured, but the Manipulation Agent consumer is not ready."
+                if status.get("can_run_test")
+                else "Bambu autoejection is blocked until a verified provider routine and vision evidence are configured."
+            ),
+        }
+    workflow = _printer_workflow()
+    profile = load_prusa_print_profile(path=RUNTIME_PATHS.memory_root / "prusa_print_profile.json")
+    payload = _selected_printer_autoejection_payload(manager, workflow.config, profile)
+    return {
+        "ok": True,
+        "tool": "printer.autoejection_status",
+        "provider": selected_profile.provider,
+        "selected_printer": manager._selected_printer_payload(selected_profile, selection_reason),
+        "autoejection": payload,
+        "can_run_test": bool(payload.get("enabled", False)),
+        "blockers": [] if payload.get("enabled", False) else ["AUTOEJECTION_DISABLED"],
+    }
+
+
+@app.get("/api/printer/bed-clear")
+async def get_printer_bed_clear() -> dict[str, object]:
+    """Return Bambu post-ejection bed-clear evidence without touching hardware."""
+    manager = _printer_bridge_manager()
+    selected_profile, selection_reason = manager.fleet_selection()
+    bed_clear = manager.bed_clear_status()
+    return {
+        "ok": True,
+        "tool": "printer.bed_clear",
+        "provider": selected_profile.provider,
+        "selected_printer": manager._selected_printer_payload(selected_profile, selection_reason),
+        "bed_clear": bed_clear,
+        "settings_path": str(manager.bed_clear_memory().path),
+        "blockers": [bed_clear["blocking_code"]] if bed_clear.get("blocking_code") else [],
+    }
+
+
+@app.post("/api/printer/bed-clear")
+async def post_printer_bed_clear(req: PrinterBedClearRequest) -> dict[str, object]:
+    """Persist Bambu post-ejection bed-clear evidence from operator/camera/vision."""
+    manager = _printer_bridge_manager()
+    selected_profile, selection_reason = manager.fleet_selection()
+    bed_clear = manager.save_bed_clear_evidence(req.model_dump(exclude_unset=True))
+    return {
+        "ok": True,
+        "tool": "printer.bed_clear",
+        "provider": selected_profile.provider,
+        "selected_printer": manager._selected_printer_payload(selected_profile, selection_reason),
+        "bed_clear": bed_clear,
+        "settings_path": str(manager.bed_clear_memory().path),
+        "blockers": [bed_clear["blocking_code"]] if bed_clear.get("blocking_code") else [],
+    }
+
+
+@app.post("/api/printer/bambu-autoejection-proof-template")
+async def post_printer_bambu_autoejection_proof_template(req: PrinterBambuAutoejectionProofTemplateRequest) -> dict[str, object]:
+    """Write a fail-closed Bambu physical validation proof package scaffold."""
+    from scripts.audit_bambu_autoejection_completion import write_proof_template
+
+    manager = _printer_bridge_manager()
+    selected_profile, selection_reason = manager.fleet_selection()
+    if selected_profile.provider != "bambulab_x2d":
+        return {
+            "ok": False,
+            "tool": "printer.bambu.improvement14_proof_template",
+            "provider": selected_profile.provider,
+            "selected_printer": manager._selected_printer_payload(selected_profile, selection_reason),
+            "status": "blocked",
+            "failure_code": "BAMBU_PROOF_TEMPLATE_NOT_APPLICABLE",
+            "message": "Bambu physical proof templates are only applicable to the selected Bambu Lab bridge.",
+        }
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    default_path = RUNTIME_PATHS.artifact_root / "printer" / "manual" / "bambu" / f"bambu_autoejection_physical_validation_{stamp}.json"
+    result = write_proof_template(
+        req.proof_package_path or str(default_path),
+        printer_profile_id=req.printer_profile_id or selected_profile.profile_id,
+        provider=req.provider or "bambulab",
+    )
+    result = {
+        **result,
+        "provider": selected_profile.provider,
+        "selected_printer": manager._selected_printer_payload(selected_profile, selection_reason),
+    }
+    await controller.emit_workspace_result(
+        workspace="printer",
+        tool="printer.bambu.improvement14_proof_template",
+        result=result,
+        stage=Stage.SPECIMEN,
+        module_id="specimen",
+        agent="specimen_agent",
+        workflow="bambu_autoejection_proof_template",
+        node_event=False,
+    )
+    return result
+
+
+@app.post("/api/printer/bambu-autoejection-completion-audit")
+async def post_printer_bambu_autoejection_completion_audit(req: PrinterBambuAutoejectionCompletionAuditRequest) -> dict[str, object]:
+    """Audit Bambu physical autoejection proof evidence without running hardware."""
+    from scripts.audit_bambu_autoejection_completion import audit as audit_bambu_autoejection_completion
+
+    manager = _printer_bridge_manager()
+    selected_profile, selection_reason = manager.fleet_selection()
+    if selected_profile.provider != "bambulab_x2d":
+        return {
+            "ok": False,
+            "tool": "printer.bambu.improvement14_completion_audit",
+            "provider": selected_profile.provider,
+            "selected_printer": manager._selected_printer_payload(selected_profile, selection_reason),
+            "status": "blocked",
+            "failure_code": "BAMBU_COMPLETION_AUDIT_NOT_APPLICABLE",
+            "message": "Bambu completion audit is only applicable to the selected Bambu Lab bridge.",
+            "blockers": ["BAMBU_COMPLETION_AUDIT_NOT_APPLICABLE"],
+        }
+    result = audit_bambu_autoejection_completion(req.proof_package_path, latest=bool(req.latest))
+    result = {
+        **result,
+        "provider": selected_profile.provider,
+        "selected_printer": manager._selected_printer_payload(selected_profile, selection_reason),
+    }
+    await controller.emit_workspace_result(
+        workspace="printer",
+        tool="printer.bambu.improvement14_completion_audit",
+        result=result,
+        stage=Stage.SPECIMEN,
+        module_id="specimen",
+        agent="specimen_agent",
+        workflow="bambu_autoejection_completion_audit",
+        node_event=False,
+    )
+    return result
+
+
+@app.post("/api/printer/autoejection-config")
+async def post_printer_autoejection_config(req: PrinterAutoejectionConfigRequest) -> dict[str, object]:
+    """Persist operator-verified Bambu autoejection settings without running motion."""
+    manager = _printer_bridge_manager()
+    selected_profile, selection_reason = manager.fleet_selection()
+    if selected_profile.provider != "bambulab_x2d":
+        return {
+            "ok": False,
+            "tool": "printer.autoejection_config",
+            "provider": selected_profile.provider,
+            "failure_code": "BAMBU_AUTOEJECTION_CONFIG_NOT_APPLICABLE",
+            "message": "Bambu autoejection config is only applicable to the Bambu Lab bridge.",
+        }
+    request_payload = req.model_dump()
+    if request_payload.get("fallback_to_robot_pickoff") is not None:
+        request_payload["recovery_to_robot_pickoff"] = bool(request_payload.get("fallback_to_robot_pickoff"))
+    request_payload.pop("fallback_to_robot_pickoff", None)
+    status = manager.save_autoejection_config(request_payload)
+    native_patch = bool(status.get("native_gcode_patch"))
+    consumer_readiness = (
+        _bambu_native_gcode_consumer_readiness()
+        if native_patch
+        else _bambu_manipulation_consumer_readiness(mode="live")
+    )
+    blockers = [str(item) for item in status.get("blockers", [])] if isinstance(status.get("blockers"), list) else []
+    if status.get("can_run_test") and not native_patch and not consumer_readiness.get("ready"):
+        blockers = [*blockers, *[str(item) for item in consumer_readiness.get("blockers", [])]]
+    return {
+        "ok": True,
+        "tool": "printer.autoejection_config",
+        "provider": selected_profile.provider,
+        "selected_printer": manager._selected_printer_payload(selected_profile, selection_reason),
+        "autoejection": status,
+        "consumer_readiness": consumer_readiness,
+        "can_run_test": bool(status.get("can_run_test", False) and (native_patch or consumer_readiness.get("ready"))),
+        "blockers": blockers,
+        "settings_path": str(manager.config.autoejection_memory_path),
+        "message": (
+            "Bambu Native G-code patch config saved and testable."
+            if status.get("can_run_test") and native_patch
+            else "Bambu autoejection routine and Manipulation Agent consumer are configured and testable."
+            if status.get("can_run_test") and consumer_readiness.get("ready")
+            else "Bambu autoejection config saved, but the Manipulation Agent consumer is not ready."
+            if status.get("can_run_test")
+            else "Bambu autoejection config saved, but required routine or vision evidence is still missing."
+        ),
+    }
+
+
+@app.post("/api/printer/bambu-autoejection-sweep-test")
+async def post_printer_bambu_autoejection_sweep_test(req: PrinterAutoejectionTestRequest) -> dict[str, object]:
+    """Generate a standalone Bambu full-bed sweep test artifact without publishing."""
+    manager = _printer_bridge_manager()
+    selected_profile, selection_reason = manager.fleet_selection()
+    autoejection = manager.autoejection_status() if selected_profile.provider == "bambulab_x2d" else {}
+    sweep_artifact = manager.build_bambu_autoejection_sweep_test_artifact(
+        specimen_id="bambu-sweep-test",
+    )
+    result = {
+        "ok": bool(sweep_artifact.get("ok")),
+        "tool": "printer.bambu.autoejection_sweep_test",
+        "provider": selected_profile.provider,
+        "selected_printer": manager._selected_printer_payload(selected_profile, selection_reason),
+        "status": "sweep_test_artifact_ready" if sweep_artifact.get("ok") else "blocked",
+        "failure_code": "" if sweep_artifact.get("ok") else str(sweep_artifact.get("failure_code") or "BAMBU_AUTOEJECTION_SWEEP_TEST_FAILED"),
+        "motion_started": False,
+        "requested_start_immediately": bool(req.start_immediately),
+        "autoejection": autoejection,
+        "consumer_readiness": _bambu_native_gcode_consumer_readiness() if sweep_artifact.get("ok") else {},
+        "standalone_artifact": sweep_artifact,
+        "handoff": {},
+        "autoejection_handoff": {},
+        "message": "Bambu full-bed sweep test artifact is ready. No MQTT command was published.",
+        "step_trace": [
+            {"step": "AUTOEJECTION_GATE", "status": "ok" if sweep_artifact.get("ok") else "blocked", "detail": str(autoejection.get("provider") or sweep_artifact.get("failure_code") or "")},
+            {
+                "step": "SWEEP_TEST_GCODE_ARTIFACT",
+                "status": "ready" if sweep_artifact.get("ok") else "blocked",
+                "detail": str(sweep_artifact.get("patched_artifact_path") or sweep_artifact.get("failure_code") or ""),
+            },
+        ],
+    }
+    await controller.emit_workspace_result(
+        workspace="printer",
+        tool="printer.bambu.autoejection_sweep_test",
+        result=result,
+        stage=Stage.SPECIMEN,
+        module_id="specimen",
+        agent="specimen_agent",
+        workflow="autoejection_sweep_test",
+    )
+    return result
+
+
+@app.post("/api/printer/autoejection-test")
+async def post_printer_autoejection_test(req: PrinterAutoejectionTestRequest, request: Request) -> dict[str, object]:
+    """Run a standalone autoejection test using the same ejection G-code builder."""
+    manager = _printer_bridge_manager()
+    selected_profile, selection_reason = manager.fleet_selection()
+    if selected_profile.provider == "bambulab_x2d":
+        autoejection = manager.autoejection_status()
+        if not autoejection.get("enabled"):
+            result = {
+                "ok": False,
+                "tool": "printer.autoejection_test",
+                "provider": "bambulab_x2d",
+                "selected_printer": manager._selected_printer_payload(selected_profile, selection_reason),
+                "status": "blocked",
+                "failure_code": "BAMBU_AUTOEJECTION_NOT_CONFIGURED",
+                "message": "Bambu autoejection routine is not configured or verified yet.",
+                "autoejection": autoejection,
+                "step_trace": [{"step": "AUTOEJECTION_GATE", "status": "blocked", "detail": "not_configured"}],
+            }
+            await controller.emit_workspace_result(
+                workspace="printer",
+                tool="printer.autoejection_test",
+                result=result,
+                stage=Stage.SPECIMEN,
+                module_id="specimen",
+                agent="specimen_agent",
+                workflow="autoejection_test",
+            )
+            return result
+        if autoejection.get("native_gcode_patch"):
+            consumer_readiness = _bambu_native_gcode_consumer_readiness()
+            standalone_artifact = manager.build_standalone_bambu_autoejection_artifact(
+                specimen_id=f"bambu-eject-{req.position}",
+                position=req.position,
+                object_size_mm=[float(item) for item in req.object_size_mm],
+            )
+            result = {
+                "ok": bool(standalone_artifact.get("ok")),
+                "tool": "printer.autoejection_test",
+                "provider": "bambulab_x2d",
+                "selected_printer": manager._selected_printer_payload(selected_profile, selection_reason),
+                "status": "standalone_artifact_ready" if standalone_artifact.get("ok") else "blocked",
+                "failure_code": "" if standalone_artifact.get("ok") else str(standalone_artifact.get("failure_code") or "BAMBU_AUTOEJECTION_STANDALONE_FAILED"),
+                "motion_started": False,
+                "requested_start_immediately": bool(req.start_immediately),
+                "autoejection": autoejection,
+                "consumer_readiness": consumer_readiness,
+                "standalone_artifact": standalone_artifact,
+                "handoff": {},
+                "autoejection_handoff": {},
+                "message": "Bambu native G-code autoejection standalone artifact is ready. No MQTT command was published.",
+                "step_trace": [
+                    {"step": "AUTOEJECTION_GATE", "status": "ok", "detail": str(autoejection.get("provider") or "")},
+                    {
+                        "step": "STANDALONE_GCODE_ARTIFACT",
+                        "status": "ready" if standalone_artifact.get("ok") else "blocked",
+                        "detail": str(standalone_artifact.get("patched_artifact_path") or standalone_artifact.get("failure_code") or ""),
+                    },
+                ],
+            }
+            if (
+                req.mode == "live"
+                and req.start_immediately
+                and standalone_artifact.get("ok")
+            ):
+                blockers: list[str] = []
+                gate_checks = {
+                    "operator_confirmed": bool(req.operator_confirmed),
+                    "guardian_approved": bool(req.guardian_approved),
+                    "dry_run": bool(req.dry_run),
+                    "transport": "project_file",
+                }
+                if req.dry_run:
+                    blockers.append("DRY_RUN_ENABLED")
+                if not req.operator_confirmed:
+                    blockers.append("OPERATOR_CONFIRMATION_REQUIRED")
+                if not req.guardian_approved:
+                    blockers.append("GUARDIAN_APPROVAL_REQUIRED")
+                camera_status = _bambu_autoejection_camera_gate(manager, ".autoeject.gcode")
+                for code in camera_status.get("blockers", []) if isinstance(camera_status.get("blockers"), list) else []:
+                    if code and code not in blockers:
+                        blockers.append(str(code))
+                autoejection_operator_checklist = _bambu_autoejection_operator_checklist(req, ".autoeject.gcode")
+                for code in (
+                    autoejection_operator_checklist.get("blockers", [])
+                    if isinstance(autoejection_operator_checklist.get("blockers"), list)
+                    else []
+                ):
+                    if code and code not in blockers:
+                        blockers.append(str(code))
+                bed_clear = _append_bambu_bed_clear_blocker(blockers, manager)
+                if blockers:
+                    result = {
+                        **result,
+                        "ok": False,
+                        "status": "blocked",
+                        "failure_code": "BAMBU_AUTOEJECTION_PROJECT_FILE_GATE_BLOCKED",
+                        "blockers": blockers,
+                        "gate_checks": gate_checks,
+                        "camera_status": camera_status,
+                        "autoejection_operator_checklist": autoejection_operator_checklist,
+                        "bed_clear": bed_clear,
+                        "remote_path": "",
+                        "message": "Bambu autoejection project-file publish was blocked by live safety gates.",
+                        "step_trace": [
+                            *result["step_trace"],
+                            {
+                                "step": "PROJECT_FILE_GATE",
+                                "status": "blocked",
+                                "detail": ",".join(blockers),
+                            },
+                        ],
+                    }
+                else:
+                    prepare_result = manager.prepare(
+                        {
+                            "runtime_mode": "live",
+                            "bambu_artifact_path": str(standalone_artifact.get("startable_artifact_path") or ""),
+                            "public_base_url": req.public_base_url,
+                            "subtask_name": f"bambu-eject-{req.position}",
+                            "print": {
+                                "start_immediately": True,
+                                "physical_intent": True,
+                                "confirm_physical_print": True,
+                                "stop_after_start": False,
+                            },
+                        }
+                    )
+                    print_result = (
+                        prepare_result.get("print_result")
+                        if isinstance(prepare_result.get("print_result"), dict)
+                        else {}
+                    )
+                    motion_started = bool(prepare_result.get("ok") and print_result.get("ok"))
+                    result = {
+                        **result,
+                        "ok": bool(prepare_result.get("ok") and motion_started),
+                        "status": "standalone_motion_started" if motion_started else "blocked",
+                        "failure_code": "" if motion_started else str(prepare_result.get("failure_code") or "BAMBU_AUTOEJECTION_PROJECT_FILE_START_FAILED"),
+                        "motion_started": motion_started,
+                        "will_publish": bool(print_result.get("will_publish")),
+                        "published": bool(print_result.get("published")),
+                        "remote_path": str(prepare_result.get("upload", {}).get("remote_path") or ""),
+                        "prepare_result": prepare_result,
+                        "gate_checks": gate_checks,
+                        "camera_status": camera_status,
+                        "autoejection_operator_checklist": autoejection_operator_checklist,
+                        "bed_clear": bed_clear,
+                        "message": (
+                            "Bambu autoejection artifact was started through the normal project_file path."
+                            if motion_started
+                            else str(prepare_result.get("message") or "Bambu autoejection project_file start failed.")
+                        ),
+                        "step_trace": [
+                            *result["step_trace"],
+                            {
+                                "step": "PROJECT_FILE_GATE",
+                                "status": "ok",
+                                "detail": "approved",
+                            },
+                            {
+                                "step": "PROJECT_FILE_PUBLISH",
+                                "status": "published" if motion_started else "blocked",
+                                "detail": str(prepare_result.get("status") or prepare_result.get("failure_code") or ""),
+                            },
+                        ],
+                    }
+            await controller.emit_workspace_result(
+                workspace="printer",
+                tool="printer.autoejection_test",
+                result=result,
+                stage=Stage.SPECIMEN,
+                module_id="specimen",
+                agent="specimen_agent",
+                workflow="autoejection_test",
+            )
+            return result
+        consumer_readiness = _bambu_manipulation_consumer_readiness(mode=req.mode)
+        if not consumer_readiness.get("ready"):
+            result = {
+                "ok": False,
+                "tool": "printer.autoejection_test",
+                "provider": "bambulab_x2d",
+                "selected_printer": manager._selected_printer_payload(selected_profile, selection_reason),
+                "status": "blocked",
+                "failure_code": "BAMBU_AUTOEJECTION_CONSUMER_NOT_READY",
+                "message": "Bambu autoejection provider is configured, but Manipulation Agent consumer defaults or policy evidence are not ready.",
+                "autoejection": autoejection,
+                "consumer_readiness": consumer_readiness,
+                "autoejection_handoff": {},
+                "step_trace": [
+                    {"step": "AUTOEJECTION_GATE", "status": "ok", "detail": str(autoejection.get("provider") or "")},
+                    {"step": "CONSUMER_READINESS", "status": "blocked", "detail": ",".join(str(item) for item in consumer_readiness.get("blockers", []))},
+                ],
+            }
+            await controller.emit_workspace_result(
+                workspace="printer",
+                tool="printer.autoejection_test",
+                result=result,
+                stage=Stage.SPECIMEN,
+                module_id="specimen",
+                agent="specimen_agent",
+                workflow="autoejection_test",
+            )
+            return result
+        handoff = _bambu_autoejection_handoff_payload(
+            autoejection,
+            position=req.position,
+            object_size_mm=[float(item) for item in req.object_size_mm],
+            mode=req.mode,
+            consumer_readiness=consumer_readiness,
+        )
+        result = {
+            "ok": True,
+            "tool": "printer.autoejection_test",
+            "provider": "bambulab_x2d",
+            "selected_printer": manager._selected_printer_payload(selected_profile, selection_reason),
+            "status": "provider_handoff_ready",
+            "motion_started": False,
+            "requested_start_immediately": bool(req.start_immediately),
+            "autoejection": autoejection,
+            "consumer_readiness": consumer_readiness,
+            "handoff": handoff,
+            "autoejection_handoff": handoff,
+            "message": (
+                "Bambu autoejection provider handoff is ready. No Bambu native G-code artifact was generated "
+                "and no robot motion was started by this endpoint."
+            ),
+            "step_trace": [
+                {"step": "AUTOEJECTION_GATE", "status": "ok", "detail": str(autoejection.get("provider") or "")},
+                {"step": "PROVIDER_HANDOFF", "status": "ready", "detail": str(autoejection.get("verified_routine_id") or "")},
+            ],
+        }
+        await controller.emit_workspace_result(
+            workspace="printer",
+            tool="printer.autoejection_test",
+            result=result,
+            stage=Stage.SPECIMEN,
+            module_id="specimen",
+            agent="specimen_agent",
+            workflow="autoejection_test",
+        )
+        return result
+    workflow = _printer_workflow()
+    profile = load_prusa_print_profile(path=RUNTIME_PATHS.memory_root / "prusa_print_profile.json")
+    payload = {
+        "runtime_mode": req.mode,
+        "position": req.position,
+        "object_size_mm": req.object_size_mm,
+        "start_immediately": req.start_immediately,
+        "storage": profile.get("storage", "usb"),
+        "ejection": {"enabled": True},
+    }
+    result = workflow.run_autoejection_test(payload)
+    await controller.emit_workspace_result(
+        workspace="printer",
+        tool="printer.autoejection_test",
+        result=result,
+        stage=Stage.SPECIMEN,
+        module_id="specimen",
+        agent="specimen_agent",
+        workflow="autoejection_test",
+    )
+    return result
+
+
+@app.get("/api/equipment/windows/local-bridge/status")
+async def get_local_pyautogui_bridge_status() -> dict[str, object]:
+    """Return the AX4LAB-owned localhost PyAutoGUI bridge process state."""
+    status = _local_pyautogui_bridge_supervisor().status()
+    status["connection"] = _equipment_bridge().connection_status()
+    return status
+
+
+@app.post("/api/equipment/windows/local-bridge/start")
+async def post_local_pyautogui_bridge_start() -> dict[str, object]:
+    """Start the localhost bridge and register it as a standby candidate."""
+    supervisor = _local_pyautogui_bridge_supervisor()
+    status = supervisor.start()
+    candidate = supervisor.ensure_candidate(_equipment_bridge(), select=False) if status.get("running") else {}
+    return {**status, "candidate": candidate}
+
+
+@app.post("/api/equipment/windows/local-bridge/stop")
+async def post_local_pyautogui_bridge_stop() -> dict[str, object]:
+    """Stop only the localhost bridge process owned by AX4LAB."""
+    status = _local_pyautogui_bridge_supervisor().stop()
+    status["connection"] = _equipment_bridge().connection_status()
+    return status
+
+
+@app.post("/api/equipment/windows/local-bridge/select")
+async def post_local_pyautogui_bridge_select() -> dict[str, object]:
+    """Select the localhost bridge only after live health is ready."""
+    supervisor = _local_pyautogui_bridge_supervisor()
+    status = supervisor.status()
+    if not status.get("running") or not status.get("healthy"):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "ok": False,
+                "status": "blocked",
+                "failure_code": "LOCAL_PYAUTOGUI_NOT_READY",
+                "message": "Start the local bridge and resolve its desktop-control health before selecting it.",
+            },
+        )
+    candidate = supervisor.ensure_candidate(_equipment_bridge(), select=True)
+    return {**status, "candidate": candidate}
+
+
+@app.post("/api/equipment/windows/discover")
+async def post_windows_equipment_discover(req: WindowsBridgeDiscoverRequest) -> dict[str, object]:
+    """Scan the current network for Windows PyAutoGUI bridge hosts."""
+    bridge = _equipment_bridge()
+    return await discover_windows_pyautogui_bridges(
+        bridge.config,
+        subnet=req.subnet,
+        port=req.port,
+        token=req.token,
+        timeout_sec=req.timeout_sec,
+        max_hosts=req.max_hosts,
+    )
+
+
+@app.post("/api/equipment/windows/connect")
+async def post_windows_equipment_connect(req: WindowsBridgeConnectRequest) -> dict[str, object]:
+    """Persist a token-verified Windows PyAutoGUI bridge candidate."""
+    bridge = _equipment_bridge()
+    return bridge.save_connection(req.model_dump())
+
+
+@app.post("/api/equipment/windows/pair")
+async def post_windows_equipment_pair(req: WindowsBridgePairRequest) -> dict[str, object]:
+    """Exchange a four-digit worker code and persist only the returned internal key."""
+    bridge = _equipment_bridge()
+    return bridge.pair_connection(req.model_dump())
+
+
+@app.post("/api/equipment/windows/select")
+async def post_windows_equipment_select(req: WindowsBridgeCandidateRequest) -> dict[str, object]:
+    """Quick-select a saved Windows PyAutoGUI bridge candidate."""
+    bridge = _equipment_bridge()
+    return bridge.select_candidate(req.model_dump())
+
+
+@app.post("/api/equipment/windows/delete")
+async def post_windows_equipment_delete(req: WindowsBridgeCandidateRequest) -> dict[str, object]:
+    """Delete a saved Windows PyAutoGUI bridge candidate."""
+    bridge = _equipment_bridge()
+    return bridge.delete_candidate(req.model_dump())
+
+
+@app.get("/api/equipment/windows/workers/{candidate_alias}/update")
+async def get_windows_worker_update(candidate_alias: str) -> dict[str, object]:
+    """Return the version and update readiness of one Saved Worker."""
+    return _equipment_bridge().worker_update_status({"candidate_alias": candidate_alias})
+
+
+@app.post("/api/equipment/windows/workers/{candidate_alias}/update")
+async def post_windows_worker_update(candidate_alias: str) -> dict[str, object]:
+    """Stage, verify, and restart one explicitly selected Saved Worker."""
+    return _equipment_bridge().update_worker({"candidate_alias": candidate_alias})
+
+
+@app.post("/api/equipment/windows/workers/{candidate_alias}/rollback")
+async def post_windows_worker_rollback(candidate_alias: str) -> dict[str, object]:
+    """Restore the most recent verified backup on one Saved Worker."""
+    return _equipment_bridge().rollback_worker({"candidate_alias": candidate_alias})
+
+
+@app.post("/api/equipment/windows/test")
+async def post_windows_equipment_test() -> dict[str, object]:
+    """Test the selected Windows PyAutoGUI bridge with live /health and /programs."""
+    bridge = _equipment_bridge()
+    health = bridge.health({"runtime_mode": "live", "force_live_bridge": True})
+    programs = bridge.list_programs({"runtime_mode": "live", "force_live_bridge": True}) if health.get("ok") else {}
+    result = {"ok": bool(health.get("ok")), "health": health, "programs": programs}
+    await controller.emit_workspace_result(
+        workspace="equipment",
+        tool="equipment.pyautogui.health",
+        result=result,
+        stage=Stage.EQUIPMENT,
+        module_id="equipment",
+        agent="equipment_agent",
+        workflow="windows_bridge_test",
+    )
+    return result
+
+
+@app.get("/api/equipment/windows/utm-profile")
+async def get_windows_equipment_utm_profile() -> dict[str, object]:
+    """Return the persisted UTM protocol profile merged into autonomous Equipment runs."""
+    bridge = _equipment_bridge()
+    return bridge.utm_profile_status()
+
+
+@app.post("/api/equipment/windows/utm-profile")
+async def post_windows_equipment_utm_profile(req: WindowsBridgeUtmProfileRequest) -> dict[str, object]:
+    """Persist UTM protocol calibration settings for GUI, CUI, and agent-loop reuse."""
+    bridge = _equipment_bridge()
+    result = bridge.save_utm_profile(req.model_dump())
+    await controller.emit_workspace_result(
+        workspace="equipment",
+        tool="equipment.pyautogui.save_utm_profile",
+        result=result,
+        stage=Stage.EQUIPMENT,
+        module_id="equipment",
+        agent="equipment_agent",
+        workflow="windows_utm_profile",
+        node_event=True,
+    )
+    return result
+
+
+@app.post("/api/equipment/windows/run-program")
+async def post_windows_equipment_run_program(req: WindowsBridgeRunProgramRequest) -> dict[str, object]:
+    """Run an explicit setup-GUI macro test such as program1."""
+    if not req.confirm_execute:
+        raise HTTPException(status_code=400, detail="confirm_execute=true is required for setup GUI macro tests")
+    bridge = _equipment_bridge()
+    specimen_result = controller._state.run_metadata.get("specimen_result") if isinstance(controller._state.run_metadata.get("specimen_result"), dict) else {}
+    setup_specimen_id = str(
+        specimen_result.get("specimen_id")
+        or controller._state.current_experiment_spec.get("specimen_id")
+        or "specimen-test"
+    )
+    payload: dict[str, object] = {
+        "runtime_mode": "live",
+        "force_live_bridge": True,
+        "confirm_setup_gui_execute": True,
+        "sequence_id": f"setup-{req.program_id}",
+        "run_id": controller._state.run_id,
+        "specimen_id": setup_specimen_id,
+        "program_id": req.program_id,
+        "command": req.command or f"{req.program_id} 실행",
+        "require_screen_assertions": req.require_screen_assertions,
+        "simulate_utm_protocol": req.simulate_utm_protocol,
+    }
+    if req.export_glob.strip():
+        payload["export_glob"] = req.export_glob.strip()
+    if req.artifact_timeout_s is not None:
+        payload["artifact_timeout_s"] = req.artifact_timeout_s
+    if req.stable_for_sec is not None:
+        payload["stable_for_sec"] = req.stable_for_sec
+    if req.expected_export_path.strip():
+        payload["expected_export_path"] = req.expected_export_path.strip()
+    if req.target_window.strip():
+        payload["target_window"] = req.target_window.strip()
+    if req.target_window_regex.strip():
+        payload["target_window_regex"] = req.target_window_regex.strip()
+    payload["require_window_focus"] = req.require_window_focus
+    payload["manual_save_required_if_no_artifact"] = req.manual_save_required_if_no_artifact
+    if req.locators:
+        payload["locators"] = req.locators
+    if req.sequence:
+        payload["sequence"] = req.sequence
+    is_utm_program = str(req.program_id or "").startswith("utm_")
+    is_utm_recovery_program = str(req.program_id or "") == "utm_stop_or_abort_v1"
+    if is_utm_program and not is_utm_recovery_program:
+        readiness = _windows_utm_readiness_from_bridge(bridge, runtime_overrides=payload)
+        required_gate = "ready_for_setup_test" if req.simulate_utm_protocol else "ready_for_autonomous_profile"
+        if not bool(readiness.get(required_gate)):
+            blockers = [str(item) for item in readiness.get("blockers", []) if str(item or "").strip()]
+            warnings = [str(item) for item in readiness.get("warnings", []) if str(item or "").strip()]
+            gate_blocker = "UTM_AUTONOMOUS_PROFILE_NOT_READY" if required_gate == "ready_for_autonomous_profile" else "UTM_SETUP_PROFILE_NOT_READY"
+            if gate_blocker not in blockers:
+                blockers.append(gate_blocker)
+            result = {
+                "ok": False,
+                "tool": "equipment.pyautogui.run",
+                "status": "blocked",
+                "bridge": "windows_pyautogui",
+                "program_id": req.program_id,
+                "sequence_id": payload["sequence_id"],
+                "failure_code": "UTM_PRE_EXECUTION_READINESS_BLOCKED",
+                "message": "UTM execution was blocked before contacting /execute because readiness gates are incomplete.",
+                "non_actuating": True,
+                "bridge_not_called": True,
+                "required_gate": required_gate,
+                "readiness": readiness,
+                "blockers": blockers,
+                "warnings": warnings,
+                "step_trace": [
+                    {"step": "READINESS_PRECHECK", "status": "blocked", "detail": ", ".join(blockers) or required_gate},
+                ],
+            }
+            controller._state.run_metadata["last_windows_equipment_run_result"] = result
+            controller._state.run_metadata["last_windows_utm_protocol_result"] = result
+            await controller.emit_workspace_result(
+                workspace="equipment",
+                tool="equipment.pyautogui.run",
+                result=result,
+                stage=Stage.EQUIPMENT,
+                module_id="equipment",
+                agent="equipment_agent",
+                workflow="windows_run_program_precheck_blocked",
+                node_event=True,
+            )
+            return result
+        if not req.simulate_utm_protocol:
+            preflight = _windows_utm_live_preflight_from_bridge(
+                bridge,
+                include_locators=True,
+                include_screenshot=False,
+                include_request_log=True,
+                runtime_overrides=payload,
+            )
+            controller._state.run_metadata["last_windows_live_preflight_result"] = preflight
+            if not bool(preflight.get("ready_for_autonomous_profile")):
+                blockers = [str(item) for item in preflight.get("blockers", []) if str(item or "").strip()]
+                warnings = [str(item) for item in preflight.get("warnings", []) if str(item or "").strip()]
+                if "UTM_LIVE_PREFLIGHT_NOT_READY" not in blockers:
+                    blockers.append("UTM_LIVE_PREFLIGHT_NOT_READY")
+                result = {
+                    "ok": False,
+                    "tool": "equipment.pyautogui.run",
+                    "status": "blocked",
+                    "bridge": "windows_pyautogui",
+                    "program_id": req.program_id,
+                    "sequence_id": payload["sequence_id"],
+                    "failure_code": "UTM_LIVE_PREFLIGHT_BLOCKED",
+                    "message": "UTM execution was blocked before /execute because live preflight gates are incomplete.",
+                    "non_actuating": True,
+                    "bridge_not_called": True,
+                    "required_gate": "live_preflight.ready_for_autonomous_profile",
+                    "readiness": readiness,
+                    "preflight": preflight,
+                    "blockers": blockers,
+                    "warnings": warnings,
+                    "step_trace": [
+                        {"step": "READINESS_PRECHECK", "status": "ok", "detail": required_gate},
+                        {"step": "LIVE_PREFLIGHT", "status": "blocked", "detail": ", ".join(blockers) or "live_preflight"},
+                    ],
+                }
+                controller._state.run_metadata["last_windows_equipment_run_result"] = result
+                controller._state.run_metadata["last_windows_utm_protocol_result"] = result
+                await controller.emit_workspace_result(
+                    workspace="equipment",
+                    tool="equipment.pyautogui.run",
+                    result=result,
+                    stage=Stage.EQUIPMENT,
+                    module_id="equipment",
+                    agent="equipment_agent",
+                    workflow="windows_run_program_live_preflight_blocked",
+                    node_event=True,
+                )
+                return result
+    result = bridge.run(payload)
+    if is_utm_program:
+        request_log_after_execute = _windows_bridge_request_log_from_bridge(bridge, runtime_mode="live", confirm_live=True)
+        result["request_audit_log"] = request_log_after_execute
+        for key in (
+            "request_log",
+            "event_count",
+            "recent_paths",
+            "execute_event_seen",
+            "execute_event_count",
+            "execute_payload_event_count",
+            "execute_result_event_count",
+            "execute_run_ids",
+            "execute_sequence_ids",
+            "execute_specimen_ids",
+            "execute_program_ids",
+            "last_execute_context",
+            "last_execute_at",
+        ):
+            if key in request_log_after_execute and key not in result:
+                result[key] = request_log_after_execute[key]
+        if is_utm_recovery_program:
+            result["recovery_macro"] = True
+            result["pre_execution_readiness"] = {
+                "ok": True,
+                "status": "bypassed_for_recovery_macro",
+                "non_actuating": False,
+                "reason": "utm_stop_or_abort_v1 must remain callable even when UTM setup locators are incomplete.",
+            }
+        else:
+            result["pre_execution_readiness"] = readiness
+            if not req.simulate_utm_protocol:
+                result["pre_execution_preflight"] = controller._state.run_metadata.get("last_windows_live_preflight_result", {})
+    controller._state.run_metadata["last_windows_equipment_run_result"] = result
+    if str(result.get("program_id") or req.program_id or "").startswith("utm_"):
+        controller._state.run_metadata["last_windows_utm_protocol_result"] = result
+    await controller.emit_workspace_result(
+        workspace="equipment",
+        tool="equipment.pyautogui.run",
+        result=result,
+        stage=Stage.EQUIPMENT,
+        module_id="equipment",
+        agent="equipment_agent",
+        workflow="windows_utm_recovery_macro" if is_utm_recovery_program else "windows_run_program",
+        node_event=True,
+    )
+    return result
+
+
+@app.get("/api/equipment/windows/locators")
+async def get_windows_equipment_locators() -> dict[str, object]:
+    """List Windows-side locator images captured for equipment protocols."""
+    bridge = _equipment_bridge()
+    return bridge.list_locators({"runtime_mode": "live", "force_live_bridge": True})
+
+
+@app.post("/api/equipment/windows/screenshot")
+async def post_windows_equipment_screenshot(req: WindowsBridgeScreenshotRequest) -> dict[str, object]:
+    """Capture a full Windows bridge screenshot for UTM UI calibration."""
+    if not req.confirm_capture:
+        raise HTTPException(status_code=400, detail="confirm_capture=true is required for Windows screenshot capture")
+    bridge = _equipment_bridge()
+    result = bridge.screenshot(
+        {
+            "runtime_mode": "live",
+            "force_live_bridge": True,
+            "run_id": req.run_id or "locator-calibration",
+            "checkpoint": req.checkpoint or "manual",
+        }
+    )
+    await controller.emit_workspace_result(
+        workspace="equipment",
+        tool="equipment.pyautogui.screenshot",
+        result=result,
+        stage=Stage.EQUIPMENT,
+        module_id="equipment",
+        agent="equipment_agent",
+        workflow="windows_locator_calibration",
+        node_event=True,
+    )
+    return result
+
+
+@app.post("/api/equipment/windows/capture-locator")
+async def post_windows_equipment_capture_locator(req: WindowsBridgeLocatorCaptureRequest) -> dict[str, object]:
+    """Capture a selected Windows screen region as an image locator for UTM protocol assertions."""
+    if not req.confirm_capture:
+        raise HTTPException(status_code=400, detail="confirm_capture=true is required for locator capture")
+    bridge = _equipment_bridge()
+    result = bridge.capture_locator(
+        {
+            "runtime_mode": "live",
+            "force_live_bridge": True,
+            "confirm_setup_gui_execute": True,
+            "program_id": req.program_id,
+            "name": req.name,
+            "target": req.name,
+            "region": req.region,
+            "confidence": req.confidence,
+        }
+    )
+    await controller.emit_workspace_result(
+        workspace="equipment",
+        tool="equipment.pyautogui.capture_locator",
+        result=result,
+        stage=Stage.EQUIPMENT,
+        module_id="equipment",
+        agent="equipment_agent",
+        workflow="windows_locator_calibration",
+        node_event=True,
+    )
+    return result
+
+
+@app.get("/api/lerobot/config")
+async def get_lerobot_config() -> dict[str, object]:
+    """Return LeRobot profile/session configuration for all GUI windows."""
+    return _lerobot_bridge().config_status()
+
+
+@app.post("/api/lerobot/config")
+async def post_lerobot_config(req: LeRobotConfigRequest) -> dict[str, object]:
+    """Select the active LeRobot robot profile."""
+    return _lerobot_bridge().configure(req.model_dump())
+
+
+@app.get("/api/lerobot/sessions")
+async def get_lerobot_sessions() -> dict[str, object]:
+    """Return recent LeRobot sessions across the backend-owned bridge."""
+    sessions: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for bridge in (_lerobot_bridge(), _registered_lerobot_bridge()):
+        if bridge is None:
+            continue
+        for session in bridge.sessions_recent():
+            session_id = str(session.get("session_id") or "")
+            if session_id and session_id in seen:
+                continue
+            if session_id:
+                seen.add(session_id)
+            sessions.append(session)
+    return {"ok": True, "sessions": sessions}
+
+
+_ROBOT_MONITOR_PUBLISHER: asyncio.Task | None = None
+_ROBOT_MONITOR_OWNER = None
+
+
+def _robot_monitor_context() -> dict:
+    context = _joint_telemetry_session_context()
+    return {
+        "reset_at_ms": getattr(controller, "telemetry_reset_at_ms", 0),
+        "state": _manipulation_runtime_state(),
+        "context": {"session": _joint_telemetry_public_session(context["session"]),
+                    "log_path": str(context["log_path"])} if context else None,
+    }
+
+
+@app.get("/api/monitor-workers/robot")
+async def get_robot_monitor_worker(request: Request) -> dict:
+    """Publish read-only context; worker tails logs and builds graph artifacts."""
+    global _ROBOT_MONITOR_PUBLISHER, _ROBOT_MONITOR_OWNER
+    if not _local_monitor_client(request):
+        return {"ok": True, "isolated": False}
+    port = request.url.port or 80
+    config = {"origins": [f"http://{host}:{port}" for host in ("127.0.0.1", "localhost", "[::1]")]}
+    worker = await asyncio.to_thread(monitor_process, "robot", config, paths=RUNTIME_PATHS)
+    await asyncio.to_thread(worker.update, _robot_monitor_context())
+    if _ROBOT_MONITOR_OWNER is not worker or _ROBOT_MONITOR_PUBLISHER is None or _ROBOT_MONITOR_PUBLISHER.done():
+        if _ROBOT_MONITOR_PUBLISHER is not None:
+            _ROBOT_MONITOR_PUBLISHER.cancel()
+        _ROBOT_MONITOR_OWNER = worker
+        async def publish():
+            while worker.process.poll() is None:
+                try:
+                    payload = _robot_monitor_context()
+                    await asyncio.to_thread(worker.update, payload)
+                except (OSError, ValueError):
+                    break
+                await asyncio.sleep(0.5)
+        _ROBOT_MONITOR_PUBLISHER = asyncio.create_task(publish())
+    return {"ok": True, "isolated": True,
+            "websocket_url": worker.url("joints").replace("http://", "ws://") + "?sample_format=compact-v1"}
+
+
+@app.get("/api/lerobot/joint-telemetry/snapshot")
+async def get_lerobot_joint_telemetry_snapshot() -> dict[str, object]:
+    """Return the latest read-only follower/policy sample and terminal artifacts."""
+
+    reset_at_ms = getattr(controller, "telemetry_reset_at_ms", 0)
+    context = _joint_telemetry_session_context()
+    if context is None:
+        return {
+            "ok": True,
+            "schema": TELEMETRY_SCHEMA,
+            "type": "telemetry_state",
+            "reset_at_ms": reset_at_ms,
+            "status": "idle",
+            "session": {},
+            "packet": None,
+            "artifacts": {},
+            "runtime_view": _manipulation_runtime_view(),
+        }
+    session = dict(context["session"])
+    log_path = Path(context["log_path"])
+    observer = JointTelemetryFileObserver(max_initial_samples=1, max_batch_samples=1)
+    packets = await asyncio.to_thread(observer.poll, log_path, session)
+    status = session_status_label(session.get("status"))
+    if status == "idle":
+        status = "live" if packets else "waiting"
+    artifacts: dict[str, Any] = {}
+    if str(session.get("status") or "").upper() in TERMINAL_SESSION_STATUSES:
+        artifacts = await asyncio.to_thread(_joint_telemetry_artifacts, log_path, session)
+    packet = packets[-1] if packets else None
+    return {
+        "ok": True,
+        "schema": TELEMETRY_SCHEMA,
+        "type": "telemetry_snapshot",
+        "reset_at_ms": reset_at_ms,
+        "status": status,
+        "session": _joint_telemetry_public_session(session),
+        "packet": packet,
+        "artifacts": artifacts,
+        "runtime_view": _manipulation_runtime_view(session, packet, artifacts),
+    }
+
+
+@app.get("/api/lerobot/grasp-outcomes")
+async def get_lerobot_grasp_outcomes() -> dict[str, object]:
+    """Expose deterministic read-only grasp evidence for a separate aggregate card."""
+
+    context = _joint_telemetry_session_context()
+    if context is None:
+        return {
+            "ok": True,
+            "schema": GRASP_OUTCOME_SCHEMA,
+            "status": "idle",
+            "session": {},
+            "attempts": [],
+            "summary": empty_grasp_outcome_summary(),
+            "artifact_path": "",
+            "artifact_url": "",
+        }
+
+    session = dict(context["session"])
+    log_path = Path(context["log_path"])
+    result = await asyncio.to_thread(finalize_grasp_outcome_artifact, log_path, session)
+    artifact_path = str(result.get("artifact_path") or "").strip()
+    artifact_url = ""
+    if artifact_path and Path(artifact_path).is_file():
+        artifact_url = f"/api/lerobot/visualization/file?path={quote(artifact_path, safe='')}"
+    return {
+        "ok": bool(result.get("ok")),
+        "schema": str(result.get("schema") or GRASP_OUTCOME_SCHEMA),
+        "status": session_status_label(session.get("status")),
+        "session": _joint_telemetry_public_session(session),
+        "attempts": list(result.get("attempts") or []),
+        "grasp_achievement": dict(result.get("grasp_achievement") or {}),
+        "summary": dict(result.get("summary") or empty_grasp_outcome_summary()),
+        "artifact_path": artifact_path,
+        "artifact_url": artifact_url,
+    }
+
+
+def _recording_active_cam_specimen_pose() -> dict[str, Any]:
+    return load_recording_specimen_pose(ACTIVE_ROBOT_CAM_LATEST_RESULT_PATH)
+
+
+@app.get("/api/lerobot/active-robot-cam/specimen-pose")
+async def get_lerobot_active_robot_cam_specimen_pose() -> dict[str, object]:
+    """Expose Recording Active Cam's latest accepted pose without acquiring the camera."""
+
+    return {
+        "ok": True,
+        "source": "recording_active_robot_cam",
+        "server_started_at_ms": max(app.state.specimen_pose_server_started_at_ms, getattr(controller, "telemetry_reset_at_ms", 0)),
+        "pose": await asyncio.to_thread(_recording_active_cam_specimen_pose),
+    }
+
+
+@app.websocket("/ws/lerobot/joint-telemetry")
+async def stream_lerobot_joint_telemetry(websocket: WebSocket) -> None:
+    """Stream existing rollout action logs without touching the control process."""
+
+    await websocket.accept()
+    observer = JointTelemetryFileObserver(preserve_history=True)
+    compact = websocket.query_params.get("sample_format") == "compact-v1"
+    active_session_id = ""
+    history_sent = False
+    last_state_signature = ""
+    finalized_sessions: set[str] = set()
+    latest_packet: dict[str, Any] | None = None
+    try:
+        while True:
+            reset_at_ms = getattr(controller, "telemetry_reset_at_ms", 0)
+            context = _joint_telemetry_session_context()
+            if context is None:
+                signature = f"idle:{reset_at_ms}"
+                if signature != last_state_signature:
+                    await websocket.send_json(
+                        {
+                            "ok": True,
+                            "schema": TELEMETRY_SCHEMA,
+                            "type": "telemetry_state",
+                            "reset_at_ms": reset_at_ms,
+                            "status": "idle",
+                            "session": {},
+                            "runtime_view": _manipulation_runtime_view(),
+                        }
+                    )
+                    last_state_signature = signature
+                await asyncio.sleep(0.05)
+                continue
+
+            session = dict(context["session"])
+            log_path = Path(context["log_path"])
+            session_id = str(session.get("session_id") or "")
+            if session_id != active_session_id:
+                observer.reset()
+                active_session_id = session_id
+                history_sent = False
+                last_state_signature = ""
+                latest_packet = None
+
+            packets = await asyncio.to_thread(observer.poll, log_path, session)
+            if packets:
+                latest_packet = packets[-1]
+            public_session = _joint_telemetry_public_session(session)
+            status = session_status_label(session.get("status"))
+            if status == "idle":
+                status = "live" if packets else "waiting"
+
+            if packets or not history_sent:
+                # Bounded messages retain every point; only display detail is shared.
+                batches = ([packets[i:i + 128] for i in range(0, len(packets), 128)] or [[]]) if compact else [packets]
+                for batch in batches:
+                    batch_latest = batch[-1] if batch else latest_packet
+                    await websocket.send_json(
+                        {
+                            "ok": True,
+                            "schema": TELEMETRY_SCHEMA,
+                            "type": "joint_samples" if history_sent else "joint_history",
+                            "reset_at_ms": reset_at_ms,
+                            "status": status,
+                            "session": public_session,
+                            **build_joint_telemetry_batch(batch, compact=compact),
+                            "runtime_view": _manipulation_runtime_view(session, batch_latest),
+                        }
+                    )
+                    history_sent = True
+            else:
+                signature = f"{session_id}:{status}:{session.get('status', '')}"
+                if signature != last_state_signature:
+                    await websocket.send_json(
+                        {
+                            "ok": True,
+                            "schema": TELEMETRY_SCHEMA,
+                            "type": "telemetry_state",
+                            "reset_at_ms": reset_at_ms,
+                            "status": status,
+                            "session": public_session,
+                            "runtime_view": _manipulation_runtime_view(session, latest_packet),
+                        }
+                    )
+                    last_state_signature = signature
+
+            terminal = str(session.get("status") or "").upper() in TERMINAL_SESSION_STATUSES
+            if terminal and session_id not in finalized_sessions:
+                artifacts = await asyncio.to_thread(_joint_telemetry_artifacts, log_path, session)
+                await websocket.send_json(
+                    {
+                        "ok": bool(artifacts.get("ok")),
+                        "schema": TELEMETRY_SCHEMA,
+                        "type": "telemetry_artifacts",
+                        "reset_at_ms": reset_at_ms,
+                        "status": status,
+                        "session": public_session,
+                        "artifacts": artifacts,
+                        "runtime_view": _manipulation_runtime_view(session, latest_packet, artifacts),
+                    }
+                )
+                finalized_sessions.add(session_id)
+            await asyncio.sleep(0.05)
+    except (WebSocketDisconnect, RuntimeError):
+        return
+
+
+@app.get("/api/lerobot/policies")
+async def get_lerobot_policies() -> dict[str, object]:
+    """Return configured and locally discovered LeRobot policy choices."""
+    return _lerobot_bridge().policies_list({"mode": "test"})
+
+
+@app.post("/api/lerobot/files/browse")
+async def post_lerobot_files_browse(req: LeRobotBrowseRequest) -> dict[str, object]:
+    """Browse allowed local LeRobot dataset/policy/output roots for GUI path selection."""
+    return _lerobot_bridge().browse_paths(req.model_dump())
+
+
+@app.post("/api/lerobot/files/pick")
+async def post_lerobot_files_pick(req: LeRobotBrowseRequest) -> dict[str, object]:
+    """Open a native local file/folder picker for the LeRobot GUI."""
+    return _lerobot_bridge().pick_path(req.model_dump())
+
+
+@app.post("/api/lerobot/visualize/dataset")
+async def post_lerobot_visualize_dataset(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Return local LeRobot dataset metadata and media candidates for lightweight preview."""
+    result = _lerobot_bridge().visualize_dataset(req.model_dump())
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/augment/isaac")
+async def post_lerobot_augment_isaac(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Build Isaac Sim augmentation sidecars for the selected LeRobot dataset."""
+    result = _lerobot_bridge().augment_isaac_dataset(req.model_dump())
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/augment/status")
+async def post_lerobot_augment_status(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Return Isaac Sim augmentation job progress."""
+    result = _lerobot_bridge().augment_isaac_status(req.model_dump())
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/augment/preview")
+async def post_lerobot_augment_preview(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Return deterministic side-by-side preview rows for Isaac augmentation variants."""
+    result = _lerobot_bridge().augment_isaac_preview(req.model_dump())
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/isaac-lab/validate")
+async def post_lerobot_isaac_lab_validate(req: IsaacLabSyntheticRequest) -> dict[str, object]:
+    """Run non-actuating Isaac Lab synthetic validation checks."""
+    result = _lerobot_bridge().isaac_lab_validate(req.model_dump(mode="json"))
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/isaac-lab/prepare")
+async def post_lerobot_isaac_lab_prepare(req: IsaacLabSyntheticRequest) -> dict[str, object]:
+    """Run Isaac Lab synthetic digital-twin preflight and write artifacts."""
+    result = _lerobot_bridge().isaac_lab_prepare(req.model_dump(mode="json"))
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/isaac-lab/build-synthetic")
+async def post_lerobot_isaac_lab_build_synthetic(req: IsaacLabSyntheticRequest) -> dict[str, object]:
+    """Build the validation-first Isaac Lab synthetic manifests."""
+    result = _lerobot_bridge().isaac_lab_build_synthetic(req.model_dump(mode="json"))
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/isaac-lab/run-replicator-worker")
+async def post_lerobot_isaac_lab_run_replicator_worker(req: IsaacLabSyntheticRequest) -> dict[str, object]:
+    """Run the Isaac Sim Replicator worker and refresh synthetic manifests."""
+    result = _lerobot_bridge().isaac_lab_run_replicator_worker(req.model_dump(mode="json"))
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/isaac-lab/preview")
+async def post_lerobot_isaac_lab_preview(req: IsaacLabSyntheticRequest) -> dict[str, object]:
+    """Return preview card metadata for the latest Isaac Lab synthetic run."""
+    result = _lerobot_bridge().isaac_lab_preview(req.model_dump(mode="json"))
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/isaac-lab/export-hdf5")
+async def post_lerobot_isaac_lab_export_hdf5(req: IsaacLabSyntheticRequest) -> dict[str, object]:
+    """Write HDF5 export hook summaries for the latest Isaac Lab synthetic run."""
+    result = _lerobot_bridge().isaac_lab_export_hdf5(req.model_dump(mode="json"))
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/isaac-lab/annotate")
+async def post_lerobot_isaac_lab_annotate(req: IsaacLabSyntheticRequest) -> dict[str, object]:
+    """Write the Isaac Lab Mimic annotation command summary."""
+    result = _lerobot_bridge().isaac_lab_annotate(req.model_dump(mode="json"))
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/isaac-lab/generate-mimic")
+async def post_lerobot_isaac_lab_generate_mimic(req: IsaacLabSyntheticRequest) -> dict[str, object]:
+    """Run the named Isaac Lab Mimic generation step."""
+    result = _lerobot_bridge().isaac_lab_generate_mimic(req.model_dump(mode="json"))
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/isaac-lab/mimic-rgbd/render-missing")
+async def post_lerobot_isaac_lab_mimic_rgbd_render_missing(req: IsaacLabSyntheticRequest) -> dict[str, object]:
+    """Render the Isaac Lab Mimic RGB-D sidecar without using the recording RGB-D renderer."""
+    result = _lerobot_bridge().isaac_lab_render_mimic_rgbd(req.model_dump(mode="json"))
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/isaac-lab/train-il")
+async def post_lerobot_isaac_lab_train_il(req: IsaacLabSyntheticRequest) -> dict[str, object]:
+    """Write the Isaac Lab robomimic IL training command summary."""
+    result = _lerobot_bridge().isaac_lab_train_il(req.model_dump(mode="json"))
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/isaac-lab/eval-il")
+async def post_lerobot_isaac_lab_eval_il(req: IsaacLabSyntheticRequest) -> dict[str, object]:
+    """Write the Isaac Lab robomimic IL evaluation command summary."""
+    result = _lerobot_bridge().isaac_lab_eval_il(req.model_dump(mode="json"))
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/isaac-lab/run-e2e")
+async def post_lerobot_isaac_lab_run_e2e(req: IsaacLabSyntheticRequest) -> dict[str, object]:
+    """Run the non-actuating Isaac Lab Mimic + IL sidecar sequence."""
+    result = _lerobot_bridge().isaac_lab_run_e2e(req.model_dump(mode="json"))
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/isaac-lab/domain-mimic/run")
+async def post_lerobot_isaac_lab_domain_mimic_run(req: IsaacLabSyntheticRequest) -> dict[str, object]:
+    """Run the live Domain Randomization + Mimic launcher sequence."""
+    result = _lerobot_bridge().isaac_lab_run_e2e(req.model_dump(mode="json"))
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/isaac-lab/run-live-e2e-check")
+async def post_lerobot_isaac_lab_run_live_e2e_check(req: IsaacLabSyntheticRequest) -> dict[str, object]:
+    """Launch the live Isaac Lab Mimic + IL 10s x 3 validation runner."""
+    result = _lerobot_bridge().isaac_lab_run_live_e2e_check(req.model_dump(mode="json"))
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/isaac-lab/live-e2e/status")
+async def post_lerobot_isaac_lab_live_e2e_status(req: IsaacLabSyntheticRequest) -> dict[str, object]:
+    """Return the latest or requested live Isaac Lab E2E validation job."""
+    return _lerobot_bridge().isaac_lab_live_e2e_status(req.model_dump(mode="json"))
+
+
+@app.post("/api/lerobot/isaac-lab/live-e2e/stop")
+async def post_lerobot_isaac_lab_live_e2e_stop(req: IsaacLabSyntheticRequest) -> dict[str, object]:
+    """Stop the latest or requested live Isaac Lab E2E validation job."""
+    return _lerobot_bridge().isaac_lab_live_e2e_stop(req.model_dump(mode="json"))
+
+
+@app.post("/api/lerobot/isaac-lab/run-mimic-smoke")
+async def post_lerobot_isaac_lab_run_mimic_smoke(req: IsaacLabSyntheticRequest) -> dict[str, object]:
+    """Validate and write the Isaac Lab Mimic smoke launch artifact."""
+    result = _lerobot_bridge().isaac_lab_run_mimic_smoke(req.model_dump(mode="json"))
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/isaac-lab/run-mimic")
+async def post_lerobot_isaac_lab_run_mimic(req: IsaacLabSyntheticRequest) -> dict[str, object]:
+    """Run the Isaac Lab Mimic branch or its deterministic dry-run runner."""
+    result = _lerobot_bridge().isaac_lab_run_mimic(req.model_dump(mode="json"))
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/isaac-lab/mimic/status")
+async def post_lerobot_isaac_lab_mimic_status(req: IsaacLabSyntheticRequest) -> dict[str, object]:
+    """Return the latest or requested Isaac Lab Mimic job state."""
+    return _lerobot_bridge().isaac_lab_mimic_status(req.model_dump(mode="json"))
+
+
+@app.post("/api/lerobot/isaac-lab/mimic/stop")
+async def post_lerobot_isaac_lab_mimic_stop(req: IsaacLabSyntheticRequest) -> dict[str, object]:
+    """Stop the latest or requested Isaac Lab Mimic job."""
+    return _lerobot_bridge().isaac_lab_mimic_stop(req.model_dump(mode="json"))
+
+
+@app.post("/api/lerobot/isaac-lab/run-rl-teacher-smoke")
+async def post_lerobot_isaac_lab_run_rl_teacher_smoke(req: IsaacLabSyntheticRequest) -> dict[str, object]:
+    """Validate and write the Isaac Lab RL teacher smoke launch artifact."""
+    result = _lerobot_bridge().isaac_lab_run_rl_teacher_smoke(req.model_dump(mode="json"))
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/isaac-lab/run-rl-teacher")
+async def post_lerobot_isaac_lab_run_rl_teacher(req: IsaacLabSyntheticRequest) -> dict[str, object]:
+    """Run the Isaac Lab RL teacher branch or its deterministic dry-run runner."""
+    result = _lerobot_bridge().isaac_lab_run_rl_teacher(req.model_dump(mode="json"))
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/isaac-lab/rl-teacher/status")
+async def post_lerobot_isaac_lab_rl_teacher_status(req: IsaacLabSyntheticRequest) -> dict[str, object]:
+    """Return the latest or requested Isaac Lab RL teacher job state."""
+    return _lerobot_bridge().isaac_lab_rl_teacher_status(req.model_dump(mode="json"))
+
+
+@app.post("/api/lerobot/isaac-lab/rl-teacher/stop")
+async def post_lerobot_isaac_lab_rl_teacher_stop(req: IsaacLabSyntheticRequest) -> dict[str, object]:
+    """Stop the latest or requested Isaac Lab RL teacher job."""
+    return _lerobot_bridge().isaac_lab_rl_teacher_stop(req.model_dump(mode="json"))
+
+
+@app.post("/api/lerobot/isaac-lab/e2e-smoke")
+async def post_lerobot_isaac_lab_e2e_smoke(req: IsaacLabSyntheticRequest) -> dict[str, object]:
+    """Run a non-actuating 5x10 synthetic workflow smoke through GUI-equivalent bridge methods."""
+    result = _lerobot_bridge().isaac_lab_run_e2e_smoke(req.model_dump(mode="json"))
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/isaac-lab/status")
+async def post_lerobot_isaac_lab_status(req: IsaacLabSyntheticRequest) -> dict[str, object]:
+    """Return latest Isaac Lab synthetic status without launching runtimes."""
+    return _lerobot_bridge().isaac_lab_status(req.model_dump(mode="json"))
+
+
+@app.post("/api/lerobot/isaac-lab/check-outputs")
+async def post_lerobot_isaac_lab_check_outputs(req: IsaacLabSyntheticRequest) -> dict[str, object]:
+    """Check latest Isaac Lab synthetic artifacts without launching runtimes."""
+    return _lerobot_bridge().isaac_lab_check_outputs(req.model_dump(mode="json"))
+
+
+@app.post("/api/lerobot/isaac-rgbd/render/start")
+async def post_lerobot_isaac_rgbd_render_start(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Start or resume post-record Isaac RGB-D rendering for missing frames."""
+    result = _lerobot_bridge().isaac_rgbd_render_start(req.model_dump())
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/isaac-rgbd/render/status")
+async def post_lerobot_isaac_rgbd_render_status(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Return post-record Isaac RGB-D render progress."""
+    return _lerobot_bridge().isaac_rgbd_render_status(req.model_dump())
+
+
+@app.post("/api/lerobot/isaac-rgbd/render/stop")
+async def post_lerobot_isaac_rgbd_render_stop(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Request a safe stop for post-record Isaac RGB-D rendering."""
+    return _lerobot_bridge().isaac_rgbd_render_stop(req.model_dump())
+
+
+@app.post("/api/lerobot/visualize/start")
+async def post_lerobot_visualize_start(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Start LeRobot's dataset visualizer."""
+    return await _call_lerobot_backend_tool("lerobot.visualize.start", req.model_dump())
+
+
+@app.post("/api/lerobot/visualize/stop")
+async def post_lerobot_visualize_stop(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Stop a LeRobot dataset visualizer session."""
+    return await _call_lerobot_backend_tool("lerobot.visualize.stop", req.model_dump())
+
+
+@app.post("/api/lerobot/visualize/status")
+async def post_lerobot_visualize_status(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Return LeRobot dataset visualizer status."""
+    return await _call_lerobot_backend_tool("lerobot.visualize.status", req.model_dump(), publish=False)
+
+
+@app.get("/api/lerobot/visualization/file")
+async def get_lerobot_visualization_file(path: str) -> FileResponse:
+    """Serve an allowed local LeRobot dataset media file."""
+    try:
+        file_path = _lerobot_bridge().visualization_file_path(path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return FileResponse(file_path)
+
+
+@app.get("/api/lerobot/ports")
+async def get_lerobot_ports(
+    profile_id: str = "",
+    mode: Literal["live", "test", "replay", "fault-injection"] = "test",
+) -> dict[str, object]:
+    """Discover robot/teleop ports or return deterministic test ports."""
+    result = _lerobot_bridge().find_ports({"profile_id": profile_id, "mode": mode})
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/ports/baseline")
+async def post_lerobot_ports_baseline(req: LeRobotDevicePortAPIRequest) -> dict[str, object]:
+    """Save current serial/camera state before reconnecting a target LeRobot device."""
+    result = _lerobot_bridge().ports_baseline(req.model_dump())
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/ports/detect")
+async def post_lerobot_ports_detect(req: LeRobotDevicePortAPIRequest) -> dict[str, object]:
+    """Detect and save the target LeRobot device that appeared after the baseline."""
+    result = await asyncio.to_thread(_lerobot_bridge().ports_detect, req.model_dump())
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/ports/save")
+async def post_lerobot_ports_save(req: LeRobotDevicePortAPIRequest) -> dict[str, object]:
+    """Persist an explicitly selected LeRobot follower/leader/camera port."""
+    result = _lerobot_bridge().ports_save(req.model_dump())
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/ports/delete")
+async def post_lerobot_ports_delete(req: LeRobotDevicePortAPIRequest) -> dict[str, object]:
+    """Remove a saved LeRobot follower/leader/camera port entry."""
+    result = _lerobot_bridge().ports_delete(req.model_dump())
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/camera/test")
+async def post_lerobot_camera_test(req: LeRobotDevicePortAPIRequest) -> dict[str, object]:
+    """Capture one LeRobot camera test frame or a deterministic test-mode preview."""
+    result = _lerobot_bridge().camera_test(req.model_dump(exclude_unset=True))
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/profiles/validate")
+async def post_lerobot_profile_validate(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Validate a LeRobot robot profile."""
+    result = _lerobot_bridge().profiles_validate(req.model_dump())
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/mirror/joint-mapping")
+async def post_lerobot_mirror_joint_mapping(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Return the physical follower to Isaac Sim joint mapping."""
+    result = _lerobot_bridge().mirror_joint_mapping(req.model_dump())
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/mirror/state-probe")
+async def post_lerobot_mirror_state_probe(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Read current follower joint state for Isaac mirror mode without commanding motion."""
+    result = _lerobot_bridge().mirror_joint_state_probe(req.model_dump())
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/mirror/receiver-health")
+async def post_lerobot_mirror_receiver_health(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Check the Isaac mirror receiver before synchronized live execution."""
+    result = _lerobot_bridge().mirror_receiver_health(req.model_dump())
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/mirror/receiver-verify")
+async def post_lerobot_mirror_receiver_verify(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Post one mirror sample and confirm the Isaac receiver reports it as latest state."""
+    result = _lerobot_bridge().mirror_receiver_verify(req.model_dump())
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/mirror/receiver-process/start")
+async def post_lerobot_mirror_receiver_process_start(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Start the managed Isaac mirror receiver process."""
+    result = _lerobot_bridge().mirror_receiver_process_start(req.model_dump())
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/mirror/receiver-process/status")
+async def post_lerobot_mirror_receiver_process_status(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Return the managed Isaac mirror receiver process status."""
+    result = _lerobot_bridge().mirror_receiver_process_status(req.model_dump())
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/mirror/receiver-process/stop")
+async def post_lerobot_mirror_receiver_process_stop(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Stop the managed Isaac mirror receiver process."""
+    result = _lerobot_bridge().mirror_receiver_process_stop(req.model_dump())
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/mirror/loop/start")
+async def post_lerobot_mirror_loop_start(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Start an Isaac Sim follower-state mirror loop."""
+    result = _lerobot_bridge().mirror_loop_start(req.model_dump())
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/mirror/loop/stop")
+async def post_lerobot_mirror_loop_stop(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Stop an Isaac Sim follower-state mirror loop."""
+    result = _lerobot_bridge().mirror_loop_stop(req.model_dump())
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/mirror/loop/status")
+async def post_lerobot_mirror_loop_status(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Return Isaac Sim follower-state mirror loop status."""
+    result = _lerobot_bridge().mirror_loop_status(req.model_dump())
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/teleoperate/start")
+async def post_lerobot_teleoperate_start(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Start LeRobot teleoperation."""
+    result = await _call_lerobot_backend_tool("lerobot.teleoperate.start", req.model_dump())
+    if (req.handoff_token or req.handoff_run_id) and result.get("ok"):
+        if not req.handoff_token or not req.handoff_run_id or not result.get("session_id"):
+            raise HTTPException(status_code=409, detail="TELEOP_HANDOFF_BINDING_INVALID")
+        try:
+            controller.bind_teleop_handoff_session(
+                run_id=req.handoff_run_id,
+                handoff_token=req.handoff_token,
+                teleop_session_id=str(result["session_id"]),
+            )
+        except OperatorTeleopHandoffError as exc:
+            await _call_lerobot_backend_tool(
+                "lerobot.teleoperate.stop",
+                {"mode": req.mode, "runtime_mode": req.runtime_mode, "session_id": result.get("session_id")},
+            )
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return result
+
+
+@app.post("/api/lerobot/teleoperate/stop")
+async def post_lerobot_teleoperate_stop(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Stop LeRobot teleoperation."""
+    return await _call_lerobot_backend_tool("lerobot.teleoperate.stop", req.model_dump())
+
+
+@app.post("/api/lerobot/teleoperate/status")
+async def post_lerobot_teleoperate_status(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Return LeRobot teleoperation status."""
+    return await _call_lerobot_backend_tool("lerobot.teleoperate.status", req.model_dump(), publish=False)
+
+
+@app.post("/api/lerobot/record/start")
+async def post_lerobot_record_start(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Start LeRobot dataset recording."""
+    return await _call_lerobot_backend_tool("lerobot.record.start", req.model_dump())
+
+
+@app.post("/api/lerobot/replay/start")
+async def post_lerobot_replay_start(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Start a managed local episode replay, never a policy fallback."""
+    return await _call_lerobot_backend_tool("lerobot.replay.start", req.model_dump())
+
+
+@app.post("/api/lerobot/replay/status")
+async def post_lerobot_replay_status(req: LeRobotAPIRequest) -> dict[str, object]:
+    return await _call_lerobot_backend_tool("lerobot.replay.status", req.model_dump(), publish=False)
+
+
+@app.post("/api/lerobot/replay/stop")
+async def post_lerobot_replay_stop(req: LeRobotAPIRequest) -> dict[str, object]:
+    return await _call_lerobot_backend_tool("lerobot.replay.stop", req.model_dump())
+
+
+@app.post("/api/lerobot/record/control")
+async def post_lerobot_record_control(req: LeRobotRecordControlAPIRequest) -> dict[str, object]:
+    """Apply a LeRobot recording control action."""
+    return await _call_lerobot_backend_tool("lerobot.record.control", req.model_dump())
+
+
+@app.post("/api/lerobot/record/status")
+async def post_lerobot_record_status(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Return LeRobot recording status."""
+    return await _call_lerobot_backend_tool("lerobot.record.status", req.model_dump(), publish=False)
+
+
+@app.post("/api/lerobot/train/start")
+async def post_lerobot_train_start(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Start LeRobot policy training."""
+    return await _call_lerobot_backend_tool("lerobot.train.start", req.model_dump(exclude_unset=True))
+
+
+@app.post("/api/lerobot/train/cancel")
+async def post_lerobot_train_cancel(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Cancel LeRobot policy training."""
+    return await _call_lerobot_backend_tool("lerobot.train.cancel", req.model_dump())
+
+
+@app.post("/api/lerobot/train/status")
+async def post_lerobot_train_status(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Return LeRobot training status."""
+    return await _call_lerobot_backend_tool("lerobot.train.status", req.model_dump(), publish=False)
+
+
+@app.post("/api/lerobot/wandb-local/start")
+async def post_lerobot_wandb_local_start(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Start a local W&B Server for LeRobot training dashboards."""
+    return await _call_lerobot_backend_tool("lerobot.wandb_local.start", req.model_dump())
+
+
+@app.post("/api/lerobot/wandb-local/stop")
+async def post_lerobot_wandb_local_stop(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Stop the local W&B Server tracked by the LeRobot bridge."""
+    return await _call_lerobot_backend_tool("lerobot.wandb_local.stop", req.model_dump())
+
+
+@app.post("/api/lerobot/wandb-local/status")
+async def post_lerobot_wandb_local_status(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Return local W&B Server status."""
+    return await _call_lerobot_backend_tool("lerobot.wandb_local.status", req.model_dump(), publish=False)
+
+
+@app.get("/api/lerobot/wandb-local/api-key")
+async def get_lerobot_wandb_local_api_key() -> dict[str, object]:
+    """Return W&B local API key status without exposing the secret."""
+    return _public_wandb_local_api_key_settings(_read_wandb_local_api_key_settings())
+
+
+@app.post("/api/lerobot/wandb-local/api-key")
+async def post_lerobot_wandb_local_api_key(req: LeRobotWandBLocalApiKeyRequest) -> dict[str, object]:
+    """Save the W&B local API key to the local gitignored single-file store."""
+    settings = _write_wandb_local_api_key_settings(req.api_key, enabled=req.enabled, source="user")
+    return _public_wandb_local_api_key_settings(settings)
+
+
+def _rollout_profile_from_request(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Convert a standalone rollout request to persisted GUI defaults."""
+    policy_path = req.policy_path or req.policy_checkpoint_path
+    return {
+        "profile_id": req.profile_id,
+        "observation_pipeline_id": req.observation_pipeline_id,
+        "policy_type": req.policy_type,
+        "policy_path": policy_path,
+        "policy_checkpoint_path": req.policy_checkpoint_path or policy_path,
+        "policy_repo_id": req.policy_repo_id,
+        "task_instruction": req.task_instruction,
+        "continuous_rollout": req.continuous_rollout,
+        "max_duration_s": req.max_duration_s,
+        "rollout_action_clamp": req.rollout_action_clamp,
+        "rollout_linear_enabled": req.rollout_linear_enabled,
+        "rollout_linear_hz": req.rollout_linear_hz,
+        "rollout_max_relative_target": req.rollout_max_relative_target,
+        "rollout_shoulder_lift_backstop": req.rollout_shoulder_lift_backstop,
+        "rollout_temporal_ensemble": req.rollout_temporal_ensemble,
+        "rollout_temporal_ensemble_coeff": req.rollout_temporal_ensemble_coeff,
+        "rollout_inference_type": req.rollout_inference_type,
+        "rollout_rtc_execution_horizon": req.rollout_rtc_execution_horizon,
+        "rollout_rtc_max_guidance_weight": req.rollout_rtc_max_guidance_weight,
+        "rollout_action_queue_size_to_get_new_actions": req.rollout_action_queue_size_to_get_new_actions,
+        "observation": req.observation,
+    }
+
+
+def _saved_manipulation_rollout_fallback() -> dict[str, object]:
+    """Use the selected saved manipulation task as the first standalone rollout profile."""
+    profile = load_manipulation_agent_profile(paths=RUNTIME_PATHS)
+    task_id = str(profile.get("task_id") or "transfer_to_utm")
+    task_profiles = profile.get("task_profiles") if isinstance(profile.get("task_profiles"), dict) else {}
+    task_profile = task_profiles.get(task_id) if isinstance(task_profiles, dict) else None
+    return {**profile, **(task_profile if isinstance(task_profile, dict) else {})}
+
+
+@app.get("/api/lerobot/rollout/config")
+async def get_lerobot_rollout_config() -> dict[str, object]:
+    """Return saved standalone rollout defaults without selecting the newest checkpoint."""
+    saved = (RUNTIME_PATHS.memory_root / "lerobot_rollout_profile.json").exists()
+    return {
+        "ok": True,
+        "profile": load_lerobot_rollout_profile(fallback=_saved_manipulation_rollout_fallback(), paths=RUNTIME_PATHS),
+        "profile_path": str(RUNTIME_PATHS.memory_root / "lerobot_rollout_profile.json"),
+        "source": "saved_rollout_profile" if saved else "manipulation_agent_profile",
+    }
+
+
+@app.post("/api/lerobot/rollout/config")
+async def post_lerobot_rollout_config(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Persist the standalone rollout selection and safety options."""
+    profile = save_lerobot_rollout_profile(_rollout_profile_from_request(req), paths=RUNTIME_PATHS)
+    return {
+        "ok": True,
+        "tool": "lerobot.rollout.config.save",
+        "profile": profile,
+        "profile_path": str(RUNTIME_PATHS.memory_root / "lerobot_rollout_profile.json"),
+        "source": "saved_rollout_profile",
+        "message": "Standalone rollout defaults saved.",
+    }
+
+
+@app.post("/api/lerobot/rollout/start")
+async def post_lerobot_rollout_start(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Start LeRobot policy rollout/inference."""
+    return await _call_lerobot_backend_tool("lerobot.rollout.start", req.model_dump())
+
+
+def _manipulation_profile_from_request(req: ManipulationAgentBridgeRequest) -> dict[str, object]:
+    """Convert GUI/API request to persisted Manipulation Agent profile keys."""
+    policy_path = req.policy_path or req.policy_checkpoint_path
+    return {
+        "manipulation_strategy": req.manipulation_strategy,
+        "policy_type": req.policy_type,
+        "policy_path": policy_path,
+        "policy_checkpoint_path": req.policy_checkpoint_path,
+        "policy_repo_id": req.policy_repo_id,
+        "profile_id": req.profile_id,
+        "observation_pipeline_id": req.observation_pipeline_id,
+        "dataset_repo_id": req.dataset_repo_id,
+        "dataset_root": req.dataset_root,
+        "task_id": req.task_id or req.skill_id,
+        "skill_id": req.skill_id or req.task_id,
+        "task_instruction": req.task_instruction,
+        "source_location": req.source_location,
+        "target_location": req.target_location,
+        "policy_backend": req.policy_backend,
+        "device": req.device,
+        "fps": req.fps,
+        "camera_fps": req.camera_fps,
+        "camera_enabled": req.camera_enabled,
+        "display_data": req.display_data,
+        "continuous_rollout": req.continuous_rollout,
+        "rollout_action_clamp": req.rollout_action_clamp,
+        "rollout_linear_enabled": req.rollout_linear_enabled,
+        "rollout_linear_hz": req.rollout_linear_hz,
+        "rollout_max_relative_target": req.rollout_max_relative_target,
+        "rollout_shoulder_lift_backstop": req.rollout_shoulder_lift_backstop,
+        "rollout_temporal_ensemble": req.rollout_temporal_ensemble,
+        "rollout_temporal_ensemble_coeff": req.rollout_temporal_ensemble_coeff,
+        "rollout_inference_type": req.rollout_inference_type,
+        "rollout_rtc_execution_horizon": req.rollout_rtc_execution_horizon,
+        "rollout_rtc_max_guidance_weight": req.rollout_rtc_max_guidance_weight,
+        "rollout_action_queue_size_to_get_new_actions": req.rollout_action_queue_size_to_get_new_actions,
+        "max_duration_s": req.max_duration_s,
+        "observation": req.observation,
+        "task_profiles": req.task_profiles,
+    }
+
+
+def _manipulation_spec_from_request(req: ManipulationAgentBridgeRequest) -> dict[str, object]:
+    """Convert GUI/API request to ManipulationAgent current_experiment_spec keys."""
+    profile = _manipulation_profile_from_request(req)
+    policy_path = str(profile.get("policy_path") or "")
+    return {
+        "manipulation_strategy": profile.get("manipulation_strategy"),
+        "lerobot_profile_id": profile.get("profile_id"),
+        "robot_profile_id": profile.get("profile_id"),
+        "observation_pipeline_id": profile.get("observation_pipeline_id"),
+        "lerobot_observation_pipeline_id": profile.get("observation_pipeline_id"),
+        "lerobot_policy_type": profile.get("policy_type"),
+        "policy_type": profile.get("policy_type"),
+        "lerobot_policy_path": policy_path,
+        "policy_path": policy_path,
+        "lerobot_policy_checkpoint_path": profile.get("policy_checkpoint_path"),
+        "policy_checkpoint_path": profile.get("policy_checkpoint_path"),
+        "lerobot_policy_repo_id": profile.get("policy_repo_id"),
+        "policy_repo_id": profile.get("policy_repo_id"),
+        "lerobot_rollout_dataset_repo_id": profile.get("dataset_repo_id"),
+        "dataset_repo_id": profile.get("dataset_repo_id"),
+        "lerobot_dataset_root": profile.get("dataset_root"),
+        "dataset_root": profile.get("dataset_root"),
+        "manipulation_task_id": profile.get("task_id"),
+        "task_id": profile.get("task_id"),
+        "skill_id": profile.get("skill_id"),
+        "task_instruction": profile.get("task_instruction"),
+        "source_location": profile.get("source_location"),
+        "target_location": profile.get("target_location"),
+        "policy_backend": profile.get("policy_backend"),
+        "lerobot_device": profile.get("device"),
+        "device": profile.get("device"),
+        "fps": profile.get("fps"),
+        "camera_fps": profile.get("camera_fps"),
+        "camera_enabled": profile.get("camera_enabled"),
+        "display_data": profile.get("display_data"),
+        "confirm_live_execute": req.confirm_live_execute,
+        "plc_rollout_stop_enabled": req.plc_rollout_stop_enabled,
+        "rollout_episode_s": req.episode_s,
+        "rollout_num_episodes": req.num_episodes,
+        "continuous_rollout": profile.get("continuous_rollout"),
+        "rollout_action_clamp": profile.get("rollout_action_clamp"),
+        "rollout_linear_enabled": profile.get("rollout_linear_enabled", False),
+        "rollout_linear_hz": profile.get("rollout_linear_hz", 100),
+        "rollout_max_relative_target": profile.get("rollout_max_relative_target"),
+        "rollout_shoulder_lift_backstop": profile.get("rollout_shoulder_lift_backstop"),
+        "rollout_temporal_ensemble": profile.get("rollout_temporal_ensemble"),
+        "rollout_temporal_ensemble_coeff": profile.get("rollout_temporal_ensemble_coeff"),
+        "rollout_inference_type": profile.get("rollout_inference_type"),
+        "rollout_rtc_execution_horizon": profile.get("rollout_rtc_execution_horizon"),
+        "rollout_rtc_max_guidance_weight": profile.get("rollout_rtc_max_guidance_weight"),
+        "rollout_action_queue_size_to_get_new_actions": profile.get("rollout_action_queue_size_to_get_new_actions"),
+        "max_duration_s": profile.get("max_duration_s"),
+    }
+
+
+async def _run_manipulation_agent_bridge(req: ManipulationAgentBridgeRequest, *, force_test: bool = False) -> dict[str, object]:
+    """Run the actual Manipulation Agent bridge with optional forced test mode."""
+    mode = Mode.TEST if force_test else Mode(req.runtime_mode or req.mode)
+    specimen_result = dict(req.specimen_result or {})
+    specimen_result.setdefault("ok", True)
+    specimen_result.setdefault("handoff_status", "ready")
+    specimen_result.setdefault("specimen_id", "manual-specimen")
+    specimen_result.setdefault("candidate_id", "manual-candidate")
+    spec = _manipulation_spec_from_request(req)
+    if force_test:
+        spec["confirm_live_execute"] = False
+        spec["lerobot_profile_id"] = spec.get("lerobot_profile_id") or "fake_omx_ai"
+        spec["robot_profile_id"] = spec.get("robot_profile_id") or "fake_omx_ai"
+    snapshot = controller.snapshot()
+    state = OrchestratorState(
+        run_id=str(snapshot.get("state", {}).get("run_id") or "gui-manipulation"),
+        experiment_id=str(snapshot.get("state", {}).get("experiment_id") or "gui-manipulation-experiment"),
+        active_session_id=str(snapshot.get("state", {}).get("active_session_id") or "gui-manipulation"),
+        mode=mode,
+        stage=Stage.MANIPULATION,
+        active_goal=req.task_instruction,
+        current_experiment_spec={key: value for key, value in spec.items() if value not in (None, "")},
+        latest_observations=dict(req.observation or {}),
+        run_metadata={"specimen_result": specimen_result, "source": "lerobot_gui_manipulation_bridge"},
+        device_health={"printer": "ready", "camera": "ready", "robot": "ready", "utm": "ready"},
+    )
+    result = await ManipulationAgent().run(state, controller._deps.agent_context)
+    manipulation = result.data.get("manipulation") if isinstance(result.data.get("manipulation"), dict) else {}
+    if manipulation:
+        await controller.emit_lerobot_result(manipulation)
+    response = {
+        "ok": bool(result.success),
+        "tool": "manipulation_agent.test" if force_test else "manipulation_agent.run",
+        "mode": mode.value,
+        "summary": result.summary,
+        "data": result.data,
+        "manipulation": manipulation,
+        "manipulation_report": result.data.get("manipulation_report", {}),
+        "manipulation_agent_report": result.data.get("manipulation_agent_report", {}),
+        "robot_task_result": result.data.get("robot_task_result", {}),
+        "next_hint": result.next_hint,
+        "state": state.model_dump(mode="json"),
+    }
+    await controller.emit_workspace_result(
+        workspace="lerobot",
+        tool=str(response["tool"]),
+        result=response,
+        stage=Stage.MANIPULATION,
+        module_id="manipulation",
+        agent="manipulation_agent",
+        workflow="manipulation_agent_bridge",
+        node_event=True,
+    )
+    return response
+
+
+@app.get("/api/lerobot/manipulation-agent/config")
+async def get_lerobot_manipulation_agent_config() -> dict[str, object]:
+    """Return saved Manipulation Agent bridge defaults."""
+    return {
+        "ok": True,
+        "profile": load_manipulation_agent_profile(paths=RUNTIME_PATHS),
+        "profile_path": str(RUNTIME_PATHS.memory_root / "manipulation_agent_bridge.json"),
+    }
+
+
+@app.post("/api/lerobot/manipulation-agent/config")
+async def post_lerobot_manipulation_agent_config(req: ManipulationAgentBridgeRequest) -> dict[str, object]:
+    """Persist Manipulation Agent bridge defaults for live/test loop usage."""
+    profile = save_manipulation_agent_profile(_manipulation_profile_from_request(req), paths=RUNTIME_PATHS)
+    return {
+        "ok": True,
+        "tool": "manipulation_agent.config.save",
+        "profile": profile,
+        "profile_path": str(RUNTIME_PATHS.memory_root / "manipulation_agent_bridge.json"),
+        "message": "Manipulation Agent bridge defaults saved.",
+    }
+
+
+@app.post("/api/lerobot/manipulation-agent/test")
+async def post_lerobot_manipulation_agent_test(req: ManipulationAgentBridgeRequest) -> dict[str, object]:
+    """Run Manipulation Agent bridge in forced test mode before live-loop use."""
+    result = await _run_manipulation_agent_bridge(req, force_test=True)
+    result["tool"] = "manipulation_agent.test"
+    result["test_mode_forced"] = True
+    return result
+
+
+@app.post("/api/lerobot/manipulation-agent/run")
+async def post_lerobot_manipulation_agent_run(req: ManipulationAgentBridgeRequest) -> dict[str, object]:
+    """Run the actual Manipulation Agent bridge from the LeRobot GUI."""
+    return await _run_manipulation_agent_bridge(req)
+
+
+@app.post("/api/lerobot/rollout/stop")
+async def post_lerobot_rollout_stop(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Stop LeRobot policy rollout/inference."""
+    return await _call_lerobot_backend_tool("lerobot.rollout.stop", req.model_dump())
+
+
+@app.post("/api/lerobot/rollout/status")
+async def post_lerobot_rollout_status(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Return LeRobot rollout status."""
+    return await _call_lerobot_backend_tool("lerobot.rollout.status", req.model_dump(), publish=False)
+
+
+@app.post("/api/lerobot/dataset/inspect")
+async def post_lerobot_dataset_inspect(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Inspect a LeRobot dataset path/repo."""
+    result = _lerobot_bridge().dataset_inspect(req.model_dump())
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/dataset-manage/list")
+async def post_lerobot_dataset_manage_list(req: LeRobotDatasetManageRequest) -> dict[str, object]:
+    """List locally available LeRobot datasets for merge/split/delete workflows."""
+    result = _lerobot_bridge().dataset_manage_list(req.model_dump(mode="json", exclude_none=True))
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/dataset-manage/merge")
+async def post_lerobot_dataset_manage_merge(req: LeRobotDatasetManageRequest) -> dict[str, object]:
+    """Merge selected local LeRobot datasets into a new reindexed dataset."""
+    result = _lerobot_bridge().dataset_manage_merge(req.model_dump(mode="json", exclude_none=True))
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/dataset-manage/split")
+async def post_lerobot_dataset_manage_split(req: LeRobotDatasetManageRequest) -> dict[str, object]:
+    """Split one local LeRobot dataset into one or more reindexed datasets."""
+    result = _lerobot_bridge().dataset_manage_split(req.model_dump(mode="json", exclude_none=True))
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/dataset-manage/delete")
+async def post_lerobot_dataset_manage_delete(req: LeRobotDatasetManageRequest) -> dict[str, object]:
+    """Create a compacted local dataset after deleting selected episodes."""
+    result = _lerobot_bridge().dataset_manage_delete(req.model_dump(mode="json", exclude_none=True))
+    return await _publish_lerobot_result(result)
+
+
+@app.post("/api/lerobot/policy/download")
+async def post_lerobot_policy_download(req: LeRobotAPIRequest) -> dict[str, object]:
+    """Dry-run or gated LeRobot policy download."""
+    result = _lerobot_bridge().policy_download(req.model_dump())
+    return await _publish_lerobot_result(result)
+
+
+@app.get("/api/knowledge/evolution-packs")
+async def get_knowledge_evolution_packs(target_type: str | None = None, target_id: str | None = None, limit: int = 20) -> dict[str, object]:
+    """List Knowledge-built improvement evidence packs."""
+    packs = _knowledge_store().list_evolution_packs(target_type=target_type, target_id=target_id, limit=limit)
+    return {"ok": True, "target_type": target_type or "", "target_id": target_id or "", "packs": [pack.model_dump(mode="json") for pack in packs]}
+
+
+@app.get("/api/knowledge/agent-performance")
+async def get_knowledge_agent_performance(agent_id: str | None = None, limit: int = 50) -> dict[str, object]:
+    """List Knowledge Agent performance ledger entries."""
+    records = _knowledge_store().list_agent_performance(agent_id=agent_id, limit=limit)
+    return {"ok": True, "agent_id": agent_id or "", "records": [record.model_dump(mode="json") for record in records]}
+
+
+@app.get("/api/knowledge/failure-patterns")
+async def get_knowledge_failure_patterns(agent_id: str | None = None, stage: str | None = None, limit: int = 50) -> dict[str, object]:
+    """List repeated/current failure patterns known to Knowledge Agent."""
+    records = _knowledge_store().list_failure_patterns(limit=limit * 4)
+    if agent_id:
+        records = [record for record in records if agent_id in record.affected_agents]
+    if stage:
+        records = [record for record in records if stage in record.affected_agents]
+    return {"ok": True, "records": [record.model_dump(mode="json") for record in records[-limit:]]}
+
+
+@app.get("/api/knowledge/success-patterns")
+async def get_knowledge_success_patterns(agent_id: str | None = None, limit: int = 50) -> dict[str, object]:
+    """List reusable success/skill cards known to Knowledge Agent."""
+    records = _knowledge_store().list_success_patterns(limit=limit * 4)
+    if agent_id:
+        records = [record for record in records if record.agent_id == agent_id]
+    return {"ok": True, "agent_id": agent_id or "", "records": [record.model_dump(mode="json") for record in records[-limit:]]}
+
+
+@app.get("/api/knowledge/evolution-outcomes")
+async def get_knowledge_evolution_outcomes(target_id: str | None = None, limit: int = 50) -> dict[str, object]:
+    """List before/after attribution records for activated variants."""
+    records = _knowledge_store().list_evolution_outcomes(target_id=target_id, limit=limit)
+    return {"ok": True, "target_id": target_id or "", "records": [record.model_dump(mode="json") for record in records]}
+
+
+@app.post("/api/knowledge/evolution-outcomes")
+async def post_knowledge_evolution_outcome(payload: dict[str, object]) -> dict[str, object]:
+    """Append an operator/replay-reviewed evolution outcome record."""
+    try:
+        record = EvolutionOutcomeRecord.model_validate(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _knowledge_store().append_evolution_outcome(record)
+    await controller.emit_runtime_event(
+        event_type="knowledge.evolution_outcome.recorded",
+        message=f"Evolution outcome recorded: {record.target_type}:{record.target_id}",
+        payload={"record": record.model_dump(mode="json")},
+        level="INFO",
+    )
+    return {"ok": True, "record": record.model_dump(mode="json")}
+
+
+@app.get("/api/knowledge/relations/status")
+async def get_knowledge_relation_status() -> dict[str, object]:
+    """Return one shared reconciliation queue and worker status."""
+    worker = _knowledge_reconciliation_worker()
+    service = worker.service
+    scan = service.scan_gaps(limit=100)
+    return {
+        "ok": bool(scan.get("ok", False)),
+        "worker": worker.status(),
+        "relations": service.store.stats(),
+        "gaps": scan.get("gaps", []),
+        "gap_count": len(scan.get("gaps", [])),
+        "graph_revision": scan.get("graph_revision", ""),
+    }
+
+
+@app.get("/api/knowledge/relations/summary")
+async def get_knowledge_relation_summary() -> dict[str, object]:
+    """Return compact persisted relation review state without a graph scan."""
+    return {"ok": True, "relation_reconciliation": _knowledge_relation_summary()}
+
+
+@app.post("/api/knowledge/relations/scan")
+async def post_knowledge_relation_scan(payload: dict[str, object] | None = None) -> dict[str, object]:
+    """Run bounded deterministic gap detection without invoking an LLM."""
+    raw = payload or {}
+    try:
+        limit = max(1, min(int(raw.get("limit") or 100), 500))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="limit must be an integer") from exc
+    return _knowledge_reconciliation_service().scan_gaps(limit=limit)
+
+
+@app.post("/api/knowledge/relations/reconcile")
+async def post_knowledge_relation_reconcile(payload: dict[str, object] | None = None) -> dict[str, object]:
+    """Run one operator-requested reconciliation batch using the selected loaded model."""
+    raw = payload or {}
+    try:
+        limit = max(1, min(int(raw.get("limit") or 10), 10))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="limit must be an integer") from exc
+    return await _knowledge_reconciliation_service().reconcile_batch(limit=limit, background=False)
+
+
+@app.get("/api/knowledge/relations/proposals")
+async def get_knowledge_relation_proposals(status: str = "", limit: int = 100) -> dict[str, object]:
+    """List immutable relation proposals with their resolved status."""
+    service = _knowledge_reconciliation_service()
+    proposals = service.store.list_proposals(status=status.strip(), limit=max(1, min(limit, 500)))
+    return {"ok": True, "status": status.strip(), "proposals": [item.as_dict() for item in proposals]}
+
+
+@app.get("/api/knowledge/relations/decisions")
+async def get_knowledge_relation_decisions(limit: int = 200) -> dict[str, object]:
+    """Return immutable relation and graph-edit decision history."""
+    store = _knowledge_reconciliation_service().store
+    return {
+        "ok": True,
+        "decisions": store.list_decisions(limit=max(1, min(limit, 1000))),
+        "graph_edit_decisions": store.list_graph_edit_decisions(limit=max(1, min(limit, 1000))),
+    }
+
+
+@app.get("/api/knowledge/relations/{proposal_id}")
+async def get_knowledge_relation_proposal(proposal_id: str) -> dict[str, object]:
+    """Return one proposal and bounded accepted graph context."""
+    service = _knowledge_reconciliation_service()
+    proposal = service.store.get_proposal(proposal_id)
+    if proposal is None:
+        raise HTTPException(status_code=404, detail="relation proposal not found")
+    context = service.backend.query(
+        {"kind": "reconciliation_context", "node_id": proposal.source_id, "limit": 100, "include_properties": True}
+    )
+    return {"ok": True, "proposal": proposal.as_dict(), "context": context}
+
+
+def _assert_relation_request_current(
+    proposal_id: str,
+    req: KnowledgeRelationDecisionRequest,
+) -> KnowledgeReconciliationService:
+    service = _knowledge_reconciliation_service()
+    try:
+        service.assert_proposal_current(
+            proposal_id,
+            version=req.proposal_version,
+            graph_context_hash=req.graph_context_hash,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except GraphRevisionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return service
+
+
+@app.post("/api/knowledge/relations/{proposal_id}/approve")
+async def post_knowledge_relation_approve(proposal_id: str, req: KnowledgeRelationDecisionRequest) -> dict[str, object]:
+    service = _assert_relation_request_current(proposal_id, req)
+    try:
+        return service.approve(proposal_id, operator=req.operator, rationale=req.rationale)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/knowledge/relations/{proposal_id}/revise-approve")
+async def post_knowledge_relation_revise_approve(proposal_id: str, req: KnowledgeRelationRevisionRequest) -> dict[str, object]:
+    service = _assert_relation_request_current(proposal_id, req)
+    try:
+        return service.revise_and_approve(
+            proposal_id,
+            target_id=req.target_id,
+            relation_type=req.relation_type,
+            rationale=req.rationale,
+            operator=req.operator,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/knowledge/relations/{proposal_id}/reject")
+async def post_knowledge_relation_reject(proposal_id: str, req: KnowledgeRelationDecisionRequest) -> dict[str, object]:
+    service = _assert_relation_request_current(proposal_id, req)
+    return service.reject(proposal_id, operator=req.operator, rationale=req.rationale)
+
+
+@app.post("/api/knowledge/relations/{proposal_id}/defer")
+async def post_knowledge_relation_defer(proposal_id: str, req: KnowledgeRelationDecisionRequest) -> dict[str, object]:
+    service = _assert_relation_request_current(proposal_id, req)
+    return service.defer(proposal_id, operator=req.operator, rationale=req.rationale)
+
+
+@app.post("/api/knowledge/relations/{proposal_id}/re-evaluate")
+async def post_knowledge_relation_re_evaluate(proposal_id: str, req: KnowledgeRelationDecisionRequest) -> dict[str, object]:
+    service = _assert_relation_request_current(proposal_id, req)
+    result = service.re_evaluate(proposal_id)
+    _knowledge_reconciliation_worker().wake()
+    return result
+
+
+@app.post("/api/knowledge/graph/edit/validate")
+async def post_knowledge_graph_edit_validate(req: KnowledgeGraphEditRequest) -> dict[str, object]:
+    try:
+        return _knowledge_reconciliation_service().validate_graph_edit(
+            graph_revision=req.graph_revision,
+            changes=req.changes,
+            operator=req.operator,
+            draft_id=req.draft_id,
+        )
+    except GraphRevisionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/knowledge/graph/edit/apply")
+async def post_knowledge_graph_edit_apply(req: KnowledgeGraphEditRequest) -> dict[str, object]:
+    try:
+        return _knowledge_reconciliation_service().apply_graph_edit(
+            graph_revision=req.graph_revision,
+            changes=req.changes,
+            operator=req.operator,
+            draft_id=req.draft_id,
+        )
+    except GraphRevisionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/knowledge/graph/health")
+async def get_knowledge_graph_health() -> dict[str, object]:
+    """Return optional Knowledge graph backend health.
+
+    The graph backend is a mirror/index. JSONL memory remains authoritative.
+    """
+    backend = _knowledge_graph_backend()
+    try:
+        return backend.health()
+    finally:
+        backend.close()
+
+
+@app.get("/api/knowledge/manuals/status")
+async def get_manual_knowledge_status() -> dict[str, Any]:
+    service = _manual_knowledge_service()
+    try:
+        return service.status()
+    finally:
+        service.close()
+
+
+@app.post("/api/knowledge/manuals/ingest")
+async def post_manual_knowledge_ingest() -> dict[str, Any]:
+    service = _manual_knowledge_service()
+    try:
+        return service.ingest()
+    finally:
+        service.close()
+
+
+@app.post("/api/knowledge/manuals/query")
+async def post_manual_knowledge_query(payload: dict[str, Any]) -> dict[str, Any]:
+    service = _manual_knowledge_service()
+    try:
+        try:
+            return service.query(dict(payload))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        service.close()
+
+
+@app.get("/api/knowledge/manuals/graph")
+async def get_manual_knowledge_graph(limit: int = 100, view: str = "semantic") -> dict[str, Any]:
+    service = _manual_knowledge_service()
+    try:
+        try:
+            selected_view = str(view or "semantic").strip().lower()
+            if selected_view not in {"semantic", "evidence"}:
+                raise ValueError("manual graph view must be semantic or evidence")
+            return service.graph(limit=max(1, min(int(limit), 300)), view=selected_view)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        service.close()
+
+
+@app.get("/api/knowledge/ontology")
+async def get_knowledge_ontology() -> dict[str, object]:
+    """Return the active immutable AX4LAB ontology definition summary."""
+    service = _knowledge_service()
+    try:
+        registry = service.registry
+        return {
+            "ok": True,
+            "version_id": registry.version_id,
+            "classes": sorted(registry.class_names),
+            "relations": {
+                name: {"domain": list(rule.source_classes), "range": list(rule.target_classes)}
+                for name, rule in registry.relation_rules.items()
+            },
+            "event_families": sorted(registry.event_families),
+        }
+    finally:
+        service.close()
+
+
+@app.post("/api/knowledge/ontology/validate")
+async def post_knowledge_ontology_validate(payload: dict[str, object]) -> dict[str, object]:
+    """Validate a complete Knowledge event without mutating graph state."""
+    service = _knowledge_service()
+    try:
+        report = service.validator.validate_event(dict(payload))
+        return {"ok": report.ok, "errors": list(report.errors), "missing_fields": list(report.missing_fields)}
+    finally:
+        service.close()
+
+
+@app.get("/api/knowledge/graph/stats")
+async def get_knowledge_graph_stats() -> dict[str, object]:
+    """Return graph health, ontology version, and durable outbox counts."""
+    service = _knowledge_service()
+    try:
+        return service.status()
+    finally:
+        service.close()
+
+
+@app.get("/api/knowledge/activity")
+async def get_knowledge_activity(run_id: str = "", limit: int = 20) -> dict[str, object]:
+    """Return recorded per-cycle Knowledge activity for Live GUI and Workspace."""
+    service = _knowledge_service()
+    try:
+        return service.activity(run_id=run_id.strip(), limit=max(1, min(limit, 100)))
+    finally:
+        service.close()
+
+
+@app.post("/api/knowledge/graph/sync")
+async def post_knowledge_graph_sync(payload: dict[str, object] | None = None) -> dict[str, object]:
+    """Replay a bounded batch of pending Knowledge events."""
+    payload = payload or {}
+    try:
+        limit = max(1, min(int(payload.get("limit") or 100), 1000))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="limit must be an integer") from exc
+    service = _knowledge_service()
+    try:
+        return service.sync(limit=limit)
+    finally:
+        service.close()
+
+
+@app.post("/api/knowledge/graph/query")
+async def post_knowledge_graph_query(payload: dict[str, object]) -> dict[str, object]:
+    """Execute an allowlisted graph query plan; raw Cypher is forbidden."""
+    service = _knowledge_service()
+    try:
+        try:
+            return service.query(dict(payload))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        service.close()
+
+
+@app.post("/api/knowledge/graph/import")
+async def post_knowledge_graph_import(payload: dict[str, object] | None = None) -> dict[str, object]:
+    """Import recent file-backed Knowledge memory into the optional graph backend."""
+    payload = payload or {}
+    try:
+        limit = max(1, min(int(payload.get("limit") or 500), 5000))
+    except Exception:
+        limit = 500
+    backend = _knowledge_graph_backend()
+    try:
+        result = import_store_to_graph(_knowledge_store(), backend, limit=limit)
+    finally:
+        backend.close()
+    await controller.emit_runtime_event(
+        event_type="knowledge.graph_import.completed",
+        message=f"Knowledge graph import completed: backend={result.get('backend')} records={result.get('records', 0)}",
+        payload={"result": result},
+        level="INFO" if result.get("ok", True) else "WARNING",
+    )
+    return result
+
+
+@app.get("/api/knowledge/graph/query")
+async def get_knowledge_graph_query(
+    kind: str = "summary",
+    node_id: str = "",
+    target_type: str = "",
+    target_id: str = "",
+    q: str = "",
+    limit: int = 50,
+    include_properties: bool = False,
+) -> dict[str, object]:
+    """Query optional Knowledge graph backend with safe high-level query modes."""
+    backend = _knowledge_graph_backend()
+    try:
+        result = backend.query({"kind": kind, "node_id": node_id, "target_type": target_type, "target_id": target_id, "q": q, "limit": limit, "include_properties": include_properties})
+    finally:
+        backend.close()
+    return result
+
+
+@app.post("/api/knowledge/graphify/scan")
+async def post_knowledge_graphify_scan(payload: dict[str, object] | None = None) -> dict[str, object]:
+    """Create Graphify-compatible project graph artifacts for the current AX4LAB checkout."""
+    payload = payload or {}
+    sources = payload.get("sources") if isinstance(payload.get("sources"), list) else None
+    source_paths = [str(item) for item in sources] if sources else None
+    max_file_bytes = max(1024, min(int(payload.get("max_file_bytes") or 256_000), 5_000_000))
+    out_dir_raw = payload.get("out_dir")
+    out_dir = resolve_path(str(out_dir_raw)) if out_dir_raw else RUNTIME_PATHS.memory_root / "knowledge/graphify"
+    result = scan_project_graph(
+        resolve_path("."),
+        out_dir=out_dir,
+        source_paths=source_paths,
+        max_file_bytes=max_file_bytes,
+        run_external_graphify=bool(payload.get("external_graphify", False)),
+    )
+    await controller.emit_runtime_event(
+        event_type="knowledge.graphify_scan.completed",
+        message=f"Knowledge Graphify scan completed: nodes={result.get('node_count', 0)} edges={result.get('edge_count', 0)}",
+        payload={"result": result},
+        level="INFO" if result.get("ok", True) else "WARNING",
+    )
+    return result
+
+
+@app.post("/api/knowledge/graphify/import")
+async def post_knowledge_graphify_import(payload: dict[str, object] | None = None) -> dict[str, object]:
+    """Import Graphify-compatible project graph artifacts into the optional graph backend."""
+    payload = payload or {}
+    graph_raw = payload.get("graphify_json")
+    graph_json = resolve_path(str(graph_raw)) if graph_raw else RUNTIME_PATHS.memory_root / "knowledge/graphify/project_graph.json"
+    if not graph_json.exists():
+        return {"ok": False, "error": f"graphify JSON not found: {graph_json}", "hint": "run /api/knowledge/graphify/scan first"}
+    runtime_limit = max(1, min(int(payload.get("runtime_limit") or 500), 5000))
+    include_runtime = bool(payload.get("include_runtime_memory", True))
+    backend = _knowledge_graph_backend()
+    try:
+        result = import_project_graph(backend, graph_json, include_runtime_memory=include_runtime, store=_knowledge_store() if include_runtime else None, runtime_limit=runtime_limit)
+    finally:
+        backend.close()
+    await controller.emit_runtime_event(
+        event_type="knowledge.graphify_import.completed",
+        message=f"Knowledge Graphify import completed: backend={result.get('backend')} project_nodes={result.get('project_nodes', 0)}",
+        payload={"result": result},
+        level="INFO" if result.get("ok", True) else "WARNING",
+    )
+    return result
+
+
+@app.get("/api/knowledge/run-context")
+async def get_knowledge_run_context(agent_id: str = "", run_id: str | None = None) -> dict[str, object]:
+    """Return the latest per-run Knowledge report context when available."""
+    selected_run = run_id or _current_run_id()
+    try:
+        report = _knowledge_store().read_run_artifact(selected_run, "knowledge_report")
+    except Exception:
+        report = {}
+    return {"ok": True, "agent_id": agent_id, "run_id": selected_run, "knowledge_report": report}
+
+
+@app.get("/api/knowledge/bo-context")
+async def get_knowledge_bo_context(objective_id: str | None = None, limit: int = 20) -> dict[str, object]:
+    """Return Knowledge memory useful for BO/Design context."""
+    store = _knowledge_store()
+    failures = [record.model_dump(mode="json") for record in store.list_failure_patterns(limit=limit)]
+    successes = [record.model_dump(mode="json") for record in store.list_success_patterns(limit=limit)]
+    return {"ok": True, "objective_id": objective_id or "", "failure_patterns": failures, "success_patterns": successes}
+
+
+@app.get("/api/knowledge/safety-context")
+async def get_knowledge_safety_context(stage: str | None = None, limit: int = 20) -> dict[str, object]:
+    """Return Knowledge memory useful for Guardian/safety gates."""
+    records = _knowledge_store().list_failure_patterns(limit=limit * 3)
+    if stage:
+        records = [record for record in records if stage in record.affected_agents]
+    return {"ok": True, "stage": stage or "", "risk_patterns": [record.model_dump(mode="json") for record in records[-limit:]]}
+
+
+@app.get("/api/events/recent")
+async def get_recent_events() -> dict[str, object]:
+    """Return recent buffered events."""
+    return {"events": controller.recent_events()}
+
+
+_PACKAGE_EVENT_TYPE_ALIASES = {
+    "run.created": "run_started",
+    "run_safe_stop": "safe_stop_triggered",
+    "graph.compiled": "graph_compiled",
+    "graph_version_saved": "graph_version_saved",
+    "tool_call_completed": "tool_call_completed",
+    "handoff_created": "handoff_created",
+    "agent_question": "agent_question",
+    "user_reply": "user_reply",
+    "approval.requested": "approval_requested",
+}
+
+
+def _package_runtime_event_type(event: dict[str, object]) -> str:
+    """Return the package-level RuntimeEventType while preserving internal event names elsewhere."""
+    raw_type = str(event.get("event_type") or event.get("type") or "runtime.event")
+    if raw_type == "approval.resolved":
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        decision = str(payload.get("decision") or "").lower()
+        if decision == "approved":
+            return "approval_granted"
+        if decision in {"rejected", "cancelled", "canceled"}:
+            return "approval_rejected"
+        return "approval_resolved"
+    if raw_type in _PACKAGE_EVENT_TYPE_ALIASES:
+        return _PACKAGE_EVENT_TYPE_ALIASES[raw_type]
+    return re.sub(r"[^a-zA-Z0-9]+", "_", raw_type).strip("_").lower() or "runtime_event"
+
+
+def _package_runtime_event(event: dict[str, object]) -> dict[str, object]:
+    """Normalize an internal runtime event for the imported Live GUI package contract."""
+    normalized = dict(event)
+    payload = dict(event.get("payload") or {}) if isinstance(event.get("payload"), dict) else {}
+    state = event.get("state") if isinstance(event.get("state"), dict) else {}
+    package_type = _package_runtime_event_type(event)
+    internal_type = str(event.get("event_type") or event.get("type") or package_type)
+    artifact_ids = event.get("artifact_ids") or payload.get("artifact_ids") or payload.get("artifacts") or []
+    if isinstance(artifact_ids, dict):
+        artifact_ids = [artifact_ids.get("artifact_id") or artifact_ids.get("id") or artifact_ids.get("path") or artifact_ids.get("url") or ""]
+    if not isinstance(artifact_ids, list):
+        artifact_ids = [artifact_ids]
+    unread_targets = event.get("unread_targets") or payload.get("unread_targets") or []
+    if isinstance(unread_targets, str):
+        unread_targets = [unread_targets]
+    if not isinstance(unread_targets, list):
+        unread_targets = []
+    normalized.update({
+        "event_type": internal_type,
+        "event_type_internal": internal_type,
+        "type": package_type,
+        "timestamp": event.get("timestamp") or event.get("ts") or datetime.now(timezone.utc).isoformat(),
+        "stage": event.get("stage") or payload.get("stage") or event.get("timestamp_stage") or state.get("stage", ""),
+        "agent_id": event.get("agent_id") or payload.get("agent_id") or payload.get("agent") or event.get("agent") or "",
+        "graph_id": event.get("graph_id") or payload.get("graph_id") or "atr_closed_loop",
+        "graph_version": event.get("graph_version") or payload.get("graph_version") or payload.get("version_id") or payload.get("graph_hash") or "",
+        "severity": str(event.get("severity") or event.get("level") or "info").lower(),
+        "artifact_ids": [str(item) for item in artifact_ids if str(item)],
+        "unread_targets": [str(item) for item in unread_targets if str(item)],
+    })
+    return normalized
+
+
+@app.get("/api/events/stream")
+async def stream_events() -> StreamingResponse:
+    """SSE stream endpoint for real-time GUI updates."""
+    queue = controller.subscribe()
+
+    def sse_payload(event: dict[str, object]) -> str:
+        payload = json.dumps(event, ensure_ascii=True)
+        return f"event: update\ndata: {payload}\n\n"
+
+    async def generator():
+        try:
+            yield sse_payload(
+                {
+                    "event_id": make_event_id(),
+                    "event_type": "stream.connected",
+                    "level": "INFO",
+                    "message": "Runtime event stream connected",
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "payload": {"heartbeat_interval_s": 15},
+                }
+            )
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    event = {
+                        "event_id": make_event_id(),
+                        "event_type": "stream.heartbeat",
+                        "level": "INFO",
+                        "message": "Runtime event stream heartbeat",
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                        "payload": {"heartbeat": True},
+                    }
+                yield sse_payload(event)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            controller.unsubscribe(queue)
+
+    return StreamingResponse(generator(), media_type="text/event-stream")
+
+
+@app.get("/api/runtime/events")
+async def stream_runtime_events_compat() -> StreamingResponse:
+    """Compatibility SSE stream using the imported package runtime event contract."""
+    queue = controller.subscribe()
+
+    def sse_payload(event: dict[str, object]) -> str:
+        payload = json.dumps(_package_runtime_event(event), ensure_ascii=True)
+        return f"event: update\ndata: {payload}\n\n"
+
+    async def generator():
+        try:
+            yield sse_payload(
+                {
+                    "event_id": make_event_id(),
+                    "event_type": "stream.connected",
+                    "level": "INFO",
+                    "message": "Runtime event stream connected",
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "payload": {"heartbeat_interval_s": 15},
+                }
+            )
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    event = {
+                        "event_id": make_event_id(),
+                        "event_type": "stream.heartbeat",
+                        "level": "INFO",
+                        "message": "Runtime event stream heartbeat",
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                        "payload": {"heartbeat": True},
+                    }
+                yield sse_payload(event)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            controller.unsubscribe(queue)
+
+    return StreamingResponse(generator(), media_type="text/event-stream")
+
+
+@app.get("/api/planning/session")
+async def get_planning_session(session_id: str | None = None) -> dict[str, object]:
+    """Return planning conversation state without starting hardware."""
+    return controller.planning_snapshot(session_id=session_id)
+
+
+@app.get("/api/planning/messages")
+async def get_planning_messages(
+    session_id: str | None = None,
+    before: int | None = None,
+    limit: int = 80,
+) -> dict[str, object]:
+    """Return one lazy-loaded page from the file-backed Live GUI transcript."""
+    return controller.planning_messages_page(session_id=session_id, before=before, limit=limit)
+
+
+@app.post("/api/planning/bootstrap")
+async def post_planning_bootstrap(req: PlanningBootstrapRequest) -> dict[str, object]:
+    """Start the Live GUI orchestrator model before the operator sends a message."""
+    return await controller.bootstrap_live_orchestrator(
+        goal=req.goal,
+        backend=req.backend,
+        constraints=dict(req.constraints),
+        session_id=req.session_id,
+    )
+
+
+@app.post("/api/planning/message")
+async def post_planning_message(req: PlanningMessageRequest) -> dict[str, object]:
+    """Ask the OrchestratorAgent model for live-planning guidance."""
+    from orchestrator.experimental_setup import SetupConflict, SetupValidationError
+    try:
+        return await controller.planning_message(
+            message=req.message, goal=req.goal, backend=req.backend,
+            constraints=dict(req.constraints), session_id=req.session_id, setup_context=req.setup_context)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail={"message": str(exc),
+            "planning_session_id": controller._planning_session_id}) from exc
+    except SetupConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (SetupValidationError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/planning/setup/actions")
+async def post_planning_setup_action(req: PlanningSetupActionRequest) -> dict[str, object]:
+    from orchestrator.experimental_setup import SetupConflict, SetupValidationError
+    try:
+        return await controller.planning_setup_action(req.model_dump())
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except SetupConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (SetupValidationError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/planning/artifacts/{run_id}/{specimen_id}/{filename}")
+async def get_planning_artifact(run_id: str, specimen_id: str, filename: str) -> FileResponse:
+    """Serve planning-generated STL, preview, and experiment spec artifacts."""
+    try:
+        path = controller.planning_artifact_path(run_id, specimen_id, filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Planning artifact not found")
+    return FileResponse(path)
+
+
+@app.post("/api/run/start")
+async def start_run(req: StartRunRequest) -> dict[str, object]:
+    """Start a new orchestration run."""
+    if req.mode == "live":
+        config = _load_runtime_graph_config(PRIMARY_RUNTIME_GRAPH_ID)
+        compiler = _runtime_graph_compiler(config)
+        errors = compiler.validate()
+        if errors:
+            return {"ok": False, "graph_id": PRIMARY_RUNTIME_GRAPH_ID, "errors": errors, "run": None}
+        compiler.compile()
+        dry_run_ok, dry_run_record = _graph_live_dry_run_gate(config)
+        if not dry_run_ok:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "GRAPH_DRY_RUN_REQUIRED",
+                    "message": "Run graph dry-run on the active graph config before live execution.",
+                    "graph_id": PRIMARY_RUNTIME_GRAPH_ID,
+                    "has_record": bool(dry_run_record),
+                },
+            )
+    return await controller.start(
+        mode=Mode(req.mode),
+        goal=req.goal,
+        backend=req.backend,
+        fault=req.fault,
+        fault_stage=req.fault_stage,
+    )
+
+
+@app.post("/api/run/pause")
+async def pause_run() -> dict[str, object]:
+    """Pause current run."""
+    return await controller.pause()
+
+
+@app.post("/api/run/resume")
+async def resume_run() -> dict[str, object]:
+    """Resume paused run."""
+    return await controller.resume()
+
+
+@app.post("/api/run/stop")
+async def stop_run() -> dict[str, object]:
+    """Stop current run."""
+    return await controller.stop()
+
+
+@app.post("/api/run/safe-stop")
+async def safe_stop_run() -> dict[str, object]:
+    """Request safe stop."""
+    return await controller.safe_stop()
+
+
+@app.post("/api/run/emergency-stop")
+async def emergency_stop_run() -> dict[str, object]:
+    """Immediately stop runtime and latch E-STOP recovery controls."""
+    return await _gui_emergency_stop("run")
+
+
+@app.post("/api/run/emergency-resume", response_model=None)
+async def emergency_resume_run() -> dict[str, object] | JSONResponse:
+    """Clear E-STOP latch while preserving the current session."""
+    return await _gui_emergency_recovery("resume")
+
+
+@app.post("/api/run/emergency-reset", response_model=None)
+async def emergency_reset_run() -> dict[str, object] | JSONResponse:
+    """Reset runtime state to fresh-server defaults after E-STOP."""
+    return await _gui_emergency_recovery("reset")
+
+
+@app.post("/api/runtime/start")
+async def start_runtime_compat(req: StartRunRequest) -> dict[str, object]:
+    """Compatibility alias for package-specified runtime start."""
+    return await start_run(req)
+
+
+@app.post("/api/runtime/pause")
+async def pause_runtime_compat() -> dict[str, object]:
+    """Compatibility alias for package-specified runtime pause."""
+    return await controller.pause()
+
+
+@app.post("/api/runtime/resume")
+async def resume_runtime_compat() -> dict[str, object]:
+    """Compatibility alias for package-specified runtime resume."""
+    return await controller.resume()
+
+
+@app.post("/api/runtime/stop")
+async def stop_runtime_compat() -> dict[str, object]:
+    """Compatibility alias for package-specified runtime stop."""
+    return await controller.stop()
+
+
+@app.post("/api/runtime/safe-stop")
+async def safe_stop_runtime_compat() -> dict[str, object]:
+    """Compatibility alias for package-specified runtime safe-stop."""
+    return await controller.safe_stop()
+
+
+@app.post("/api/runtime/emergency-stop")
+async def emergency_stop_runtime_compat() -> dict[str, object]:
+    """Compatibility alias for package-specified runtime emergency-stop."""
+    return await _gui_emergency_stop("runtime")
+
+
+@app.post("/api/runtime/emergency-resume", response_model=None)
+async def emergency_resume_runtime_compat() -> dict[str, object] | JSONResponse:
+    """Compatibility alias for package-specified runtime emergency resume."""
+    return await _gui_emergency_recovery("resume")
+
+
+@app.post("/api/runtime/emergency-reset", response_model=None)
+async def emergency_reset_runtime_compat() -> dict[str, object] | JSONResponse:
+    """Compatibility alias for package-specified runtime emergency reset."""
+    return await _gui_emergency_recovery("reset")
+
+
+@app.get("/api/runs/{run_id}")
+async def get_runtime_run(run_id: str) -> dict[str, object]:
+    """Return current run snapshot or persisted run directory metadata."""
+    snapshot = controller.snapshot()
+    current = _current_run_id()
+    run_dir = _safe_run_dir(run_id)
+    if run_id == current:
+        return {"ok": True, "run_id": run_id, "active": True, "snapshot": snapshot, "run_dir": str(run_dir)}
+    if not run_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Unknown run_id={run_id}")
+    return {"ok": True, "run_id": run_id, "active": False, "snapshot": None, "run_dir": str(run_dir)}
+
+
+@app.post("/api/runs/{run_id}/pause")
+async def pause_runtime_run(run_id: str) -> dict[str, object]:
+    """Pause the active run addressed by run_id."""
+    _require_current_run(run_id)
+    return await controller.pause()
+
+
+@app.post("/api/runs/{run_id}/resume")
+async def resume_runtime_run(run_id: str) -> dict[str, object]:
+    """Resume the active run addressed by run_id."""
+    _require_current_run(run_id)
+    return await controller.resume()
+
+
+@app.post("/api/runs/{run_id}/recovery/restore")
+async def restore_error_run_checkpoint(run_id: str) -> dict[str, object]:
+    """Restore an integrity-checked error checkpoint without starting execution."""
+    from app.run_recovery import restore_checkpoint
+    async with controller._error_resume_lock:
+        rejection = await controller._plc_service_start_rejection()
+        if rejection:
+            return rejection
+        try:
+            return restore_checkpoint(controller, run_id)
+        except (ValueError, OSError, KeyError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/runs/{run_id}/recovery/restore-printer-wait")
+async def restore_printer_wait_checkpoint(run_id: str) -> dict[str, object]:
+    from app.printer_wait_recovery import restore_checkpoint
+    async with controller._error_resume_lock:
+        try:
+            return restore_checkpoint(controller, run_id)
+        except (ValueError, OSError, KeyError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/runs/{run_id}/recovery/restore-equipment-selection")
+async def restore_equipment_selection_checkpoint(run_id: str) -> dict[str, object]:
+    from app.equipment_selection_checkpoint import restore_checkpoint
+    async with controller._error_resume_lock:
+        try:
+            return restore_checkpoint(controller, run_id)
+        except (ValueError, OSError, KeyError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/runtime/hot-reload/equipment-support")
+async def hot_reload_equipment_support() -> dict[str, object]:
+    """Reload tested stateless support code only; never live device/control classes."""
+    from app.safe_hot_reload import reload_equipment_support
+    async with controller._error_resume_lock:
+        try:
+            return await reload_equipment_support(controller)
+        except (ValueError, OSError, SyntaxError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/runs/{run_id}/vision/specimen-placement-retry")
+async def retry_vision_specimen_placement(
+    run_id: str,
+    req: VisionSpecimenPlacementRetryRequest,
+) -> dict[str, object]:
+    """Retry only the active Vision specimen-placement checkpoint for this run."""
+    _require_current_run(run_id)
+    try:
+        return await controller.retry_vision_specimen_placement(
+            run_id=run_id,
+            checkpoint=req.checkpoint,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/runs/{run_id}/stop")
+async def stop_runtime_run(run_id: str) -> dict[str, object]:
+    """Stop the active run addressed by run_id."""
+    _require_current_run(run_id)
+    return await controller.stop()
+
+
+@app.post("/api/runs/{run_id}/emergency-stop")
+async def emergency_stop_runtime_run(run_id: str) -> dict[str, object]:
+    """Emergency-stop the active run addressed by run_id."""
+    _require_current_run(run_id)
+    return await _gui_emergency_stop("runs")
+
+
+@app.post("/api/runs/{run_id}/emergency-resume", response_model=None)
+async def emergency_resume_runtime_run(run_id: str) -> dict[str, object] | JSONResponse:
+    """Clear E-STOP latch for the active run addressed by run_id."""
+    _require_current_run(run_id)
+    return await _gui_emergency_recovery("resume")
+
+
+@app.post("/api/runs/{run_id}/emergency-reset", response_model=None)
+async def emergency_reset_runtime_run(run_id: str) -> dict[str, object] | JSONResponse:
+    """Reset the active run addressed by run_id to fresh-server defaults."""
+    _require_current_run(run_id)
+    return await _gui_emergency_recovery("reset")
+
+
+@app.get("/api/runs/{run_id}/approvals")
+async def get_runtime_approvals(run_id: str) -> dict[str, object]:
+    """Return pending/resolved human approval items derived from runtime events."""
+    if run_id != _current_run_id() and not _safe_run_dir(run_id).exists():
+        raise HTTPException(status_code=404, detail=f"Unknown run_id={run_id}")
+    queues = _approval_events_for_run(run_id)
+    return {"ok": True, "run_id": run_id, **queues}
+
+
+@app.post("/api/runs/{run_id}/approvals")
+async def request_runtime_approval(run_id: str, req: RuntimeApprovalCreateRequest) -> dict[str, object]:
+    """Create a standard approval.requested event for the active run."""
+    _require_current_run(run_id)
+    approval_id = make_event_id().replace("evt-", "approval-", 1)
+    payload: dict[str, object] = {
+        **req.payload,
+        "approval_id": approval_id,
+        "title": req.title,
+        "reason": req.reason,
+        "stage": req.stage or controller.snapshot().get("state", {}).get("stage", ""),
+        "safety_class": req.safety_class,
+        "requester": req.requester,
+        "requires_human_approval": True,
+        "status": "waiting_approval",
+    }
+    event = await controller.emit_runtime_event(
+        event_type="approval.requested",
+        message=req.title,
+        payload=payload,
+        level="WARNING",
+        run_id=run_id,
+    )
+    queues = _approval_events_for_run(run_id)
+    return {"ok": True, "run_id": run_id, "approval_id": approval_id, "event": event, **queues}
+
+
+@app.post("/api/runs/{run_id}/approvals/{approval_id}/resolve")
+async def resolve_runtime_approval(run_id: str, approval_id: str, req: RuntimeApprovalResolveRequest) -> dict[str, object]:
+    """Resolve one pending human approval request and broadcast approval.resolved."""
+    _require_current_run(run_id)
+    queues = _approval_events_for_run(run_id)
+    pending_ids = {str(item.get("approval_id")) for item in queues["pending"]}
+    if approval_id not in pending_ids:
+        raise HTTPException(status_code=404, detail=f"Unknown pending approval_id={approval_id}")
+    resolution_state = controller.apply_runtime_approval_resolution(
+        approval_id=approval_id,
+        decision=req.decision,
+        operator=req.operator,
+        note=req.note,
+    )
+    payload = {
+        "approval_id": approval_id,
+        "decision": req.decision,
+        "note": req.note,
+        "operator": req.operator,
+        "status": "resolved",
+        "resolved_at": datetime.now(timezone.utc).isoformat(),
+        "runtime_gate": resolution_state,
+    }
+    level = "INFO" if req.decision == "approved" else "WARNING"
+    event = await controller.emit_runtime_event(
+        event_type="approval.resolved",
+        message=f"Approval {req.decision}: {approval_id}",
+        payload=payload,
+        level=level,
+        run_id=run_id,
+    )
+    updated = _approval_events_for_run(run_id)
+    return {"ok": True, "run_id": run_id, "approval_id": approval_id, "event": event, **updated}
+
+
+async def _resolve_approval_compat(approval_id: str, decision: Literal["approved", "rejected", "cancelled"], req: RuntimeApprovalResolveRequest | None) -> dict[str, object]:
+    """Resolve an approval through the package-level approval endpoint aliases."""
+    run_id = _current_run_id()
+    if not run_id:
+        raise HTTPException(status_code=404, detail="No active runtime run_id")
+    payload = req or RuntimeApprovalResolveRequest(decision=decision)
+    payload.decision = decision
+    return await resolve_runtime_approval(run_id, approval_id, payload)
+
+
+@app.post("/api/approvals/{approval_id}/approve")
+async def approve_runtime_approval_compat(approval_id: str, req: RuntimeApprovalResolveRequest | None = None) -> dict[str, object]:
+    """Compatibility endpoint for package-specified approval approval."""
+    return await _resolve_approval_compat(approval_id, "approved", req)
+
+
+@app.post("/api/approvals/{approval_id}/reject")
+async def reject_runtime_approval_compat(approval_id: str, req: RuntimeApprovalResolveRequest | None = None) -> dict[str, object]:
+    """Compatibility endpoint for package-specified approval rejection."""
+    return await _resolve_approval_compat(approval_id, "rejected", req)
+
+
+@app.post("/api/approvals/{approval_id}/revise")
+async def revise_runtime_approval_compat(approval_id: str, req: RuntimeApprovalResolveRequest | None = None) -> dict[str, object]:
+    """Compatibility endpoint for package-specified approval revision requests."""
+    return await _resolve_approval_compat(approval_id, "cancelled", req)
+
+
+@app.get("/api/runs/{run_id}/events")
+async def get_runtime_run_events(run_id: str) -> dict[str, object]:
+    """Return buffered events for one run id."""
+    events = [event for event in controller.recent_events() if event.get("run_id") == run_id]
+    if not events and run_id != _current_run_id() and not _safe_run_dir(run_id).exists():
+        raise HTTPException(status_code=404, detail=f"Unknown run_id={run_id}")
+    return {"ok": True, "run_id": run_id, "events": events}
+
+
+@app.get("/api/runs/{run_id}/artifacts")
+async def get_runtime_run_artifacts(
+    run_id: str, loop_index: int | None = None, agent: str | None = None,
+    attempt_index: int | None = None,
+) -> dict[str, object]:
+    """List artifact files created under one run directory."""
+    from utils.agent_artifact_archive import list_executions
+    if loop_index is not None and loop_index < 0:
+        raise HTTPException(status_code=400, detail="loop_index must be zero or greater")
+    if attempt_index is not None and attempt_index < 1:
+        raise HTTPException(status_code=400, detail="attempt_index starts at one")
+    run_dir, artifacts = _artifact_items_for_run(run_id)
+    executions = list_executions(run_dir, loop_index=loop_index, agent=agent)
+    for key, selected in (("loop_index", loop_index), ("agent", agent), ("attempt_index", attempt_index)):
+        if selected is not None:
+            artifacts = [item for item in artifacts if item.get(key) == selected]
+            executions = [item for item in executions if item.get(key) == selected]
+    return {"ok": True, "run_id": run_id, "run_dir": str(run_dir), "artifacts": artifacts, "executions": executions}
+
+
+@app.get("/api/runs/{run_id}/artifact-file/{artifact_path:path}")
+async def get_runtime_run_artifact_file(run_id: str, artifact_path: str, download: bool = False) -> FileResponse:
+    """Preview or download one artifact file under a run directory."""
+    path = _safe_run_artifact_path(run_id, artifact_path)
+    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return FileResponse(
+        path,
+        media_type=media_type,
+        filename=path.name if download else None,
+        content_disposition_type="attachment" if download else "inline",
+    )
+
+
+@app.get("/api/artifacts")
+async def get_artifacts_compat(
+    run_id: str | None = None, loop_index: int | None = None, agent: str | None = None,
+    attempt_index: int | None = None,
+) -> dict[str, object]:
+    """Compatibility endpoint listing artifacts for a run or the active run."""
+    selected_run_id = run_id or _current_run_id()
+    return await get_runtime_run_artifacts(selected_run_id, loop_index, agent, attempt_index)
+
+
+@app.get("/api/artifacts/{artifact_id:path}")
+async def get_artifact_compat(artifact_id: str, run_id: str | None = None, download: bool = False) -> FileResponse:
+    """Compatibility endpoint serving one artifact by artifact_id."""
+    decoded_run_id, artifact_path = _parse_artifact_id(artifact_id, run_id=run_id)
+    return await get_runtime_run_artifact_file(decoded_run_id, artifact_path, download=download)
+
+
+@app.post("/api/runtime/gpu-clear")
+async def runtime_gpu_clear() -> dict[str, object]:
+    """Unload resident models and clear GPU memory pressure."""
+    return await controller.clear_gpu()
+
+
+@app.get(
+    "/api/docs/agent-baseline",
+    tags=["documentation"],
+    summary="Agent Integration Baseline",
+    description="Returns the baseline markdown content used when integrating real programs into agents.",
+)
+async def get_agent_integration_baseline() -> dict[str, object]:
+    """Return baseline doc content as JSON for API consumers."""
+    content = _load_agent_baseline_markdown()
+    return {
+        "name": "agent_program_baseline",
+        "path": str(AGENT_BASELINE_DOC_PATH),
+        "content": content,
+    }
+
+
+@app.get(
+    "/api/docs/agent-baseline.md",
+    response_class=PlainTextResponse,
+    tags=["documentation"],
+    summary="Agent Integration Baseline (Raw Markdown)",
+    description="Returns raw markdown text for the agent integration baseline document.",
+)
+async def get_agent_integration_baseline_markdown() -> PlainTextResponse:
+    """Return baseline doc as raw markdown text."""
+    return PlainTextResponse(_load_agent_baseline_markdown(), media_type="text/markdown")
+
+
+# Keep graph-only routes out of the active router and OpenAPI without touching
+# historical graph files or the independent executable LangGraph API.
+from knowledge.http_api import install_markdown_routes, retire_graph_routes
+retire_graph_routes(app)
+install_markdown_routes(app, store_factory=lambda: _markdown_store(),
+                        run_root_factory=lambda: RUNTIME_PATHS.run_root,
+                        memory_root_factory=lambda: KNOWLEDGE_MEMORY_ROOT)
+
+from knowledge.source_api import install_source_routes, retire_manual_routes
+from knowledge.source_runtime import SourceIngestionService, library_for as _source_library_for
+
+_SOURCE_INGESTION_SERVICE = None
+
+
+def _source_ingestion_service():
+    global _SOURCE_INGESTION_SERVICE
+    if _SOURCE_INGESTION_SERVICE is None:
+        _SOURCE_INGESTION_SERVICE = SourceIngestionService(_source_library_for(
+            library_root=RUNTIME_PATHS.memory_root / "knowledge/source_library",
+            inbox_root=RUNTIME_PATHS.source_inbox_root, runtime_root=RUNTIME_PATHS.runtime_root),
+            lambda: controller._deps.agent_context)
+    return _SOURCE_INGESTION_SERVICE
+
+
+retire_manual_routes(app)
+install_source_routes(app, service_factory=_source_ingestion_service)
+
+# Workspace v2 is deliberately public-Wiki-only until the hosting deployment
+# injects a verified principal resolver.  Do not infer identity from a request
+# address, header, URL, or request body.
+from knowledge.context_service import KnowledgeContextService
+from knowledge.workspace_api import install_workspace_routes, trusted_local_profile_resolver
+
+_KNOWLEDGE_CONTEXT_SERVICE: KnowledgeContextService | None = None
+
+
+def _knowledge_context_service() -> KnowledgeContextService:
+    global _KNOWLEDGE_CONTEXT_SERVICE
+    shared = getattr(controller._deps.agent_context, "knowledge_service", None)
+    if isinstance(shared, KnowledgeContextService):
+        return shared
+    if _KNOWLEDGE_CONTEXT_SERVICE is None:
+        _KNOWLEDGE_CONTEXT_SERVICE = KnowledgeContextService(RUNTIME_PATHS.repository_root,
+            data_root=RUNTIME_PATHS.memory_root / "knowledge",
+            wiki_corpus_root=RUNTIME_PATHS.system_root / "knowledge/wiki",
+            wiki_source_root=RUNTIME_PATHS.repository_root)
+    return _KNOWLEDGE_CONTEXT_SERVICE
+
+
+install_workspace_routes(app, service_factory=_knowledge_context_service,
+                         principal_resolver=trusted_local_profile_resolver())

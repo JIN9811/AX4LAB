@@ -1,0 +1,86 @@
+module:
+  orchestration_contract:
+    version: orchestration_contract.v1
+    admission:
+      authority: existing_owner_and_runtime_validation
+      description: Descriptive only; absent evidence is unknown, not ready.
+    result:
+      required: []
+    acceptance:
+      authority: policies/validation_policy.py and existing owner validators
+      description: pre-step and overlay coordination; no generic result validation
+  id: orchestrator
+  label: Orchestrator Supervisor Module
+  handler: agent.orchestrator_agent
+  llm_role: orchestrator_supervisor
+  editable: true
+  decision_settings:
+    max_steps: 4
+    timeout_s: null
+  safety:
+    live_requires_validation: true
+    dry_run_supported: true
+    requires_human_approval: false
+    guardian_stop_authority: false
+  tools: []
+  runtime_contract:
+    plane: orchestration_supervisor
+    authority: workflow_coordination
+    safety_authority: guardian_agent
+    direct_device_execution_allowed: false
+    handoff_protocol: handoff_packet.v1
+  output_contracts:
+  - operator_intent.v1
+  - experiment_contract.v1
+  - mission_contract.v1
+  - orchestration_plan.v1
+  - orchestrator_parallel_checks.v1
+  - orchestrator_followup.v1
+  - decision_register.v1
+  - handoff_packet.v1
+  - loop_reflection.v1
+  execution_graph:
+    schema: ax4lab.execution_graph.v1
+    entry: mission
+    nodes:
+    - id: mission
+      handler: orchestrator.mission
+      label: Build mission contract
+      area: middle
+    - id: plan
+      handler: orchestrator.plan
+      label: Build orchestration plan
+      area: middle
+    - id: decide
+      handler: orchestrator.decide
+      label: Composite bounded handoff decision
+      area: high
+      llm: true
+    - id: report
+      handler: orchestrator.report
+      label: Build control, follow-up and decision records
+      area: knowledge
+    edges:
+    - {source: mission, target: plan, 'on': next, kind: execution}
+    - {source: plan, target: decide, 'on': next, kind: execution}
+    - {source: decide, target: report, 'on': prepared, kind: execution}
+    - {source: decide, target: report, 'on': proposed, kind: validation}
+    - {source: decide, target: report, 'on': review_required, kind: validation}
+    - {source: decide, target: report, 'on': deferred, kind: validation}
+    - {source: decide, target: report, 'on': failed, kind: validation}
+    terminals: [report]
+  io_contract:
+    input: Live chat message, OrchestratorState, session memory, graph stage state
+    output:
+    - mission_contract.v1
+    - orchestration_plan.v1
+    - handoff_packet.v1
+    - decision_register.v1
+  metadata:
+    control_view:
+      empty_roles:
+        guardian: Existing request and effect validation
+        low: Software tools; no direct device operation
+  notes: The Orchestrator is a supervisor/control-plane module. It plans and hands
+    off work but does not directly execute device tools; Guardian remains the safety
+    authority.

@@ -1,0 +1,22 @@
+digraph knowledge_closed_loop_handoffs {
+  graph [rankdir=LR, bgcolor="white", pad="0.3", nodesep="0.35", ranksep="0.48", fontname="DejaVu Sans", fontsize=18, label="Knowledge retains evidence without changing the closed-loop route", labelloc=t];
+  node [shape=box, style="rounded,filled", fillcolor="#EEF4FF", color="#315C9B", fontname="DejaVu Sans", fontsize=13, margin="0.13,0.1"];
+  edge [color="#52667A", fontname="DejaVu Sans", fontsize=11, arrowsize=0.75];
+  analysis [label="Analysis\nmeasurements + objective"];
+  knowledge [label="Knowledge\nLLM curation + typed memory", penwidth=2];
+  bo [label="BO\nexisting numerical optimizer"];
+  archive [label="All terminal agent archives\ncompleted / failed / cancelled"];
+  md [label="Markdown observations\nrun / cycle / agent / event", fillcolor="#E9F7EF", color="#2E7D59"];
+  context [label="Scoped notes + citations\npatterns / performance"];
+  inbox [label="Source inbox\nstable content changes"];
+  sources [label="Background source curation\nLLM tools / preserved source MD", fillcolor="#E9F7EF", color="#2E7D59"];
+  equipment [label="Equipment decision layer\nunchanged workflow proposals"];
+  analysis -> knowledge [label="unchanged scientific values"];
+  knowledge -> bo [label="knowledge_context.v1"];
+  archive -> md [label="deterministic intake"];
+  md -> knowledge [label="search / selected read"];
+  knowledge -> context [label="persist"];
+  inbox -> sources [label="separate opt-in worker"];
+  sources -> knowledge [label="scoped references"];
+  sources -> equipment [label="read-only context"];
+}

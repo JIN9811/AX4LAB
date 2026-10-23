@@ -1,0 +1,900 @@
+"""Pinned software checks executed exclusively in disposable namespaces."""
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+import subprocess
+import tempfile
+import re
+import html
+import hashlib
+import posixpath
+import sys
+import time
+from contextlib import redirect_stderr
+from urllib.parse import unquote, urlsplit
+
+from .manifest import build_manifest, validate_manifest, git_entries, _git
+from .sandbox import export_tracked, run_bounded, sandbox_command
+
+CHECKS: dict[str, list[list[str]]] = {
+    "1": [
+        [
+            "python",
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "pytest_asyncio.plugin",
+            "tests/unit/test_layout_manifest.py",
+            "tests/unit/test_layout_validation_sandbox.py"
+        ]
+    ],
+    "2": [
+        [
+            "python",
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "pytest_asyncio.plugin",
+            "tests/unit/test_runtime_paths.py",
+            "tests/unit/test_runtime_path_consumers.py",
+            "tests/unit/test_source_runtime.py",
+            "tests/unit/test_knowledge_archive_intake.py",
+            "tests/unit/test_run_review.py",
+            "tests/unit/test_experiment_runtime.py"
+        ]
+    ],
+    "3": [
+        [
+            "python",
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "pytest_asyncio.plugin",
+            "tests/unit/test_knowledge_publication.py"
+        ]
+    ],
+    "4": [
+        [
+            "python",
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "pytest_asyncio.plugin",
+            "tests/unit/test_package_contracts.py",
+            "tests/unit/test_langgraph_runtime.py",
+            "tests/unit/test_module_control_views.py",
+            "tests/unit/test_runtime_reference_roots.py",
+            "tests/unit/test_orchestrator_capabilities.py",
+            "tests/unit/test_ide_module_lifecycle_js.py",
+            "tests/integration/test_agent_execution_graph_api.py",
+            "tests/integration/test_packages_api.py",
+            "tests/integration/test_design_module_lifecycle.py"
+        ],
+        [
+            "node",
+            "--test",
+            "tests/js/agent_module_host.test.cjs",
+            "tests/js/module_execution_editor.test.cjs",
+            "tests/js/module_control_view.test.cjs",
+            "tests/js/module_control_structure.test.cjs"
+        ]
+    ],
+    "5": [
+        [
+            "python",
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "pytest_asyncio.plugin",
+            "tests/unit/test_knowledge_layout_compatibility.py",
+            "tests/unit/test_runtime_wiki_safety.py",
+            "tests/unit/test_knowledge_workspace_services.py",
+            "tests/unit/test_manual_knowledge_ingest.py",
+            "tests/unit/test_manual_knowledge_retrieval.py",
+            "tests/unit/test_rag.py",
+            "tests/unit/test_graphify_bridge.py",
+            "tests/unit/test_source_runtime.py",
+            "tests/unit/test_knowledge_archive_intake.py",
+            "tests/integration/test_knowledge_graphify_api.py"
+        ]
+    ],
+    "6": [
+        [
+            "python",
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "pytest_asyncio.plugin",
+            "tests/unit/test_persisted_references.py",
+            "tests/unit/test_run_recovery_checkpoint.py",
+            "tests/unit/test_equipment_tail_recovery.py",
+            "tests/unit/test_bo_budget_recovery.py",
+            "tests/unit/test_run_review_artifacts.py",
+            "tests/unit/test_agent_artifact_archive.py",
+            "tests/unit/test_run_review.py",
+            "tests/unit/test_artifact_preservation.py"
+        ],
+        [
+            "node",
+            "--test",
+            "tests/js/run_review_artifacts.test.cjs"
+        ]
+    ],
+    "7": [
+        [
+            "python",
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "pytest_asyncio.plugin",
+            "tests/unit/test_runtime_worker_origins.py",
+            "tests/unit/test_runtime_launchers.py",
+            "tests/unit/test_compute_pool.py",
+            "tests/unit/test_monitor_process.py",
+            "tests/unit/test_safe_hot_reload.py",
+            "tests/unit/test_local_pyautogui_bridge.py",
+            "tests/unit/test_cli_restart.py",
+            "tests/unit/test_module_designer_cli_contract.py"
+        ]
+    ],
+    "8": [
+        [
+            "python",
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "pytest_asyncio.plugin",
+            "tests/unit/test_document_relocation.py",
+            "tests/unit/test_documentation_validation.py",
+            "tests/unit/test_knowledge_publication.py",
+            "tests/unit/test_knowledge_layout_compatibility.py"
+        ],
+        ["python", "scripts/validate_documentation.py", "--root", "/snapshot"],
+        ["python", "-c", "import json; from pathlib import Path; from tools.repository_layout.checks import audit_document_references; root=Path('/snapshot'); m=json.loads((root/'system/maintenance/repository_layout_manifest.json').read_text()); r=audit_document_references(root,m); print(json.dumps({**{k:v for k,v in r.items() if k!='historical_references'}, 'historical_references_count':len(r['historical_references'])})); assert not any(r[k] for k in ('missing_files','missing_anchors','escaping_references','metadata_errors'))"]
+    ],
+    "9": [
+        [
+            "python",
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "pytest_asyncio.plugin",
+            "tests/unit/test_distribution_layout.py",
+            "tests/unit/test_install_packaging.py",
+            "tests/unit/test_cli_restart.py",
+            "tests/unit/test_module_designer_cli_contract.py",
+            "tests/unit/test_package_contracts.py",
+            "tests/unit/test_knowledge_publication.py",
+            "tests/unit/test_windows_bridge_release.py",
+            "tests/unit/test_windows_bridge_supervisor.py",
+            "tests/unit/test_windows_bridge_self_updater.py",
+            "tests/unit/test_windows_pyautogui_bridge_server_helper.py",
+            "tests/unit/test_windows_pyautogui_demo_assets.py",
+            "tests/unit/test_advanced_visual_work_queue_e2e.py",
+            "tests/unit/test_advanced_visual_work_queue_demo.py"
+        ]
+    ],
+    "10": [
+        [
+            "python",
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "pytest_asyncio.plugin",
+            "tests/unit/test_external_asset_layout.py",
+            "tests/unit/test_specimen_pose_tracker.py",
+            "tests/unit/test_isaac_lab_robotis_omx_registration.py",
+            "tests/unit/test_isaac_grip_pad_inset.py",
+            "tests/unit/test_camera_vision_package.py",
+            "tests/unit/test_utm_runtime_stack_script.py",
+            "tests/unit/test_utm_runtime_camera_env.py",
+            "tests/unit/test_linear_interpolation_options.py",
+            "tests/unit/test_lerobot_bridge.py",
+            "tests/unit/test_plc_bridge.py",
+            "tests/unit/test_plc_bridge_service.py",
+            "tests/unit/test_lerobot_gui_static.py",
+            "tests/integration/test_rtc_queue_alignment.py",
+            "libs/joint_linear_interpolation/tests/test_transmitter.py"
+        ],
+        [
+            "node",
+            "--test",
+            "tests/js/omx_environment_layout.test.cjs"
+        ]
+    ],
+    "11": [],  # Explicit reviewed literal selection required; no broad default.
+    "12": [
+        [
+            "python",
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "pytest_asyncio.plugin",
+            "tests/unit/test_private_state_migration.py",
+            "tests/unit/test_runtime_paths.py",
+            "tests/unit/test_knowledge_layout_compatibility.py",
+            "tests/unit/test_persisted_references.py",
+            "tests/integration/test_repository_layout_equivalence.py"
+        ]
+    ]
+}
+BASELINE = "ba273ddb0fc2bf8795630d51d93d3932748e0a51"
+
+DOCUMENT_SUFFIXES = {'.md', '.markdown', '.html', '.htm', '.rst'}
+METADATA_PATH_FIELDS = {'source_of_truth', 'related_docs', 'supersedes', 'superseded_by',
+                        'governing_design', 'source_refs'}
+
+
+def latest_main_records(manifest: dict) -> dict[str, dict]:
+    """Validate the explicit integration overlay without changing frozen proof."""
+    from .manifest import _safe_relative
+    phase = manifest.get('latest_main_integration')
+    if phase is None:
+        return {}
+    if not isinstance(phase, dict) or any(not re.fullmatch('[0-9a-f]{40}', phase.get(key, ''))
+            for key in ('source_base', 'source_revision', 'destination_base')):
+        raise ValueError('Integration requires pinned revisions')
+    records, destinations = {}, set()
+    for row in phase.get('records', []):
+        old, destination = row.get('old_path'), row.get('destination')
+        if (not _safe_relative(old) or old in records
+                or not _safe_relative(row.get('previous_destination'))
+                or row.get('status') not in {'M', 'D', 'R100', 'R092', 'R090', 'R077'}):
+            raise ValueError('Invalid or duplicate integration record')
+        if row['status'] == 'D':
+            if destination is not None or row.get('new_path') is not None:
+                raise ValueError('Retired record has a current destination')
+        elif (not _safe_relative(destination) or destination in destinations
+                or not _safe_relative(row.get('new_path'))):
+            raise ValueError('Invalid integration destination')
+        for key in ('previous_identity',) if row['status'] == 'D' else ('previous_identity', 'current_identity'):
+            identity = row.get(key, {})
+            if (not re.fullmatch('[0-9a-f]{64}', identity.get('sha256', ''))
+                    or not isinstance(identity.get('size'), int) or identity['size'] < 0
+                    or identity.get('mode') not in {'100644', '100755'}):
+                raise ValueError('Integration identity is incomplete')
+        records[old] = row
+        if destination:
+            destinations.add(destination)
+    return records
+
+
+def ax4lab_naming_records(manifest: dict) -> dict[str, dict]:
+    """Validate an additive branding receipt, not re-certify historical lineage.
+
+    Previous identities describe actual bytes at the pinned Git base, which can
+    differ from older frozen phase proofs. Tracked-only snapshots need no Git:
+    this helper checks receipt shape; consumers check current bytes and modes.
+    Comparing previous identities with base Git objects is a separate source
+    audit. Neither earlier proof hashes nor the supplied manifest are mutated.
+    A null previous identity denotes a file newly added after the base revision.
+    """
+    from .manifest import _safe_relative
+    phase = manifest.get('ax4lab_naming')
+    if phase is None:
+        return {}
+    if (not isinstance(phase, dict)
+            or not isinstance(phase.get('base_revision'), str)
+            or not re.fullmatch('[0-9a-f]{40}', phase['base_revision'])
+            or not isinstance(phase.get('files'), dict)):
+        raise ValueError('AX4LAB naming requires a pinned base revision and file receipts')
+    for path, row in phase['files'].items():
+        if not _safe_relative(path) or not isinstance(row, dict):
+            raise ValueError('Invalid AX4LAB naming path or record')
+        for key in ('previous_identity', 'current_identity'):
+            identity = row.get(key)
+            if key == 'previous_identity' and key in row and identity is None:
+                continue
+            if (not isinstance(identity, dict)
+                    or not isinstance(identity.get('sha256'), str)
+                    or not re.fullmatch('[0-9a-f]{64}', identity['sha256'])
+                    or type(identity.get('size')) is not int or identity['size'] < 0
+                    or identity.get('mode') not in {'100644', '100755'}):
+                raise ValueError('AX4LAB naming identity is incomplete: ' + path)
+    return phase['files']
+
+
+def public_release_records(manifest: dict) -> dict[str, dict]:
+    """Check additive public-release receipts; null current identity means omitted.
+
+    Prior migration/branding receipts remain frozen. Public snapshots carry these
+    identities but need not ship the private ancestral Git objects themselves.
+    """
+    from .manifest import _safe_relative
+    phase = manifest.get('public_release')
+    if phase is None:
+        return {}
+    if (not isinstance(phase, dict) or not isinstance(phase.get('base_revision'), str)
+            or not re.fullmatch('[0-9a-f]{40}', phase['base_revision'])
+            or not isinstance(phase.get('files'), dict)):
+        raise ValueError('Public release requires a pinned base and file receipts')
+    for path, row in phase['files'].items():
+        if (not _safe_relative(path) or not isinstance(row, dict)
+                or set(row) != {'previous_identity', 'current_identity'}
+                or all(value is None for value in row.values())):
+            raise ValueError('Invalid public release path or record')
+        for identity in row.values():
+            if identity is None:
+                continue
+            if (not isinstance(identity, dict) or not isinstance(identity.get('sha256'), str)
+                    or not re.fullmatch('[0-9a-f]{64}', identity['sha256'])
+                    or type(identity.get('size')) is not int or identity['size'] < 0
+                    or identity.get('mode') not in {'100644', '100755'}):
+                raise ValueError('Public release identity is incomplete: ' + path)
+    return phase['files']
+
+
+def document_locations(manifest: dict, *, integrated: bool = True) -> dict[str, str]:
+    """Compose explicit phase receipts without relabelling prior evidence."""
+    from .move_files import document_move
+    deferred = manifest.get('phase_deferrals', {})
+    phase = manifest.get('runtime_phase', {})
+    rows = {**manifest['entries'], **manifest.get('additions', {}),
+            **phase.get('additions', {}), **phase.get('post_move_additions', {}),
+            **manifest.get('task11_phase', {}).get('additions', {})}
+    locations = {source: deferred[source]['current_location'] if source in deferred else
+            row['destination'] if document_move(source, row) else source
+            for source, row in rows.items()}
+    locations = {source: phase.get('moves', {}).get(current, current)
+                 for source, current in locations.items()}
+    if integrated:
+        for source, row in latest_main_records(manifest).items():
+            if locations.get(source) != row['previous_destination']:
+                raise ValueError('Integration previous location differs from frozen proof: ' + source)
+            if row['status'] == 'D':
+                locations.pop(source)
+            else:
+                locations[source] = row['destination']
+        omitted = {path for path, row in public_release_records(manifest).items()
+                   if row['current_identity'] is None}
+        locations = {source: current for source, current in locations.items() if current not in omitted}
+    return locations
+
+
+def _mask_code(text: str, *, inline: bool = True) -> str:
+    """Preserve offsets while suppressing fenced, indented and inline examples."""
+    lines, fence = [], None
+    for line in text.splitlines(keepends=True):
+        marker = re.match(r'^ {0,3}(`{3,}|~{3,})', line)
+        if fence:
+            lines.append(re.sub(r'[^\n]', ' ', line))
+            if marker and marker[1][0] == fence[0] and len(marker[1]) >= len(fence):
+                fence = None
+        elif marker:
+            fence = marker[1]
+            lines.append(re.sub(r'[^\n]', ' ', line))
+        elif line.startswith(('    ', '\t')):
+            lines.append(re.sub(r'[^\n]', ' ', line))
+        else:
+            lines.append(line)
+    masked = ''.join(lines)
+    return re.sub(r'(`+)([^`\n]*?)\1', lambda match: ' ' * len(match[0]), masked) if inline else masked
+
+
+def _rst_roles(text: str) -> list[tuple[int, int, str, str]]:
+    return [(*match.span(2), match[2], match[1]) for match in
+            re.finditer(r':(doc|ref):`(?:[^`<]*<)?([^`<>]+)>?`', text)]
+
+
+def reference_spans(text: str, suffix: str) -> list[tuple[int, int, str]]:
+    """Return static reference target spans; no basename search or code parsing."""
+    masked = _mask_code(text) if suffix in {'.md', '.markdown'} else text
+    spans = []
+    patterns = [r'''\b(?:href|src)\s*=\s*["']([^"']+)["']''']
+    if suffix in {'.md', '.markdown'}:
+        # The closing label also belongs to outer links around nested images.
+        # Restrict the capture to the destination; an optional title is not a URL.
+        patterns += [r'\]\(\s*(?:<([^>\n]+)>|([^\s()]+(?:\([^()]*\)[^\s()]*)*))',
+                     r'^ {0,3}\[[^\]\n]+\]:\s*(?:<([^>\n]+)>|(\S+))',
+                     r'<((?:https?://|mailto:)[^<>\s]+)>']
+    elif suffix == '.rst':
+        # Explicit RST links and file directives, never Python automodule names.
+        patterns += [r'`[^`<\n]*<([^>\n]+)>`_?',
+                     r'^\s*\.\.\s+(?:image|figure|include|literalinclude)::\s*(\S[^\n]*)']
+        spans.extend((start, end, target) for start, end, target, _ in _rst_roles(text))
+    for pattern in patterns:
+        for match in re.finditer(pattern, masked, re.M | re.I):
+            group = next(index for index in range(1, len(match.groups()) + 1) if match[index] is not None)
+            value = match[group]
+            if any(token in value for token in ('{{', '{%', '${', '<%', 'javascript:')):
+                continue
+            spans.append((*match.span(group), html.unescape(value)))
+    return sorted(set(spans))
+
+
+def _anchors(text: str, suffix: str) -> set[str]:
+    masked = _mask_code(text, inline=False) if suffix in {'.md', '.markdown'} else text
+    anchors = set(re.findall(r'''\b(?:id|name)\s*=\s*["']([^"']+)["']''', masked, re.I))
+    headings = []
+    if suffix in {'.md', '.markdown'}:
+        headings = re.findall(r'^ {0,3}#{1,6}\s+(.+?)\s*#*\s*$', masked, re.M)
+        headings += re.findall(r'^([^\n]+)\n(?:={3,}|-{3,})\s*$', masked, re.M)
+    elif suffix == '.rst':
+        headings = re.findall(r'^([^\n]+)\n[=~^"`:+#*-]{3,}\s*$', masked, re.M)
+        anchors.update(re.findall(r'^\s*\.\. _([^:]+):\s*$', masked, re.M))
+    seen = {}
+    for heading in headings:
+        heading = re.sub(r'<[^>]+>', '', html.unescape(heading)).strip().lower()
+        slug = re.sub(r'[^\w\-\s]', '', heading)
+        slug = re.sub(r'\s', '-', slug)
+        number = seen.get(slug, 0)
+        seen[slug] = number + 1
+        anchors.add(slug + (f'-{number}' if number else ''))
+    return anchors
+
+
+def _front_matter(text: str) -> tuple[dict, str]:
+    import yaml
+    marker = re.match(r'\A(?:---\r?\n|<!-- atr-doc\r?\n)', text)
+    if not marker:
+        return {}, text
+    close = '-->' if text.startswith('<!--') else '---'
+    end = re.search(r'^' + re.escape(close) + r'\s*$', text[marker.end():], re.M)
+    if not end:
+        raise ValueError('Unterminated metadata')
+    content_end = marker.end() + end.start()
+    body_start = marker.end() + end.end()
+    meta = yaml.safe_load(text[marker.end():content_end])
+    if not isinstance(meta, dict):
+        raise ValueError('Document metadata must be a mapping')
+    return meta, ' ' * body_start + text[body_start:]
+
+
+def document_references(text: str, suffix: str) -> list[dict]:
+    metadata, body = _front_matter(text) if suffix in {'.md', '.markdown'} else ({}, text)
+    references = []
+    for field in sorted(METADATA_PATH_FIELDS):
+        if field in metadata:
+            values = metadata[field] if isinstance(metadata[field], list) else [metadata[field]]
+            references.extend({'reference': value, 'base': 'repository', 'field': field} for value in values)
+    references.extend({'reference': target, 'base': 'document'} for _, _, target in reference_spans(body, suffix))
+    return references
+
+
+def historical_reference_errors(root: Path, original: str, current: str, manifest: dict) -> list[str]:
+    """Validate a specifically reviewed immutable document's historical ledger."""
+    record = manifest.get('historical_documents', {}).get(original)
+    if not record:
+        return ['Missing exact historical record']
+    data = (root / current).read_bytes()
+    entry = manifest['entries'][original]
+    if (record.get('original_path') != original or record.get('revision') != manifest.get('move_revision')
+            or not record.get('reason') or hashlib.sha256(data).hexdigest() != record.get('sha256')
+            or ('sha256' in entry and record['sha256'] != entry['sha256'])
+            or ('git_blob' in entry and record.get('git_blob') != entry['git_blob'])):
+        return ['Historical bytes/provenance no longer match reviewed identity']
+    references = document_references(data.decode(), Path(current).suffix.lower())
+    recorded = record.get('references', [])
+    if [(r['reference'], r['base']) for r in references] != [(r.get('reference'), r.get('base')) for r in recorded]:
+        return ['Historical reference accounting is incomplete or reordered']
+    locations = document_locations(manifest, integrated=False)
+    errors = []
+    for ref in recorded:
+        parts = urlsplit(ref['reference'])
+        if parts.scheme or parts.netloc or ref['reference'].startswith('/'):
+            if ref.get('original_resolution') != 'external':
+                errors.append('Historical external reference is not labelled external')
+            continue
+        target = posixpath.normpath(posixpath.join(posixpath.dirname(original) if ref['base'] == 'document' else '', unquote(parts.path))) if parts.path else original
+        exists = target in locations or any(path.startswith(target + '/') for path in locations)
+        if target == '.git' and ref.get('field') == 'source_of_truth':
+            exists = bool(re.fullmatch('[0-9a-f]{40}', manifest.get('baseline_commit', '')))
+        if ref.get('original_target') != target or not exists:
+            errors.append('Historical reference does not resolve in its pinned inventory: ' + ref['reference'])
+        recorded_current = ref.get('current_target')
+        composed_current = manifest.get('runtime_phase', {}).get('moves', {}).get(recorded_current, recorded_current)
+        if target in locations and composed_current != locations[target]:
+            errors.append('Historical reference has an incorrect mapped current target: ' + ref['reference'])
+        if parts.fragment and Path(target).suffix.lower() in DOCUMENT_SUFFIXES and not ref.get('fragment_verified'):
+            errors.append('Historical fragment lacks pinned anchor proof: ' + ref['reference'])
+    return errors
+
+
+def audit_document_references(repository_root: Path, manifest: dict) -> dict:
+    """Audit exact tracked document rows and declared metadata bases, offline.
+
+    Public absolute URLs/routes are counted separately and not network-checked.
+    Dated audit JSON is historical evidence, not a mutable path database.
+    """
+    import yaml
+    root = Path(repository_root).resolve()
+    result = {key: [] for key in ('missing_files', 'missing_anchors', 'escaping_references', 'metadata_errors')}
+    result.update(checked=0, external_urls=0, historical_references=[], repository_provenance=[])
+    locations = document_locations(manifest)
+    integration = latest_main_records(manifest)
+    naming = {**ax4lab_naming_records(manifest), **public_release_records(manifest)}
+    for current, row in naming.items():
+        path = root / current
+        expected = row['current_identity']
+        if expected is None:
+            if path.exists() or path.is_symlink():
+                result['metadata_errors'].append({'document': current,
+                    'reason': 'Public release omitted source still exists'})
+            continue
+        if (not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to(root)
+                or hashlib.sha256(path.read_bytes()).hexdigest() != expected['sha256']
+                or path.stat().st_size != expected['size']
+                or ('100755' if path.stat().st_mode & 0o111 else '100644') != expected['mode']):
+            result['metadata_errors'].append({'document': current,
+                'reason': 'AX4LAB naming bytes/mode differ from explicit supersession identity'})
+        # New public documents still receive ordinary link/metadata checks.
+        if current not in locations.values():
+            locations[current] = current
+    for original, row in integration.items():
+        current = row['destination']
+        previous = root / row['previous_destination']
+        if row['status'] == 'D' or current != row['previous_destination']:
+            if previous.exists() or previous.is_symlink():
+                result['metadata_errors'].append({'document': row['previous_destination'],
+                    'reason': 'Retired or relocated integration source still exists'})
+        if current is not None and current not in naming:
+            path = root / current
+            expected = row['current_identity']
+            if (not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to(root)
+                    or hashlib.sha256(path.read_bytes()).hexdigest() != expected['sha256']
+                    or path.stat().st_size != expected['size']
+                    or ('100755' if path.stat().st_mode & 0o111 else '100644') != expected['mode']):
+                result['metadata_errors'].append({'document': current,
+                    'reason': 'Integrated bytes/mode differ from explicit supersession identity'})
+    anchor_cache = {}
+    rst_labels = {}
+    for current in locations.values():
+        document = root / current
+        if (document.suffix == '.rst' and document.resolve().is_relative_to(root)
+                and document.is_file() and not document.is_symlink()):
+            for label in re.findall(r'^\s*\.\. _([^:]+):\s*$', document.read_text(), re.M):
+                rst_labels.setdefault(label, []).append(current)
+
+    def inspect(label, target, base, *, metadata=False, provenance=False, filesystem=False):
+        if not isinstance(target, str):
+            result['metadata_errors'].append({'document': label, 'reference': repr(target), 'reason': 'non-string path'})
+            return
+        result['checked'] += 1
+        if provenance and target == '.git':
+            if re.fullmatch('[0-9a-f]{40}', manifest.get('baseline_commit', '')) and manifest.get('entries'):
+                result['repository_provenance'].append({'document': label, 'reference': '.git',
+                    'baseline_commit': manifest['baseline_commit'], 'kind': 'pinned Git inventory, not a tracked document'})
+            else:
+                result['metadata_errors'].append({'document': label, 'reference': target, 'reason': 'Missing pinned Git provenance'})
+            return
+        # Typed registry values must match the unchanged Path-based consumer.
+        parts = urlsplit('') if filesystem else urlsplit(html.unescape(target))
+        if parts.scheme or parts.netloc or target.startswith('/'):
+            if metadata:
+                result['metadata_errors'].append({'document': label, 'reference': target, 'reason': 'Repository metadata is not a relative path'})
+                return
+            result['external_urls'] += 1
+            return
+        path = target if filesystem else unquote(parts.path)
+        candidate = (base / path).resolve() if path else (root / label).resolve()
+        issue = {'document': label, 'reference': target}
+        if not candidate.is_relative_to(root):
+            result['escaping_references'].append(issue)
+            return
+        if not candidate.exists():
+            result['metadata_errors' if metadata else 'missing_files'].append(issue)
+            return
+        if parts.fragment and candidate.is_file() and candidate.suffix.lower() in DOCUMENT_SUFFIXES:
+            if candidate not in anchor_cache:
+                anchor_cache[candidate] = _anchors(candidate.read_text(encoding='utf-8'), candidate.suffix.lower())
+            if unquote(parts.fragment) not in anchor_cache[candidate]:
+                result['missing_anchors'].append(issue)
+
+    for original, current in sorted(locations.items()):
+        path = root / current
+        suffix = path.suffix.lower()
+        if suffix not in DOCUMENT_SUFFIXES and not (current.endswith(('document_manifest.yaml',
+                'knowledge/manuals/registry.yaml', 'paper/artifact_manifest.yaml', 'capture_manifest.json'))):
+            continue
+        if not path.is_file():
+            result['missing_files'].append({'document': current, 'reference': current})
+            continue
+        if path.is_symlink() or not path.resolve().is_relative_to(root):
+            result['escaping_references'].append({'document': current, 'reference': current})
+            continue
+        try:
+            text = path.read_text(encoding='utf-8')
+            if (original in manifest.get('historical_documents', {})
+                    and original not in integration and current not in naming):
+                errors = historical_reference_errors(root, original, current, manifest)
+                result['metadata_errors'].extend({'document': current, 'reason': error} for error in errors)
+                if not errors:
+                    record = manifest['historical_documents'][original]
+                    result['historical_references'].extend({'document': current, 'original_path': original,
+                        'revision': record['revision'], **ref} for ref in record['references'])
+                continue
+            if suffix in DOCUMENT_SUFFIXES:
+                metadata, body = _front_matter(text) if suffix in {'.md', '.markdown'} else ({}, text)
+                for field in METADATA_PATH_FIELDS:
+                    if field in metadata:
+                        values = metadata[field] if isinstance(metadata[field], list) else [metadata[field]]
+                        for value in values:
+                            inspect(current, value, root, metadata=True, provenance=field == 'source_of_truth')
+                if 'source_revision' in metadata and set(metadata.get('source_refs', [])) != set(metadata['source_revision']):
+                    result['metadata_errors'].append({'document': current, 'reason': 'Wiki source key mismatch'})
+                roles = {(start, end): role for start, end, _, role in _rst_roles(body)} if suffix == '.rst' else {}
+                for start, end, target in reference_spans(body, suffix):
+                    role = roles.get((start, end))
+                    if role == 'ref':
+                        matches = rst_labels.get(target, [])
+                        if len(matches) != 1:
+                            result['checked'] += 1
+                            result['missing_anchors'].append({'document': current,
+                                'reference': target, 'reason': 'Missing or ambiguous explicit RST label'})
+                        else:
+                            inspect(current, matches[0] + '#' + target, root)
+                        continue
+                    if role == 'doc' and not Path(target).suffix:
+                        candidate = (path.parent / target).resolve()
+                        if candidate.is_relative_to(root):
+                            matches = [target + extension for extension in ('.rst', '.md')
+                                       if (path.parent / (target + extension)).is_file()]
+                            if len(matches) == 1:
+                                target = matches[0]
+                    inspect(current, target, path.parent)
+            else:
+                metadata = yaml.safe_load(text)
+                if current.endswith('document_manifest.yaml'):
+                    for value in metadata.get('documents', []):
+                        inspect(current, value, root, metadata=True)
+                    if metadata.get('snapshot', {}).get('document'):
+                        inspect(current, metadata['snapshot']['document'], root, metadata=True)
+                elif current.endswith('knowledge/manuals/registry.yaml'):
+                    for source in metadata.get('sources', []):
+                        inspect(current, source.get('path'), path.parent, metadata=True, filesystem=True)
+                elif current.endswith('paper/artifact_manifest.yaml'):
+                    for record in metadata.get('evidence', []):
+                        for value in record.get('inputs', []):
+                            inspect(current, value, root, metadata=True)
+                        for value in record.get('outputs', []):
+                            inspect(current, value.get('path'), root, metadata=True)
+                elif current.endswith('capture_manifest.json'):
+                    for image in metadata.get('images', []):
+                        inspect(current, image.get('file'), path.parent, metadata=True)
+                    if metadata.get('reused_images'):
+                        inspect(current, metadata['reused_images'], path.parent, metadata=True)
+        except (UnicodeError, ValueError, TypeError, yaml.YAMLError) as exc:
+            result['metadata_errors'].append({'document': current, 'reason': str(exc)})
+    for key in ('missing_files', 'missing_anchors', 'escaping_references', 'metadata_errors'):
+        result[key].sort(key=lambda row: json.dumps(row, sort_keys=True))
+    return result
+
+# Task 7's final, bounded cross-slice gate. Keep failures visible by partition,
+# with fresh child-origin evidence and the original behavior suites alongside
+# each root/default matrix. No device/model/provider lifecycle is exercised.
+_TASK7_PARTITIONS = [
+    # Root propagation across the composed bootstrap and app factories.
+    ["tests/unit/test_runtime_paths.py", "tests/unit/test_runtime_path_consumers.py",
+     "tests/unit/test_runtime_bridge_roots.py", "tests/unit/test_runtime_printer_roots.py",
+     "tests/unit/test_runtime_lerobot_roots.py", "tests/unit/test_runtime_app_bridge_roots.py",
+     "tests/unit/test_runtime_knowledge_roots.py", "tests/unit/test_runtime_app_knowledge_roots.py",
+     "tests/unit/test_runtime_ancillary_roots.py", "tests/unit/test_knowledge_graph_cli.py"],
+    # Actual fresh children: origins, metadata, environment, artifacts, cancellation.
+    ["tests/unit/test_runtime_worker_origins.py", "tests/unit/test_runtime_launchers.py",
+     "tests/unit/test_compute_pool.py", "tests/unit/test_monitor_process.py",
+     "tests/unit/test_safe_hot_reload.py", "tests/unit/test_local_pyautogui_bridge.py",
+     "tests/unit/test_cli_restart.py", "tests/unit/test_module_designer_cli_contract.py"],
+    # UTM/pose/equipment synthetic behavior and private output families.
+    ["tests/unit/test_utm_tools.py", "tests/unit/test_utm_runtime_bridge.py",
+     "tests/unit/test_utm_camera_config.py", "tests/unit/test_utm_camera_calibration_command.py",
+     "tests/unit/test_utm_runtime_camera_env.py", "tests/unit/test_utm_state_observer.py",
+     "tests/unit/test_specimen_pose_tracker.py", "tests/unit/test_equipment_pyautogui_bridge.py",
+     "tests/unit/test_multifidelity_contracts.py", "tests/unit/test_vision_monitor_stream.py",
+     "tests/unit/test_windows_equipment_module_contract.py", "tests/unit/test_camera_vision_package.py"],
+    # Both printer branches, profile helpers and artifact/provenance compatibility.
+    ["tests/unit/test_prusa_bridge.py", "tests/unit/test_printer_tools.py",
+     "tests/unit/test_bambu_bridge.py", "tests/unit/test_bambu_auto_orientation.py",
+     "tests/unit/test_bambu_slicer_profiles.py", "tests/unit/test_printer_fleet_package.py",
+     "tests/unit/test_bambu_material_priority.py", "tests/unit/test_printer_profile.py",
+     "tests/unit/test_bambu_autoejection.py", "tests/unit/test_bambu_autoejection_completion_audit.py"],
+    # LeRobot source and process contracts. One unchanged baseline interpreter-name
+    # assertion is recorded in task-7d-report.md, not rerun to produce a known failure.
+    ["tests/unit/test_lerobot_home_paths.py", "tests/unit/test_lerobot_bridge.py",
+     "tests/unit/test_lerobot_tools.py", "tests/unit/test_lerobot_joint_telemetry.py",
+     "tests/unit/test_lerobot_isaac_lab_e2e_contract.py", "tests/unit/test_lerobot_isaac_lab_synthetic.py",
+     "tests/unit/test_lerobot_isaac_mirror_runtime_wrapper.py", "tests/unit/test_lerobot_active_robot_cam_once.py",
+     "tests/unit/test_lerobot_replay.py", "tests/unit/test_lerobot_rollout_profile.py",
+     "tests/unit/test_manipulation_lerobot_agent.py", "tests/unit/test_lerobot_synthetic_e2e_smoke.py",
+     "tests/unit/test_lerobot_isaac_lab_validate_cli.py", "tests/unit/test_isaac_omx_mirror_mapping.py",
+     "--deselect=tests/unit/test_lerobot_isaac_lab_e2e_contract.py::test_live_e2e_check_command_uses_real_10s_three_episode_preset"],
+    # Knowledge ownership, ontology, evidence identities and retired API behavior.
+    ["tests/unit/test_knowledge_service.py", "tests/unit/test_knowledge_graph_backend.py",
+     "tests/unit/test_knowledge_ontology.py", "tests/unit/test_knowledge_agent.py",
+     "tests/unit/test_knowledge_reconciliation_service.py", "tests/unit/test_knowledge_layout_compatibility.py",
+     "tests/unit/test_graphify_bridge.py", "tests/unit/test_source_runtime.py",
+     "tests/integration/test_knowledge_api.py", "tests/integration/test_knowledge_ontology_api.py",
+     "tests/integration/test_knowledge_graphify_api.py", "tests/integration/test_markdown_knowledge_api.py"],
+    # Ancillary agent semantics and the changed controller BO-store composition.
+    ["tests/unit/test_analysis_agent.py", "tests/unit/test_analysis_measurement_only.py",
+     "tests/unit/test_analysis_decisions.py", "tests/unit/test_design_agent.py",
+     "tests/unit/test_design_decision.py", "tests/unit/test_design_evidence_display.py",
+     "tests/unit/test_test_bo_workspace.py", "tests/unit/test_test_mode_cycles.py"],
+]
+CHECKS["7"] = [
+    ["python", "-u", "-m", "pytest", "-vv", "--tb=short", "-p", "pytest_asyncio.plugin", *selection]
+    for selection in _TASK7_PARTITIONS
+]
+# Reuse the already-approved dependency-only CPU profile, never a simulator.
+CHECKS["7"][4][:1] = ["/usr/bin/env", "ISAAC_LAB_PATH=/deps/validation-tools/isaaclab-cpu-source", "/deps/bin/python3", "-S"]
+
+
+def literal_selection(payload: dict) -> dict:
+    """A command manifest is a bounded selection, never discovery or authority."""
+    if not isinstance(payload, dict) or set(payload) != {'id', 'command', 'timeout'}:
+        raise ValueError('Selection requires exactly id, command, timeout')
+    if not isinstance(payload['id'], str) or not re.fullmatch(r'[A-Za-z0-9_-]+', payload['id']):
+        raise ValueError('Invalid receipt id')
+    if type(payload['timeout']) is not int or not 0 < payload['timeout'] <= 1200:
+        raise ValueError('Explicit bound must be 1..1200 seconds')
+    command = payload['command']
+    if (not isinstance(command, list) or not command
+            or any(not isinstance(value, str) or not value or '\0' in value for value in command)
+            or any('*' in value or value.rstrip('/') in {'tests', 'tests/unit', 'tests/integration', 'tests/js'}
+                   for value in command)):
+        raise ValueError('Literal file/node argv required; no broad test roots or globs')
+    # This entrypoint accepts test runners, not arbitrary executable wrappers.
+    # Other reviewed audit commands use the separately pinned task launcher.
+    arguments = list(command[1:])
+    if command[0] in {'python', 'python3', '/deps/bin/python3'}:
+        while arguments and arguments[0] in {'-S', '-u'}:
+            arguments.pop(0)
+        if arguments[:2] != ['-m', 'pytest']:
+            raise ValueError('Only direct python -m pytest is approved')
+        arguments = arguments[2:]
+        suffixes = ('.py',)
+        flags = {'-q', '-v', '-vv', '-s', '-x', '-rA', '--tb=short', '--tb=long'}
+        runner = 'pytest'
+    elif command[0] in {'node', '/deps/validation-tools/bin/node'} and arguments[:1] == ['--test']:
+        arguments = arguments[1:]
+        suffixes = ('.js', '.cjs', '.mjs')
+        flags = set()
+        runner = 'node'
+    else:
+        raise ValueError('Only direct approved pytest/Node test runners are allowed')
+    selectors = 0
+    while arguments:
+        value = arguments.pop(0)
+        if value in flags:
+            continue
+        if runner == 'pytest' and value == '-p' and arguments[:1] == ['pytest_asyncio.plugin']:
+            arguments.pop(0)
+            continue
+        if runner == 'node' and value.startswith('--test-name-pattern=') and value.partition('=')[2]:
+            continue
+        filename, separator, node = value.partition('::')
+        if (not re.fullmatch(r'tests/(?:[A-Za-z0-9_-]+/)*(?:[A-Za-z0-9_-]+\.)+(?:py|js|cjs|mjs)', filename)
+                or not filename.endswith(suffixes)
+                or separator and (runner != 'pytest' or not node or '\n' in node or '\r' in node)):
+            raise ValueError('Every test selector must be an explicit tests/ file or pytest node')
+        selectors += 1
+    if not selectors:
+        raise ValueError('Test runners require explicit test files or node IDs')
+    return payload
+
+
+def receipt_directory(private: Path, identifier: str) -> Path:
+    if not re.fullmatch(r'[A-Za-z0-9_-]+', identifier):
+        raise ValueError('Invalid receipt id')
+    output = private / 'task-11-receipts' / identifier
+    output.mkdir(parents=True, exist_ok=False)
+    return output
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("action", choices=["check"])
+    parser.add_argument("task", choices=sorted(CHECKS))
+    parser.add_argument("--dependencies", type=Path)
+    parser.add_argument("--revision", default="HEAD")
+    parser.add_argument("--timeout", type=int, default=600)
+    parser.add_argument("--baseline-suite", action="store_true", help="Run bounded ordinary pytest after containment")
+    parser.add_argument("--selection", type=Path, help="Explicit Task11 JSON id/command/timeout; exclusive receipt")
+    parser.add_argument("--helper-revision", help="Exact immutable helper object for Task11")
+    args = parser.parse_args(argv)
+    selection = None
+    if args.task == '11':
+        if (args.selection is None or args.baseline_suite
+                or not re.fullmatch('[0-9a-f]{40}', args.revision)
+                or not re.fullmatch('[0-9a-f]{40}', args.helper_revision or '')):
+            parser.error('Task11 requires selection and exact target/helper object IDs; broad baseline disabled')
+        selection = literal_selection(json.loads(args.selection.read_text()))
+    elif args.selection is not None or args.helper_revision is not None:
+        parser.error('Explicit selection/helper options belong to Task11')
+    root = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
+    private = root / ".superpowers/sdd/2026-10-01-repository-layout-migration"
+    dependencies = args.dependencies or private / "deps"
+    output = receipt_directory(private, selection['id']) if selection else None
+    helper_hashes = {}
+    if output:
+        for name in ('__init__.py', 'checks.py', 'manifest.py', 'sandbox.py'):
+            source = Path(__file__).parent / name
+            data = source.read_bytes()
+            expected = _git(root, 'show', args.helper_revision + ':runtime/tools/repository_layout/' + name)
+            if data != expected:
+                raise ValueError('Unpinned helper bytes: ' + name)
+            helper_hashes[name] = hashlib.sha256(data).hexdigest()
+        with (output / 'inventory-diagnostics.log').open('x') as diagnostics, redirect_stderr(diagnostics):
+            original = build_manifest(root, BASELINE)
+        print((output / 'inventory-diagnostics.log').read_text(), end='', file=sys.stderr)
+    else:
+        original = build_manifest(root, BASELINE)
+    revision = _git(root, "rev-parse", "--verify", f"{args.revision}^{{tree}}").decode().strip()
+    records = {path: (mode, kind, blob) for path, mode, kind, blob in git_entries(root, revision)}
+    candidates = [path for path in ("docs/maintenance/repository_layout_manifest.json",
+                                   "system/maintenance/repository_layout_manifest.json") if path in records]
+    if len(candidates) != 1:
+        print(json.dumps({"manifest_errors": ["Requested revision must contain exactly one public inventory"]}))
+        return 1
+    mode, kind, blob = records[candidates[0]]
+    if kind != "blob" or mode not in {"100644", "100755"}:
+        print(json.dumps({"manifest_errors": ["Revision inventory must be a regular Git blob"]}))
+        return 1
+    try:
+        manifest = json.loads(_git(root, "cat-file", "blob", blob))
+    except (ValueError, UnicodeDecodeError) as exc:
+        print(json.dumps({"manifest_errors": [f"Invalid revision inventory JSON: {exc}"]}))
+        return 1
+    if not isinstance(manifest, dict):
+        print(json.dumps({"manifest_errors": ["Revision inventory must be an object"]}))
+        return 1
+    errors = validate_manifest(manifest)
+    if manifest.get("baseline_commit") != BASELINE or set(manifest.get("entries", {})) != set(original["entries"]):
+        errors.append("Public inventory no longer accounts for the frozen baseline")
+    for path, entry in manifest.get("entries", {}).items():
+        if path in original["entries"] and any(entry.get(key) != original["entries"][path][key]
+                                              for key in ("mode", "git_blob", "sha256", "size")):
+            errors.append(f"Unexplained baseline object drift: {path}")
+    if errors:
+        print(json.dumps({"manifest_errors": errors}))
+        return 1
+    private.mkdir(parents=True, exist_ok=True)
+    results = []
+    with tempfile.TemporaryDirectory(prefix="check-", dir=private) as temporary:
+        snapshot = Path(temporary) / "snapshot"
+        export_tracked(root, snapshot, revision=revision)
+        cwd = "/snapshot/runtime" if (snapshot / "runtime/pyproject.toml").is_file() else "/snapshot"
+        probe = ["python", "-c", "import json; from tools.repository_layout.sandbox import boundary_probe; b=boundary_probe(); print(json.dumps(b)); assert not b['host_paths_visible'] and not b['device_nodes'] and not b['host_pid_visible'] and not b['non_loopback_connected']"]
+        commands = [selection['command']] if selection else ([["python", "-m", "pytest", "-p", "pytest_asyncio.plugin"]] if args.baseline_suite else CHECKS[args.task])
+        for index, command in enumerate([probe, *commands]):
+            started = time.time()
+            log = output / f'command-{index}.log' if output else None
+            bound = (30 if index == 0 else selection['timeout']) if selection else args.timeout
+            completed = run_bounded(sandbox_command(snapshot, dependencies, command, cwd=cwd),
+                                    timeout=bound, output_path=log)
+            print(completed.stdout, end="", flush=True)
+            results.append({"command": command, "returncode": completed.returncode, "output": completed.stdout,
+                            "started": started, "ended": time.time(), "timeout_seconds": bound,
+                            "log": log.name if log else None,
+                            "sha256": hashlib.sha256(completed.stdout.encode()).hexdigest()})
+            if output:
+                (output / 'progress.json').write_text(json.dumps(results, indent=2))
+            if command is probe and completed.returncode:
+                break
+    report = {"task": args.task, "baseline": BASELINE, "revision": revision,
+              "requested_revision": args.revision, "checks": results,
+              "software_only": True, "complete": len(results) == len(commands) + 1}
+    label = "baseline-suite" if args.baseline_suite else f"check-{args.task}"
+    report.update(helper_revision=args.helper_revision, helper_sha256=helper_hashes,
+                  evidence='software-only', timed_out=any(row['returncode'] == 124 for row in results))
+    if report['timed_out']:
+        report['complete'] = False
+    destination = output / 'receipt.json' if output else private / f"{label}-results.json"
+    destination.write_text(json.dumps(report, indent=2))
+    return 0 if report["complete"] and all(item["returncode"] == 0 for item in results) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

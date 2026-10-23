@@ -1,0 +1,1511 @@
+<!DOCTYPE html>
+<!--
+File purpose:
+- Dedicated LeRobot / ROBOTIS workspace for practical teleoperation, recording, training, rollout, and local visualization.
+
+Key classes/functions:
+- DOM surface consumed by web/static/lerobot.js
+
+Inputs/outputs:
+- Input: /api/lerobot/* responses
+- Output: operator-facing device workflow controls, local path selection, command previews, and dataset media visualization
+
+Dependencies:
+- /static/styles.css
+- /static/lerobot.js
+
+Modification guide:
+- Safe places to edit: labels, grouping, helper text
+- Risky places to edit: element IDs consumed by JavaScript
+- Related files: app/main.py, device_bridges/lerobot_bridge.py
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{{ title }}</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+    <!-- Compatibility markers: /static/styles.css?v=20260715-camera-usb-link-1 /static/lerobot.js?v=20260903-background-train-1 -->
+    <link rel="stylesheet" href="/static/styles.css?v=20260904-teleop-handoff-1" />
+    <link rel="preload" as="image" href="/static/ax4lab-logo-transparent.png">
+    <link rel="stylesheet" href="/static/workspace_boot.css?v=1">
+  </head>
+  <body>
+    {% set workspace_title = "Manipulation Workspace" %}
+    {% include "workspace_boot.html" %}
+    <main class="page lerobot-page">
+      <section class="hero panel lerobot-hero">
+        <div class="hero-copy">
+          <p class="eyebrow">LeRobot / ROBOTIS Workspace</p>
+          <h1>Lerobot Framework GUI</h1>
+          <p class="subhead">
+            Unified local GUI for LeRobot device setup, teleoperation, recording, dataset visualization, policy training, and rollout through the installed <code>lerobot</code> conda environment.
+          </p>
+          <div class="hero-badges">
+            <span class="hero-badge">conda env: lerobot</span>
+            <span class="hero-badge">local dataset first</span>
+            <span class="hero-badge">live gates explicit</span>
+          </div>
+        </div>
+        <div class="hero-stack">
+          <article class="status-card">
+            <div class="status-head">
+              <span class="status-title">Bridge Status</span>
+              <span id="lerobot-status-dot" class="status-dot idle"></span>
+            </div>
+            <strong id="lerobot-status-label">Reading config</strong>
+            <p id="lerobot-status-detail">Waiting for /api/lerobot/config.</p>
+          </article>
+          <article class="status-card">
+            <div class="status-head">
+              <span class="status-title">Default Paths</span>
+              <span id="lerobot-gate-dot" class="status-dot idle"></span>
+            </div>
+            <strong id="lerobot-gate-label">Gate summary unavailable</strong>
+            <p id="lerobot-gate-detail">Profile live gates are loaded from configs/lerobot.yaml.</p>
+          </article>
+        </div>
+      </section>
+
+      <nav class="panel lerobot-quick-nav" aria-label="LeRobot workspace navigation">
+        <a href="#profile-execution">Profile</a>
+        <a href="#device-port-setup">Devices</a>
+        <a href="#isaac-mirror-card">Isaac Link</a>
+        <a href="#local-paths">Paths</a>
+        <a href="#teleoperation-card">Teleop</a>
+        <a href="#recording-card">Record</a>
+        <a href="#isaac-augmentation-card">Augment</a>
+        <a href="#visualization-card">Visualize</a>
+        <a href="#training-card">Train</a>
+        <a href="#rollout-card">Rollout</a>
+        <a href="#manipulation-agent-card">Manipulation Agent</a>
+        <a href="#session-output">Logs</a>
+      </nav>
+
+      <div class="panel lerobot-tab-bar" role="tablist" aria-label="LeRobot workspace tabs">
+        <button id="lerobot-main-tab-button" class="btn active" type="button" role="tab" aria-selected="true" aria-controls="lerobot-main-tab" data-lerobot-tab-target="lerobot-main-tab">LeRobot</button>
+        <button id="dataset-manage-tab-button" class="btn" type="button" role="tab" aria-selected="false" aria-controls="dataset-manage-tab" data-lerobot-tab-target="dataset-manage-tab">Dataset Manage</button>
+        <button id="isaac-lab-tab-button" class="btn" type="button" role="tab" aria-selected="false" aria-controls="isaac-lab-tab" data-lerobot-tab-target="isaac-lab-tab">Isaac Lab</button>
+      </div>
+
+      <div id="lerobot-main-tab" class="lerobot-tab-panel active" role="tabpanel" tabindex="-1" aria-labelledby="lerobot-main-tab-button">
+      <section id="profile-execution" class="panel lerobot-config-panel">
+        <div class="panel-title-row">
+          <h2>1. Profile & Execution</h2>
+          <span id="lerobot-session-pill" class="badge idle">NO SESSION</span>
+        </div>
+        <div class="control-grid lerobot-control-grid">
+          <label>
+            Mode
+            <select id="lerobot-mode-select">
+              <option value="test">test</option>
+              <option value="live" selected>live</option>
+              <option value="replay">replay</option>
+              <option value="fault-injection">fault-injection</option>
+            </select>
+          </label>
+          <label>
+            Profile
+            <select id="lerobot-profile-select"></select>
+          </label>
+          <label>
+            Observation Pipeline
+            <select id="lerobot-observation-pipeline-select" title="Choose how RGB-D observations are recorded and reused by training/rollout."></select>
+          </label>
+          <label>
+            Control FPS
+            <input id="lerobot-fps-input" type="number" min="1" value="15" title="Policy/control loop fps. Keep this aligned with camera fps for recording and rollout datasets unless intentionally stress-testing." />
+          </label>
+          <label>
+            Camera FPS
+            <input id="lerobot-camera-fps-input" type="number" min="1" value="15" title="Camera fps. RealSense RGB+depth defaults to 15 FPS for top/wrist capture." />
+          </label>
+          <label>
+            Device
+            <input id="lerobot-device-input" type="text" value="cuda" />
+          </label>
+        </div>
+        <label class="checkbox-line">
+          <input id="lerobot-confirm-live-input" type="checkbox" checked />
+          Confirm live execution when mode=live and profile gates are enabled
+        </label>
+        <div class="button-row">
+          <button id="btn-lerobot-refresh" class="btn">Refresh</button>
+          <button id="btn-lerobot-save-profile" class="btn primary">Use Profile</button>
+          <button id="btn-lerobot-validate" class="btn">Validate Profile</button>
+          <button id="btn-lerobot-find-ports" class="btn">Scan Existing Ports</button>
+        </div>
+        <div id="lerobot-profile-action-status" class="lerobot-action-status idle">Waiting for profile action.</div>
+      </section>
+
+      <details id="device-port-setup" class="panel lerobot-device-panel lerobot-panel-details">
+        <summary class="panel-title-row lerobot-panel-summary">
+          <h2>2. Device Port Setup</h2>
+          <span class="hint">follower, leader, and multiple cameras are remembered per profile</span>
+        </summary>
+        <p class="subhead">
+          For follower/leader MotorBus setup: keep both arms connected and use ID Detect & Save. The bridge saves leader from Dynamixel IDs 1-6 and follower from IDs 11-16. Camera setup is key-based; defaults are top and wrist, and more cameras can be added. RealSense SDK mode records RGB + depth channels; D455F top / D405 wrist is the current default physical mapping.
+        </p>
+        <div class="lerobot-device-grid">
+          <article class="lerobot-device-card">
+            <strong>Follower Arm</strong>
+            <code id="lerobot-follower-port-display">not saved</code>
+            <div class="button-row compact">
+              <button id="btn-port-baseline-follower" class="btn mini">Baseline</button>
+              <button id="btn-port-detect-follower" class="btn mini primary">ID Detect & Save</button>
+            </div>
+            <div id="lerobot-follower-action-status" class="lerobot-action-status idle">Waiting for follower action.</div>
+          </article>
+          <article class="lerobot-device-card">
+            <strong>Leader Arm</strong>
+            <code id="lerobot-leader-port-display">not saved</code>
+            <div class="button-row compact">
+              <button id="btn-port-baseline-leader" class="btn mini">Baseline</button>
+              <button id="btn-port-detect-leader" class="btn mini primary">ID Detect & Save</button>
+            </div>
+            <div id="lerobot-leader-action-status" class="lerobot-action-status idle">Waiting for leader action.</div>
+          </article>
+        </div>
+        <div class="lerobot-camera-manager">
+          <div class="panel-title-row compact-title">
+            <h2>Cameras</h2>
+            <span class="input-action-row">
+              <input id="lerobot-new-camera-key-input" type="text" placeholder="side, front, microscope..." />
+              <button id="btn-add-camera" class="btn mini" type="button">+ Camera</button>
+            </span>
+          </div>
+          <div id="lerobot-camera-card-list" class="lerobot-device-grid"></div>
+          <div id="lerobot-camera-manager-status" class="lerobot-action-status idle">Waiting for camera setup action.</div>
+        </div>
+        <details class="lerobot-details lerobot-port-panel">
+          <summary>Manual Port Override</summary>
+          <div class="input-action-row">
+            <input id="lerobot-manual-port-input" type="text" placeholder="/dev/ttyUSB0, /dev/ttyACM0, /dev/video0, or camera index 0" />
+            <button id="btn-port-save-manual" class="btn">Save Manual Port</button>
+          </div>
+          <div class="lerobot-inline-options">
+            <label>
+              Save Manual As
+              <select id="lerobot-manual-role-select">
+                <option value="follower">follower</option>
+                <option value="leader">leader</option>
+                <option value="camera">camera</option>
+              </select>
+            </label>
+            <label>
+              Camera Key
+              <input id="lerobot-manual-camera-key-input" type="text" value="top" />
+            </label>
+          </div>
+          <div id="lerobot-port-candidates" class="lerobot-port-list"></div>
+          <div id="lerobot-manual-port-action-status" class="lerobot-action-status idle">Waiting for manual save action.</div>
+        </details>
+        <div id="lerobot-camera-preview" class="lerobot-camera-preview">No camera capture yet.</div>
+      </details>
+
+      <section id="isaac-mirror-card" class="panel lerobot-card lerobot-isaac-link-card">
+        <div class="panel-title-row">
+          <h2>3. Isaac Sim Link</h2>
+          <span class="hint">real follower state to virtual OMX</span>
+        </div>
+        <p class="subhead">
+          Connect the measured follower arm state to the Isaac Sim OMX scene. Use this when teleoperation or recording should also leave synchronized simulation evidence.
+        </p>
+        <div class="lerobot-isaac-flow">
+          <article class="lerobot-isaac-step">
+            <span class="lerobot-step-index">1</span>
+            <div>
+              <strong>Start the simulation link</strong>
+              <p>Open Isaac Sim with the AX4LAB mirror extension and the prepared OMX table scene.</p>
+            </div>
+            <button id="btn-isaac-mirror-receiver-start" class="btn primary">Open Isaac Sim Mirror</button>
+          </article>
+          <article class="lerobot-isaac-step">
+            <span class="lerobot-step-index">2</span>
+            <div>
+              <strong>Check the link</strong>
+              <p>Confirm that the Isaac endpoint is reachable before live teleop or recording.</p>
+            </div>
+            <button id="btn-isaac-mirror-health" class="btn">Check Isaac Link</button>
+          </article>
+          <article class="lerobot-isaac-step">
+            <span class="lerobot-step-index">3</span>
+            <div>
+              <strong>Send one test pose</strong>
+              <p>Post one bounded follower-state sample and verify that Isaac receives it.</p>
+            </div>
+            <button id="btn-isaac-mirror-verify" class="btn primary">Send Test Pose</button>
+          </article>
+        </div>
+        <div class="control-grid compact-grid lerobot-isaac-settings">
+          <label class="checkbox-label">
+            <input id="lerobot-isaac-mirror-enabled-input" type="checkbox" checked />
+            Mirror during Teleop / Recording
+          </label>
+          <label>
+            Isaac Link Endpoint
+            <input id="lerobot-isaac-mirror-endpoint-input" type="text" value="http://127.0.0.1:8766/joints" />
+          </label>
+          <label>
+            Mirror Rate Hz
+            <input id="lerobot-isaac-mirror-hz-input" type="number" min="0.1" max="120" step="0.1" value="15" />
+          </label>
+          <label>
+            Request Timeout s
+            <input id="lerobot-isaac-mirror-timeout-input" type="number" min="0.05" max="10" step="0.05" value="0.5" />
+          </label>
+          <label>
+            Standalone Max Samples
+            <input id="lerobot-isaac-mirror-max-samples-input" type="number" min="1" step="1" placeholder="blank = until stop" />
+          </label>
+          <label class="checkbox-label">
+            <input id="lerobot-active-robot-cam-enabled-input" type="checkbox" checked />
+            Active Robot-Cam specimen tracking
+          </label>
+          <label class="checkbox-label">
+            <input id="lerobot-active-robot-cam-record-start-input" type="checkbox" checked />
+            Run at recording start
+          </label>
+        </div>
+        <p class="hint">
+          Active Robot-Cam uses D405 wrist primary A4-aligned tracking and keeps D455F top fallback right-plane tracking.
+        </p>
+        <details class="lerobot-details lerobot-isaac-advanced">
+          <summary>Advanced diagnostics and Standalone Mirror Test</summary>
+          <div class="button-row">
+            <button id="btn-isaac-mirror-map" class="btn">Load Joint Mapping</button>
+            <button id="btn-isaac-mirror-receiver-status" class="btn">Mirror Link Status</button>
+            <button id="btn-isaac-mirror-receiver-stop" class="btn danger">Close Isaac Sim Link</button>
+            <button id="btn-isaac-mirror-probe" class="btn primary">Read Follower State</button>
+            <button id="btn-isaac-mirror-loop-start" class="btn primary">Start Standalone Mirror</button>
+            <button id="btn-isaac-mirror-loop-status" class="btn">Standalone Mirror Status</button>
+            <button id="btn-isaac-mirror-loop-stop" class="btn danger">Stop Standalone Mirror</button>
+          </div>
+        </details>
+        <div id="lerobot-isaac-mirror-action-status" class="lerobot-action-status idle">Waiting for Isaac mirror action.</div>
+        <div id="lerobot-isaac-mirror-output" class="lerobot-data-panel">No mirror data yet.</div>
+      </section>
+
+      <section id="local-paths" class="panel lerobot-path-panel">
+        <div class="panel-title-row">
+          <h2>4. Local Paths</h2>
+          <span class="hint">LeRobot defaults, editable</span>
+        </div>
+        <div class="lerobot-path-grid">
+          <label>
+            Dataset Root
+            <span class="input-action-row">
+              <input id="lerobot-dataset-root-input" type="text" placeholder="~/.cache/huggingface/lerobot" />
+              <button id="btn-browse-dataset-root" class="btn mini" type="button">Browse</button>
+            </span>
+          </label>
+          <label>
+            Dataset Repo ID / Local Name
+            <span class="input-action-row">
+              <input id="lerobot-dataset-input" type="text" placeholder="jin/YYYYMMDD_1" />
+              <button id="btn-browse-dataset-repo" class="btn mini" type="button">Browse</button>
+            </span>
+          </label>
+          <label>
+            Policy / Output Root
+            <span class="input-action-row">
+              <input id="lerobot-output-dir-input" type="text" placeholder="outputs/train/YYYYMMDD_1_train" />
+              <button id="btn-browse-output-dir" class="btn mini" type="button">Browse</button>
+            </span>
+          </label>
+          <label>
+            Policy Checkpoint / Repo
+            <span class="input-action-row">
+              <input id="lerobot-policy-input" type="text" placeholder="outputs/train/.../checkpoints/last/pretrained_model or HF repo id" />
+              <button id="btn-browse-policy" class="btn mini" type="button">Browse</button>
+            </span>
+          </label>
+        </div>
+        <div id="lerobot-browser" class="lerobot-browser hidden"></div>
+      </section>
+
+      <section class="lerobot-workflow-grid">
+        <article id="teleoperation-card" class="panel lerobot-workflow-card">
+          <div class="panel-title-row">
+            <h2>5. Teleoperation</h2>
+            <span class="hint">leader/follower control</span>
+          </div>
+          <div class="lerobot-form-grid single">
+            <label>
+              Teleop Duration Seconds (optional)
+              <input id="lerobot-teleop-time-input" type="number" min="0" step="1" placeholder="blank = until stopped" />
+            </label>
+            <label class="checkbox-line inline-check">
+              <input id="lerobot-display-data-input" type="checkbox" checked />
+              Display camera/joint visualization when supported
+            </label>
+          </div>
+          <div class="button-row compact">
+            <button id="btn-teleop-start" class="btn primary">Start Teleop</button>
+            <button id="btn-teleop-stop" class="btn danger">Stop Teleop</button>
+            <button id="btn-teleop-status" class="btn">Status</button>
+          </div>
+          <div id="lerobot-teleop-action-status" class="lerobot-action-status idle">Waiting for teleoperation action.</div>
+          <section id="lerobot-teleop-handoff-panel" class="lerobot-teleop-handoff-panel hidden" aria-live="polite">
+            <p class="eyebrow">Cycle-bound transfer</p>
+            <h3>Teleop Handoff</h3>
+            <div id="lerobot-teleop-handoff-context" class="test-mode-derived-flow">Loading handoff context.</div>
+            <p class="hint">이송 완료는 현재 텔레옵을 기존 Stop 경로로 종료하고 포트 반환을 확인한 뒤 UTM Vision 단계로 넘깁니다.</p>
+            <button id="btn-teleop-handoff-complete" class="btn primary" type="button" disabled>Teleop Complete</button>
+            <div id="lerobot-teleop-handoff-status" class="lerobot-action-status idle">A matching teleop session has not started.</div>
+          </section>
+        </article>
+
+        <article id="recording-card" class="panel lerobot-workflow-card">
+          <div class="panel-title-row">
+            <h2>6. Recording</h2>
+            <span class="hint">local LeRobotDataset</span>
+          </div>
+          <div class="lerobot-form-grid">
+            <label>
+              Task Instruction
+              <input id="lerobot-task-input" type="text" value="Pick up the cube and place it" />
+            </label>
+            <label>
+              Episodes
+              <input id="lerobot-episodes-input" type="number" min="1" value="60" />
+            </label>
+            <label>
+              Episode Time (s)
+              <input id="lerobot-episode-time-input" type="number" min="1" value="60" />
+            </label>
+            <label>
+              Reset Time (s)
+              <input id="lerobot-reset-time-input" type="number" min="0" value="30" />
+            </label>
+            <label>
+              Voice Engine
+              <select id="lerobot-tts-engine-input">
+                <option value="piper">piper (packaged English)</option>
+                <option value="spd-say">spd-say</option>
+                <option value="espeak-ng">espeak-ng</option>
+                <option value="espeak">espeak</option>
+              </select>
+            </label>
+            <div class="lerobot-slider-field lerobot-tts-rate-field">
+              <div class="lerobot-slider-label-row">
+                <span>Voice Speed</span>
+                <span class="lerobot-slider-actions">
+                  <output id="lerobot-tts-rate-value" for="lerobot-tts-rate-input">-35</output>
+                  <button id="btn-tts-rate-default" class="btn mini lerobot-slider-default" type="button">Default</button>
+                  <button id="btn-tts-help" class="lerobot-help-icon" type="button" aria-expanded="false" aria-controls="lerobot-tts-help-popover" title="Voice cue help">?</button>
+                </span>
+              </div>
+              <input id="lerobot-tts-rate-input" type="range" min="-100" max="100" step="1" value="-35" />
+              <div id="lerobot-tts-help-popover" class="lerobot-help-popover" hidden>
+                <strong>Recording voice cues</strong>
+                <ul>
+                  <li><b>Recording episode N</b>: episode recording has started.</li>
+                  <li><b>Reset the environment</b>: recording is paused for the reset interval before the next episode.</li>
+                  <li><b>Re-record episode</b>: the current episode was rejected and will be recorded again.</li>
+                  <li><b>Stop recording</b>: recording loop is closing and devices will disconnect.</li>
+                  <li><b>Exiting</b>: LeRobot recording command has finished.</li>
+                </ul>
+                Piper uses the packaged English <b>en_US-lessac-medium</b> neural voice. Voice Engine selects the TTS backend; Voice Speed is auto-saved and applied when recording starts.
+              </div>
+            </div>
+          </div>
+          <div class="lerobot-inline-options">
+            <label class="checkbox-line"><input id="lerobot-resume-input" type="checkbox" /> Resume dataset</label>
+            <label class="checkbox-line"><input id="lerobot-push-hub-input" type="checkbox" /> Push to Hub</label>
+          </div>
+          <p class="hint">
+            Live controls map to LeRobot recording keys: Save/Next sends Right Arrow, Retry sends Left Arrow, Finish sends Esc. Force Stop performs emergency cleanup of LeRobot live processes if a session or stale subprocess keeps devices open.
+          </p>
+          <div class="button-row compact">
+            <button id="btn-record-start" class="btn primary">Start Record</button>
+            <button id="btn-record-next" class="btn primary">Save / Next -></button>
+            <button id="btn-record-retry" class="btn warning">Retry Current <-</button>
+            <button id="btn-record-finish" class="btn">Finish Gracefully (Esc)</button>
+            <button id="btn-record-stop" class="btn danger">Force Stop</button>
+          </div>
+          <div id="lerobot-record-action-status" class="lerobot-action-status idle">Waiting for recording action.</div>
+          <div class="button-row compact">
+            <button id="btn-isaac-rgbd-render-start" class="btn">Render Missing Isaac RGB-D</button>
+            <button id="btn-isaac-rgbd-render-check" class="btn">Check Rendered RGB-D</button>
+            <button id="btn-isaac-rgbd-render-stop" class="btn danger">Stop RGB-D Render</button>
+          </div>
+          <div class="lerobot-inline-options">
+            <label class="checkbox-line"><input id="lerobot-isaac-rgbd-render-session-override-input" type="checkbox" checked /> Use latest record session</label>
+            <label class="checkbox-line"><input id="lerobot-isaac-rgbd-render-overwrite-input" type="checkbox" /> Overwrite RGB-D output</label>
+            <label>Episodes <input id="lerobot-isaac-rgbd-render-episodes-input" type="text" value="0" placeholder="0,1,2 or all" /></label>
+            <label class="checkbox-line"><input id="lerobot-isaac-rgbd-render-override-all-input" type="checkbox" /> Override all episodes</label>
+          </div>
+          <div id="lerobot-isaac-rgbd-render-action-status" class="lerobot-action-status idle">Waiting for Isaac RGB-D render action.</div>
+          <div id="lerobot-isaac-rgbd-render-progress" class="lerobot-training-progress hidden">
+            <div class="training-progress-head">
+              <strong>Isaac RGB-D Render</strong>
+              <span id="lerobot-isaac-rgbd-render-progress-label">0 / 0 · 0%</span>
+            </div>
+            <div class="training-progress-track"><span id="lerobot-isaac-rgbd-render-progress-bar"></span></div>
+          </div>
+          <div id="lerobot-isaac-rgbd-render-failure-list" class="lerobot-render-failure-list"></div>
+        </article>
+
+        <section id="isaac-augmentation-card" class="panel lerobot-workflow-card lerobot-lab-launcher-card">
+          <div class="panel-title-row">
+            <h2>7. Isaac Lab Synthetic Intelligence</h2>
+            <span class="hint">Dedicated Lab workspace</span>
+          </div>
+          <div class="lerobot-card-note">
+            Run the standard synthetic branch: domain-randomized Isaac Lab scene generation, Mimic trajectory generation, RGB-D capture when enabled, success filtering, HDF5 export, and IL handoff. Detailed values are editable in the Isaac Lab tab.
+          </div>
+          <div class="lerobot-lab-launcher">
+            <div id="isaac-lab-launcher-summary" class="lerobot-report-card">
+              <strong>Standard pipeline</strong>
+              <span>Details stay in the Isaac Lab tab; this launcher starts the recommended domain randomization + official Isaac Lab Mimic path.</span>
+            </div>
+            <div class="isaac-lab-launcher-actions">
+              <label class="checkbox-line inline-check"><input id="isaac-lab-domain-mimic-rgbd-input" type="checkbox" checked /> RGB-D cameras</label>
+              <label class="checkbox-line inline-check"><input id="isaac-lab-visualize-generation-input" type="checkbox" checked /> Render Mimic RGB-D after generation</label>
+              <button id="isaac-lab-domain-mimic-pipeline" class="btn primary" type="button">Domain randomization + mimic pipeline</button>
+              <button id="isaac-lab-domain-mimic-check" class="btn" type="button">Check Lab Outputs</button>
+              <button id="isaac-lab-domain-mimic-render-missing-rgbd" class="btn" type="button">Render Missing Mirror RGB-D</button>
+              <button id="isaac-lab-domain-mimic-stop" class="btn danger" type="button">Stop</button>
+            </div>
+            <div class="lerobot-inline-options">
+              <label class="checkbox-line"><input id="isaac-lab-domain-mimic-overwrite-input" type="checkbox" /> Overwrite Isaac Lab output</label>
+              <label class="lerobot-episode-option">Episodes <input id="isaac-lab-domain-mimic-episodes-input" type="text" value="" placeholder="all or 0,1,2" /></label>
+              <label class="checkbox-line"><input id="isaac-lab-domain-mimic-overwrite-all-input" type="checkbox" /> Override all generated episodes</label>
+            </div>
+            <div id="isaac-lab-launcher-action-status" class="lerobot-action-status idle">Waiting for Isaac Lab pipeline action.</div>
+            <div id="isaac-lab-launcher-progress" class="lerobot-training-progress hidden">
+              <div class="training-progress-head">
+                <strong>Domain Randomization + Mimic</strong>
+                <span id="isaac-lab-launcher-progress-label">0 / 0 · 0%</span>
+              </div>
+              <div class="training-progress-track"><span id="isaac-lab-launcher-progress-bar"></span></div>
+            </div>
+            <div id="isaac-lab-launcher-failure-list" class="lerobot-render-failure-list"></div>
+          </div>
+        </section>
+
+        <details id="visualization-card" class="panel lerobot-workflow-card lerobot-visualization-panel lerobot-panel-details">
+          <summary class="panel-title-row lerobot-panel-summary">
+            <h2>8. Dataset Visualization</h2>
+            <span class="hint">Official Rerun + Isaac sidecar preview</span>
+          </summary>
+          <div class="lerobot-card-note">
+            Open LeRobot's official Rerun dataset visualizer for the first selected episode. Dataset preview can inspect multiple episodes and Isaac Sim sidecar recordings.
+          </div>
+          <div class="lerobot-form-grid">
+            <label>
+              Episodes
+              <input id="lerobot-episode-index-input" type="text" value="0" placeholder="0,1,2 · 0-4 · all" />
+            </label>
+            <label>
+              Visualization Dataset Path (optional)
+              <span class="input-action-row">
+                <input id="lerobot-visualization-path-input" type="text" placeholder="leave blank to use dataset root + repo id" />
+                <button id="btn-browse-visualization" class="btn mini" type="button">Browse</button>
+              </span>
+            </label>
+          </div>
+          <details class="lerobot-details">
+            <summary>LeRobot Visualization Options</summary>
+            <div class="lerobot-form-grid train-form-grid">
+              <label>
+                Visualization Tool
+                <select id="lerobot-visualization-tool-input">
+                  <option value="rerun" selected>Official LeRobot Rerun viewer</option>
+                  <option value="html">LeRobot HTML visualizer</option>
+                </select>
+              </label>
+              <label>
+                Rerun Mode
+                <select id="lerobot-visualization-mode-input">
+                  <option value="distant" selected>distant - serve websocket</option>
+                  <option value="local">local - spawn Rerun viewer</option>
+                </select>
+              </label>
+              <label>
+                Batch Size
+                <input id="lerobot-visualization-batch-size-input" type="number" min="1" value="32" />
+              </label>
+              <label>
+                Num Workers
+                <input id="lerobot-visualization-workers-input" type="number" min="0" value="4" />
+              </label>
+              <label>
+                Web Port
+                <input id="lerobot-visualization-web-port-input" type="number" min="1" value="9092" />
+              </label>
+              <label>
+                WS Port
+                <input id="lerobot-visualization-ws-port-input" type="number" min="1" value="9089" />
+              </label>
+              <label>
+                Tolerance Seconds
+                <input id="lerobot-visualization-tolerance-input" type="number" min="0" step="0.0001" value="0.0001" />
+              </label>
+              <label>
+                Visualizer Output Dir
+                <span class="input-action-row">
+                  <input id="lerobot-visualization-output-dir-input" type="text" placeholder="outputs/train/visualize_dataset" />
+                  <button id="btn-browse-visualization-output" class="btn mini" type="button">Browse</button>
+                </span>
+              </label>
+            </div>
+            <div class="lerobot-inline-options">
+              <label class="checkbox-line"><input id="lerobot-visualization-save-input" type="checkbox" /> Rerun tool only: save .rrd instead of spawning local viewer</label>
+            </div>
+          </details>
+          <div class="button-row compact">
+            <button id="btn-dataset-visualize" class="btn primary">Open LeRobot Viz</button>
+            <button id="btn-dataset-visualize-status" class="btn">Viz Status</button>
+            <button id="btn-dataset-visualize-stop" class="btn danger">Stop Viz</button>
+            <button id="btn-dataset-preview" class="btn">Preview Dataset + Isaac Media</button>
+          </div>
+          <div id="lerobot-visualization-action-status" class="lerobot-action-status idle">Waiting for visualization action.</div>
+          <div id="lerobot-visualization-progress" class="lerobot-training-progress hidden">
+            <div class="training-progress-head">
+              <strong>Visualization</strong>
+              <span id="lerobot-visualization-progress-label">0 / 0 · 0%</span>
+            </div>
+            <div class="training-progress-track"><span id="lerobot-visualization-progress-bar"></span></div>
+          </div>
+          <div id="lerobot-dataset-health" class="lerobot-visualization"></div>
+          <div id="lerobot-visualization" class="lerobot-visualization"></div>
+        </details>
+
+        <article id="training-card" class="panel lerobot-workflow-card lerobot-training-card">
+          <div class="panel-title-row">
+            <h2>9. Training</h2>
+            <span class="hint">policy checkpoint · GPU job</span>
+          </div>
+          <div class="lerobot-card-note">
+            Core settings match the practical LeRobot train command. Pi0.5 uses <code>lerobot/pi05_base</code>; X-VLA uses <code>lerobot/xvla-base</code>; SmolVLA uses <code>lerobot/smolvla_base</code>. Sim2Real fidelity weights are applied during loss computation; build or refresh domain-randomized Isaac sidecars in <a href="#isaac-augmentation-card">Augment</a>.
+          </div>
+          <div class="lerobot-form-grid train-form-grid train-core-grid">
+            <label>
+              Policy Type
+              <select id="lerobot-policy-type-input">
+                <option value="act">act</option>
+                <option value="diffusion">diffusion</option>
+                <option value="smolvla" selected>smolvla (SmolVLA)</option>
+                <option value="pi0">pi0</option>
+                <option value="pi05">pi05 (Pi0.5)</option>
+                <option value="pi0fast">pi0fast</option>
+                <option value="xvla">xvla (X-VLA)</option>
+                <option value="vqbet">vqbet</option>
+              </select>
+            </label>
+            <input id="lerobot-train-source-policy-input" type="hidden" value="lerobot/smolvla_base" />
+            <label>
+              Job Name
+              <input id="lerobot-job-name-input" type="text" placeholder="YYYYMMDD_1_train" />
+            </label>
+            <label>
+              Policy Repo ID
+              <input id="lerobot-train-policy-repo-input" type="text" placeholder="jin/robotis_omx_ai_pi05_policy" />
+            </label>
+            <label>
+              Batch Size
+              <input id="lerobot-train-batch-size-input" type="number" min="1" value="16" />
+            </label>
+            <label>
+              Steps
+              <input id="lerobot-train-steps-input" type="number" min="1" value="3000" />
+            </label>
+            <label>
+              Num Workers
+              <input id="lerobot-train-workers-input" type="number" min="0" value="12" />
+            </label>
+          </div>
+
+          <details class="lerobot-details" open>
+            <summary>Training Data Sources</summary>
+            <div class="lerobot-inline-options">
+              <label class="checkbox-line"><input id="lerobot-dataset-include-real-original-input" type="checkbox" checked /> Real robot recordings</label>
+              <label class="checkbox-line"><input id="lerobot-dataset-include-isaac-rgbd-input" type="checkbox" checked /> Isaac Sim RGB-D renders</label>
+              <label class="checkbox-line"><input id="lerobot-dataset-include-isaac-augmentation-input" type="checkbox" /> Legacy Isaac augmentation</label>
+              <label class="checkbox-line"><input id="lerobot-dataset-include-isaac-lab-synthetic-input" type="checkbox" checked /> Isaac Lab synthetic / Mimic</label>
+            </div>
+          </details>
+
+          <details class="lerobot-details" open>
+            <summary>Sim2Real Fidelity</summary>
+            <div class="lerobot-form-grid train-form-grid">
+              <label>
+                Real Loss Weight
+                <input id="lerobot-fidelity-real-weight-input" type="number" min="0" max="1" step="0.05" value="1" />
+              </label>
+              <label>
+                Isaac RGB-D Loss Weight
+                <input id="lerobot-fidelity-isaac-rgbd-weight-input" type="number" min="0" max="1" step="0.05" value="0.55" />
+              </label>
+              <label>
+                Isaac Augmentation Loss Weight
+                <input id="lerobot-fidelity-isaac-augmentation-weight-input" type="number" min="0" max="1" step="0.05" value="0" />
+              </label>
+              <label>
+                Isaac Lab Synthetic Loss Weight
+                <input id="lerobot-fidelity-isaac-lab-synthetic-weight-input" type="number" min="0" max="1" step="0.05" value="0.25" />
+              </label>
+              <label>
+                Domain Randomization
+                <a class="inline-panel-link" href="#isaac-augmentation-card">Open Augment settings</a>
+              </label>
+            </div>
+            <div class="lerobot-inline-options">
+              <label class="checkbox-line"><input id="lerobot-fidelity-weighting-enabled-input" type="checkbox" checked /> Enable source loss weighting</label>
+            </div>
+          </details>
+
+          <details class="lerobot-details" open>
+            <summary>Dataset Mix</summary>
+            <div class="lerobot-form-grid train-form-grid">
+              <label>
+                Real Original Weight
+                <input id="lerobot-dataset-mix-real-weight-input" type="number" min="0" step="0.05" value="1" />
+              </label>
+              <label>
+                Isaac RGB-D Weight
+                <input id="lerobot-dataset-mix-isaac-rgbd-weight-input" type="number" min="0" step="0.05" value="0.6" />
+              </label>
+              <label>
+                Isaac Augmentation Weight
+                <input id="lerobot-dataset-mix-isaac-augmentation-weight-input" type="number" min="0" step="0.05" value="0" />
+              </label>
+              <label>
+                Isaac Lab Synthetic Weight
+                <input id="lerobot-dataset-mix-isaac-lab-synthetic-weight-input" type="number" min="0" step="0.05" value="0.35" />
+              </label>
+              <label>
+                Mix Seed
+                <input id="lerobot-dataset-mix-seed-input" type="number" step="1" value="0" />
+              </label>
+              <label>
+                Real Original Max
+                <input id="lerobot-dataset-mix-real-max-input" type="number" min="0" step="1" placeholder="unlimited" />
+              </label>
+              <label>
+                Isaac RGB-D Max
+                <input id="lerobot-dataset-mix-isaac-rgbd-max-input" type="number" min="0" step="1" placeholder="unlimited" />
+              </label>
+              <label>
+                Isaac Augmentation Max
+                <input id="lerobot-dataset-mix-isaac-augmentation-max-input" type="number" min="0" step="1" placeholder="unlimited" />
+              </label>
+              <label>
+                Isaac Lab Synthetic Max
+                <input id="lerobot-dataset-mix-isaac-lab-synthetic-max-input" type="number" min="0" step="1" placeholder="unlimited" />
+              </label>
+            </div>
+            <label class="checkbox-line"><input id="lerobot-dataset-exclude-flagged-episodes-input" type="checkbox" checked /> Exclude flagged sim/synthetic data only</label>
+          </details>
+
+          <details class="lerobot-details" open>
+            <summary>Schedule & Checkpoints</summary>
+            <div class="lerobot-form-grid train-form-grid">
+            <label>
+              Eval Frequency
+              <input id="lerobot-train-eval-freq-input" type="number" min="1" value="500" />
+            </label>
+            <label>
+              Log Frequency
+              <input id="lerobot-train-log-freq-input" type="number" min="1" value="50" />
+            </label>
+            <label>
+              Save Frequency
+              <input id="lerobot-train-save-freq-input" type="number" min="1" value="500" />
+            </label>
+            <label>
+              Seed
+              <input id="lerobot-train-seed-input" type="number" placeholder="optional" />
+            </label>
+            </div>
+            <div class="lerobot-inline-options">
+              <label class="checkbox-line"><input id="lerobot-train-save-checkpoint-input" type="checkbox" checked /> Save checkpoints</label>
+              <label class="checkbox-line"><input id="lerobot-train-resume-input" type="checkbox" /> Resume training from checkpoint</label>
+            </div>
+          </details>
+
+          <details class="lerobot-details">
+            <summary>Optimizer & Scheduler</summary>
+            <div class="lerobot-form-grid train-form-grid">
+            <label>
+              Optimizer
+              <select id="lerobot-train-optimizer-input">
+                <option value="" selected>policy default</option>
+                <option value="adamw">adamw</option>
+                <option value="adam">adam</option>
+                <option value="sgd">sgd</option>
+                <option value="multi_adam">multi_adam</option>
+              </select>
+            </label>
+            <label>
+              Optimizer LR
+              <input id="lerobot-train-lr-input" type="number" min="0" step="0.000001" placeholder="policy default" />
+            </label>
+            <label>
+              Weight Decay
+              <input id="lerobot-train-weight-decay-input" type="number" min="0" step="0.000001" placeholder="policy default" />
+            </label>
+            <label>
+              Grad Clip Norm
+              <input id="lerobot-train-grad-clip-input" type="number" min="0" step="0.1" placeholder="policy default" />
+            </label>
+            <label>
+              Scheduler
+              <select id="lerobot-train-scheduler-input">
+                <option value="" selected>policy default</option>
+                <option value="cosine_decay_with_warmup">cosine_decay_with_warmup</option>
+                <option value="diffuser">diffuser</option>
+                <option value="vqbet">vqbet</option>
+              </select>
+            </label>
+            <label>
+              Warmup Steps
+              <input id="lerobot-train-warmup-input" type="number" min="0" placeholder="optional" />
+            </label>
+            <label>
+              Decay Steps
+              <input id="lerobot-train-decay-steps-input" type="number" min="0" placeholder="optional" />
+            </label>
+            <label>
+              Peak LR
+              <input id="lerobot-train-peak-lr-input" type="number" min="0" step="0.000001" placeholder="optional" />
+            </label>
+            <label>
+              Decay LR
+              <input id="lerobot-train-decay-lr-input" type="number" min="0" step="0.000001" placeholder="optional" />
+            </label>
+            </div>
+          </details>
+
+          <details class="lerobot-details">
+            <summary>Policy, WandB & Advanced CLI</summary>
+            <div class="lerobot-form-grid train-form-grid">
+            <label>
+              Policy n_obs_steps
+              <input id="lerobot-train-n-obs-input" type="number" min="1" value="1" />
+            </label>
+            <label>
+              Policy chunk_size
+              <input id="lerobot-train-chunk-input" type="number" min="1" value="50" />
+            </label>
+            <label>
+              Policy n_action_steps
+              <input id="lerobot-train-n-action-input" type="number" min="1" value="50" />
+            </label>
+            <label>
+              Eval Batch Size
+              <input id="lerobot-train-eval-batch-input" type="number" min="1" placeholder="optional" />
+            </label>
+            <label>
+              WandB Project
+              <input id="lerobot-train-wandb-project-input" type="text" placeholder="optional" />
+            </label>
+            <label>
+              WandB Mode
+              <select id="lerobot-train-wandb-mode-input">
+                <option value="">default</option>
+                <option value="disabled">disabled</option>
+                <option value="offline" selected>offline</option>
+                <option value="local">local server</option>
+                <option value="online">online</option>
+              </select>
+            </label>
+            <label>
+              WandB Local Server
+              <span class="input-action-row">
+                <input id="lerobot-train-wandb-base-url-input" type="text" value="http://127.0.0.1:8081" placeholder="http://127.0.0.1:8081" />
+                <input id="lerobot-train-wandb-api-key-input" type="password" autocomplete="off" placeholder="local API key" />
+                <button id="btn-wandb-local-api-key-save" class="btn mini" type="button">Save Key</button>
+                <button id="btn-wandb-local-start" class="btn mini" type="button">Start</button>
+                <button id="btn-wandb-local-status" class="btn mini" type="button">Status</button>
+                <button id="btn-wandb-local-stop" class="btn mini danger" type="button">Stop</button>
+                <button id="btn-wandb-local-open" class="btn mini" type="button">Open</button>
+              </span>
+              <small id="lerobot-wandb-api-key-status">W&B local API key is not checked.</small>
+            </label>
+            <label class="planning-message-label train-extra-args">
+              Additional Train CLI Args
+              <textarea id="lerobot-train-extra-args-input" rows="4" placeholder="one --key=value per line, e.g. --policy.use_torch_compile=true"></textarea>
+            </label>
+            </div>
+            <div class="lerobot-inline-options">
+              <label class="checkbox-line"><input id="lerobot-train-use-amp-input" type="checkbox" /> policy.use_amp</label>
+              <label class="checkbox-line"><input id="lerobot-train-wandb-input" type="checkbox" checked /> wandb.enable</label>
+            </div>
+            <div id="lerobot-wandb-action-status" class="lerobot-action-status idle">Waiting for W&B local server action.</div>
+          </details>
+          <div id="lerobot-train-progress" class="lerobot-training-progress hidden">
+            <div class="training-progress-head">
+              <strong>Progress</strong>
+              <span id="lerobot-train-progress-label">0 / 0 · ETA unknown</span>
+            </div>
+            <div class="training-progress-track"><span id="lerobot-train-progress-bar"></span></div>
+          </div>
+          <div class="button-row compact">
+            <button id="btn-train-start" class="btn primary">Start Train</button>
+            <button id="btn-train-cancel" class="btn danger">Cancel Train</button>
+            <button id="btn-train-status" class="btn">Status</button>
+            <button id="btn-policy-refresh" class="btn">Refresh Policies</button>
+            <label class="checkbox-line inline-check" title="Keep training running when the AX4LAB GUI server stops.">
+              <input id="lerobot-train-background-input" type="checkbox" checked /> Background Train
+            </label>
+          </div>
+          <div id="lerobot-train-action-status" class="lerobot-action-status idle">Waiting for training action.</div>
+          <div id="lerobot-policy-list" class="lerobot-policy-list"></div>
+        </article>
+
+        <article id="rollout-card" class="panel lerobot-workflow-card">
+          <div class="panel-title-row">
+            <h2>10. Inference / Rollout</h2>
+            <span class="hint">policy-controlled robot run</span>
+          </div>
+          <div class="lerobot-form-grid single">
+            <label>
+              Policy Preset / Existing HF Policy
+              <select id="lerobot-policy-select"></select>
+            </label>
+            <label>
+              Rollout Policy Type
+              <select id="lerobot-rollout-policy-type-input">
+                <option value="act">act</option>
+                <option value="diffusion">diffusion</option>
+                <option value="smolvla" selected>smolvla (SmolVLA)</option>
+                <option value="pi0">pi0</option>
+                <option value="pi05">pi05 (Pi0.5)</option>
+                <option value="pi0fast">pi0fast</option>
+                <option value="xvla">xvla (X-VLA)</option>
+                <option value="vqbet">vqbet</option>
+              </select>
+            </label>
+            <label>
+              Rollout Policy Checkpoint / Output File
+              <span class="input-action-row">
+                <input id="lerobot-rollout-policy-input" type="text" placeholder="outputs/train/.../checkpoints/last/pretrained_model or model.safetensors" />
+                <button id="btn-browse-rollout-policy" class="btn mini" type="button">Browse</button>
+                <button id="btn-rollout-latest-policy" class="btn mini" type="button">Use Latest</button>
+              </span>
+            </label>
+            <label>
+              Rollout Task Instruction
+              <textarea id="lerobot-rollout-instruction-input" rows="3" placeholder="e.g. Pick up the cube and place it in the target area.">Pick up the cube and place it</textarea>
+            </label>
+            <label>
+              Rollout Duration Seconds (optional)
+              <input id="lerobot-rollout-duration-input" type="number" min="1" step="1" placeholder="blank = run until Stop Rollout" />
+            </label>
+            <label title="Transmit-only interpolation. Uses the action FPS as input; does not change inference or camera FPS. Applies to the next session.">
+              <span class="checkbox-inline"><input id="lerobot-rollout-linear-input" type="checkbox" /> Linear interpolation</span>
+              Output rate (Hz)
+              <input id="lerobot-rollout-linear-hz-input" type="number" min="1" max="100" step="1" value="100" aria-label="Inference linear interpolation output rate in Hz" />
+              <small>At least the action FPS; up to 100 Hz. Next session only.</small>
+            </label>
+            <label>
+              Safe Action Clamp
+              <span class="input-action-row">
+                <span class="checkbox-inline">
+                  <input id="lerobot-rollout-action-clamp-input" type="checkbox" />
+                  Enabled
+                </span>
+                <input id="lerobot-rollout-max-relative-target-input" type="number" min="1" step="1" value="5" title="LeRobot expects robot.max_relative_target as an integer safety limit" />
+              </span>
+            </label>
+            <label>
+              Shoulder Lift Frame Backstop
+              <span class="checkbox-inline">
+                <input id="lerobot-rollout-shoulder-lift-backstop-input" type="checkbox" checked />
+                Enabled
+              </span>
+            </label>
+            <label>
+              ACT Temporal Ensemble
+              <span class="input-action-row">
+                <span class="checkbox-inline">
+                  <input id="lerobot-rollout-temporal-ensemble-input" type="checkbox" checked />
+                  Enabled
+                </span>
+                <input id="lerobot-rollout-temporal-coeff-input" type="number" min="0" step="0.001" value="0.01" title="LeRobot policy.temporal_ensemble_coeff; enables policy.n_action_steps=1" />
+              </span>
+            </label>
+            <label>
+              RTC Enable
+              <span class="checkbox-inline">
+                <input id="lerobot-rollout-rtc-enabled-input" type="checkbox" />
+                Enabled for supported VLA policies
+              </span>
+            </label>
+            <label>
+              RTC Execution Horizon
+              <input id="lerobot-rollout-rtc-horizon-input" type="number" min="1" max="200" step="1" value="10" title="RTC execution horizon. Higher values help when inference latency is high." />
+            </label>
+            <label>
+              RTC Guidance Weight
+              <input id="lerobot-rollout-rtc-guidance-input" type="number" min="0" max="20" step="0.1" value="10.0" title="RTC maximum guidance weight." />
+            </label>
+            <label>
+              RTC Action Queue Refresh Threshold
+              <input id="lerobot-rollout-action-queue-input" type="number" min="1" max="300" step="1" value="60" title="action_queue_size_to_get_new_actions. Must be larger than inference delay plus RTC horizon." />
+            </label>
+            <label>
+              Observation / Note JSON
+              <textarea id="lerobot-observation-input" rows="4">{"observation_id":"manual","anomaly":false}</textarea>
+            </label>
+          </div>
+          <div class="button-row compact">
+            <button id="btn-rollout-save" class="btn">Save Rollout Defaults</button>
+            <button id="btn-rollout-start" class="btn primary">Start Rollout</button>
+            <label class="checkbox-inline" title="Use PLC PB2 to stop rollouts started from this workspace when the PLC fast-stop monitor is online.">
+              <input id="lerobot-plc-rollout-stop-input" type="checkbox" disabled />
+              PLC Stop
+              <span id="lerobot-plc-rollout-stop-status" class="hint">offline</span>
+            </label>
+            <button id="btn-rollout-stop" class="btn danger">Stop Rollout</button>
+            <button id="btn-rollout-status" class="btn">Status</button>
+            <button id="btn-dataset-inspect" class="btn">Inspect Dataset</button>
+          </div>
+          <div id="lerobot-rollout-action-status" class="lerobot-action-status idle">Waiting for rollout action.</div>
+        </article>
+
+        <article id="manipulation-agent-card" class="panel lerobot-workflow-card">
+          <div class="panel-title-row">
+            <h2>11. Manipulation Agent Bridge</h2>
+            <span class="hint">robot execution supervisor</span>
+          </div>
+          <p class="lerobot-card-note">
+            This panel calls the actual Manipulation Agent. It uses the same policy rollout configuration pattern as Inference / Rollout, with one task selector and task-specific saved defaults.
+          </p>
+          <div class="lerobot-agent-report-grid manipulation-bridge-runtime-grid" aria-label="Manipulation runtime supervisor summary">
+            <article class="lerobot-report-card">
+              <div class="lerobot-report-card-title"><strong>Bridge State</strong><span class="state-pill">idle</span></div>
+              <div class="hint">Agent bridge requests are routed through the active LeRobot profile.</div>
+            </article>
+            <article class="lerobot-report-card">
+              <div class="lerobot-report-card-title"><strong>Port Lease</strong><span class="state-pill">waiting</span></div>
+              <div class="hint">Follower and leader ownership are checked before live motion.</div>
+            </article>
+            <article class="lerobot-report-card">
+              <div class="lerobot-report-card-title"><strong>Active Camera</strong><span class="state-pill">waiting</span></div>
+              <div class="hint">Camera ownership must be clear before policy inference starts.</div>
+            </article>
+            <article class="lerobot-report-card">
+              <div class="lerobot-report-card-title"><strong>Robot Policy Runtime</strong><span class="state-pill">idle</span></div>
+              <div class="hint">Policy family is shown as metadata, not as the bridge identity.</div>
+            </article>
+            <article class="lerobot-report-card">
+              <div class="lerobot-report-card-title"><strong>Rerun Telemetry</strong><span class="state-pill">waiting</span></div>
+              <div class="hint">Viewer/process evidence is summarized here when available.</div>
+            </article>
+            <article class="lerobot-report-card">
+              <div class="lerobot-report-card-title"><strong>Observation Preview</strong><span class="state-pill">waiting</span></div>
+              <div class="hint">Latest RGB/depth frame evidence is shown when the backend publishes it.</div>
+            </article>
+            <article class="lerobot-report-card">
+              <div class="lerobot-report-card-title"><strong>Joint State</strong><span class="state-pill">waiting</span></div>
+              <div class="hint">Follower joints, policy target, and delta summary are displayed from telemetry.</div>
+            </article>
+            <article class="lerobot-report-card">
+              <div class="lerobot-report-card-title"><strong>Action Stream</strong><span class="state-pill">waiting</span></div>
+              <div class="hint">Action rate, queue, timestamp, and clamp/filter state are tracked here.</div>
+            </article>
+            <article class="lerobot-report-card">
+              <div class="lerobot-report-card-title"><strong>Viewer Evidence</strong><span class="state-pill">waiting</span></div>
+              <div class="hint">Viewer URL, PID, RRD path, and rollout log are preserved as evidence.</div>
+            </article>
+            <article class="lerobot-report-card">
+              <div class="lerobot-report-card-title"><strong>Vision Completion Gate</strong><span class="state-pill">waiting</span></div>
+              <div class="hint">Vision completion is the normal signal to stop active rollout.</div>
+            </article>
+            <article class="lerobot-report-card">
+              <div class="lerobot-report-card-title"><strong>Task Stages</strong><span class="state-pill">waiting</span></div>
+              <div class="hint">Current and completed task stages are shown from the runtime report.</div>
+            </article>
+          </div>
+          <div class="lerobot-form-grid single">
+            <label>
+              Manipulation Task
+              <select id="lerobot-manipulation-task-id-input">
+                <option value="transfer_to_utm" selected>Transfer printed specimen to UTM fixture</option>
+                <option value="clear_utm_to_disposal">Clear tested specimen to discard bin</option>
+              </select>
+            </label>
+            <label>
+              Policy Preset / Existing HF Policy
+              <select id="lerobot-manipulation-policy-select"></select>
+            </label>
+            <label>
+              Rollout Policy Type
+              <select id="lerobot-manipulation-policy-type-input">
+                <option value="act">act</option>
+                <option value="diffusion">diffusion</option>
+                <option value="smolvla" selected>smolvla (SmolVLA)</option>
+                <option value="pi0">pi0</option>
+                <option value="pi05">pi05 (Pi0.5)</option>
+                <option value="pi0fast">pi0fast</option>
+                <option value="xvla">xvla (X-VLA)</option>
+                <option value="vqbet">vqbet</option>
+              </select>
+            </label>
+            <label>
+              Rollout Policy Checkpoint / Output File
+              <span class="input-action-row">
+                <input id="lerobot-manipulation-policy-input" type="text" placeholder="outputs/train/.../checkpoints/last/pretrained_model or model.safetensors" />
+                <button id="btn-browse-manipulation-policy" class="btn mini" type="button">Browse</button>
+                <button id="btn-manipulation-latest-policy" class="btn mini" type="button">Use Latest</button>
+              </span>
+            </label>
+            <label>
+              Rollout Task Instruction
+              <textarea id="lerobot-manipulation-instruction-input" rows="3" placeholder="e.g. Move the printed specimen from the 3D printer pickup area to the UTM fixture.">Move the printed specimen from the 3D printer pickup area to the UTM fixture datum, release safely, retreat to standby_clear_of_utm, then wait for Vision verification.</textarea>
+            </label>
+            <label>
+              Rollout Duration Seconds (optional)
+              <input id="lerobot-manipulation-duration-input" type="number" min="1" step="1" placeholder="blank = run until Stop Rollout" />
+            </label>
+            <label title="Saved per task. Uses the action FPS as input; does not change inference or camera FPS. Applies to the next session.">
+              <span class="checkbox-inline"><input id="lerobot-manipulation-linear-input" type="checkbox" /> Linear interpolation</span>
+              Output rate (Hz)
+              <input id="lerobot-manipulation-linear-hz-input" type="number" min="1" max="100" step="1" value="100" aria-label="Agent linear interpolation output rate in Hz" />
+              <small>At least the action FPS; up to 100 Hz. Next session only.</small>
+            </label>
+            <label>
+              Safe Action Clamp
+              <span class="input-action-row">
+                <span class="checkbox-inline">
+                  <input id="lerobot-manipulation-action-clamp-input" type="checkbox" />
+                  Enabled
+                </span>
+                <input id="lerobot-manipulation-max-relative-target-input" type="number" min="1" step="1" value="5" title="LeRobot expects robot.max_relative_target as an integer safety limit" />
+              </span>
+            </label>
+            <label>
+              Shoulder Lift Frame Backstop
+              <span class="checkbox-inline">
+                <input id="lerobot-manipulation-shoulder-lift-backstop-input" type="checkbox" checked />
+                Enabled
+              </span>
+            </label>
+            <label>
+              ACT Temporal Ensemble
+              <span class="input-action-row">
+                <span class="checkbox-inline">
+                  <input id="lerobot-manipulation-temporal-ensemble-input" type="checkbox" checked />
+                  Enabled
+                </span>
+                <input id="lerobot-manipulation-temporal-coeff-input" type="number" min="0" step="0.001" value="0.01" title="LeRobot policy.temporal_ensemble_coeff; enables policy.n_action_steps=1" />
+              </span>
+            </label>
+            <label>
+              RTC Enable
+              <span class="checkbox-inline">
+                <input id="lerobot-manipulation-rtc-enabled-input" type="checkbox" />
+                Enabled for supported VLA policies
+              </span>
+            </label>
+            <label>
+              RTC Execution Horizon
+              <input id="lerobot-manipulation-rtc-horizon-input" type="number" min="1" max="200" step="1" value="10" title="RTC execution horizon. Higher values help when inference latency is high." />
+            </label>
+            <label>
+              RTC Guidance Weight
+              <input id="lerobot-manipulation-rtc-guidance-input" type="number" min="0" max="20" step="0.1" value="10.0" title="RTC maximum guidance weight." />
+            </label>
+            <label>
+              RTC Action Queue Refresh Threshold
+              <input id="lerobot-manipulation-action-queue-input" type="number" min="1" max="300" step="1" value="60" title="action_queue_size_to_get_new_actions. Must be larger than inference delay plus RTC horizon." />
+            </label>
+            <label class="planning-message-label train-extra-args">
+              Observation / Note JSON
+              <textarea id="lerobot-manipulation-observation-input" rows="4">{"observation_id":"manual-transfer","anomaly":false,"transfer_readiness":{"ready":true,"pose_confidence":0.82}}</textarea>
+            </label>
+          </div>
+          <div class="button-row compact">
+            <button id="btn-manipulation-save" class="btn">Save Task Defaults</button>
+            <button id="btn-manipulation-test" class="btn">Test Agent Bridge</button>
+            <button id="btn-manipulation-preview" class="btn">Preview Agent Payload</button>
+            <button id="btn-manipulation-run" class="btn primary">Run Manipulation Agent</button>
+            <button id="btn-manipulation-rollout-stop" class="btn danger">Stop Agent Rollout</button>
+            <button id="btn-manipulation-rollout-status" class="btn">Agent Rollout Status</button>
+          </div>
+          <div id="lerobot-manipulation-action-status" class="lerobot-action-status idle">Waiting for Manipulation Agent action.</div>
+          <details class="lerobot-details" open>
+            <summary>Manipulation Agent Runtime Report</summary>
+            <div id="lerobot-manipulation-report" class="lerobot-agent-report-grid">
+              <div class="lerobot-report-empty">Run Save, Test, Preview, or Run to inspect bridge state, leases, policy runtime, telemetry, completion gate, interlock, and handoff packet.</div>
+            </div>
+          </details>
+        </article>
+      </section>
+
+      </div>
+
+      <div id="dataset-manage-tab" class="lerobot-tab-panel" role="tabpanel" tabindex="-1" aria-labelledby="dataset-manage-tab-button">
+        <section class="panel lerobot-workflow-card">
+          <div class="panel-title-row">
+            <h2>Dataset Manage</h2>
+            <span class="hint">v2.1 core + AX4LAB sidecars</span>
+          </div>
+          <div class="lerobot-form-grid train-form-grid">
+            <label>
+              Dataset Root
+              <span class="input-action-row">
+                <input id="dataset-manage-root" type="text" placeholder="same as Local Paths dataset root" />
+                <button id="btn-browse-dataset-manage-root" class="btn mini" type="button">Browse</button>
+              </span>
+            </label>
+            <label>
+              Namespace
+              <input id="dataset-manage-namespace" type="text" value="jin" />
+            </label>
+            <label>
+              Date Prefix
+              <input id="dataset-manage-date-prefix" type="text" value="20260901" />
+            </label>
+            <label>
+              Output Repo ID
+              <input id="dataset-manage-output-repo" type="text" placeholder="auto: jin/20260901_9" />
+            </label>
+          </div>
+          <label class="checkbox-line">
+            <input id="dataset-manage-overwrite" type="checkbox" />
+            Overwrite output dataset by moving the existing folder to backup first
+          </label>
+          <div class="button-row compact">
+            <button id="btn-dataset-manage-refresh" class="btn">Refresh Datasets</button>
+          </div>
+          <div id="dataset-manage-status" class="lerobot-action-status idle">Waiting for dataset action.</div>
+
+          <details class="lerobot-details" open>
+            <summary>Merge</summary>
+            <div class="lerobot-form-grid train-form-grid">
+              <label>
+                Source A
+                <select id="dataset-manage-merge-source-a"></select>
+              </label>
+              <label>
+                Source A Range
+                <input id="dataset-manage-merge-range-a" type="text" value="all" placeholder="all, 0-24, 0:25, 1,3,5" />
+              </label>
+              <label>
+                Source B
+                <select id="dataset-manage-merge-source-b"></select>
+              </label>
+              <label>
+                Source B Range
+                <input id="dataset-manage-merge-range-b" type="text" value="all" placeholder="all, 0-24, 0:25, 1,3,5" />
+              </label>
+            </div>
+            <div class="button-row compact">
+              <button id="btn-dataset-manage-merge" class="btn primary">Create Merged Dataset</button>
+            </div>
+          </details>
+
+          <details class="lerobot-details">
+            <summary>Split</summary>
+            <div class="lerobot-form-grid train-form-grid">
+              <label>
+                Source
+                <select id="dataset-manage-split-source"></select>
+              </label>
+              <label class="planning-message-label train-extra-args">
+                Split Spec
+                <textarea id="dataset-manage-split-spec" rows="4">train=0-47
+val=48-59</textarea>
+              </label>
+            </div>
+            <div class="button-row compact">
+              <button id="btn-dataset-manage-split" class="btn primary">Create Split Datasets</button>
+            </div>
+          </details>
+
+          <details class="lerobot-details">
+            <summary>Delete + Compact</summary>
+            <div class="lerobot-form-grid train-form-grid">
+              <label>
+                Source
+                <select id="dataset-manage-delete-source"></select>
+              </label>
+              <label>
+                Delete Range
+                <input id="dataset-manage-delete-range" type="text" placeholder="24, 1-3, 0:2" />
+              </label>
+              <label>
+                Delete Output Repo ID
+                <input id="dataset-manage-delete-output-repo" type="text" placeholder="auto: source_compact" />
+              </label>
+            </div>
+            <div class="button-row compact">
+              <button id="btn-dataset-manage-delete" class="btn danger">Create Compacted Dataset</button>
+            </div>
+          </details>
+
+          <details class="lerobot-details" open>
+            <summary>Local Datasets</summary>
+            <div id="dataset-manage-list" class="lerobot-visualization"></div>
+          </details>
+        </section>
+      </div>
+
+      <div id="isaac-lab-tab" class="lerobot-tab-panel" role="tabpanel" tabindex="-1" aria-labelledby="isaac-lab-tab-button">
+        <section class="panel lerobot-workflow-card lerobot-isaac-lab-panel">
+          <div class="panel-title-row">
+            <h2>Isaac Lab Synthetic Intelligence</h2>
+            <span class="hint">Lab setup, HDF5 export, Mimic, RL teacher, and reports</span>
+          </div>
+          <div class="lerobot-card-note">
+            This tab uses the existing Isaac Lab API endpoints and sidecar manifests. Training pipeline and Isaac Sim mirror behavior are not changed by opening or switching this tab.
+          </div>
+          <details id="isaac-lab-basic-settings" class="lerobot-details isaac-lab-basic-settings" open>
+            <summary>Basic settings</summary>
+            <div class="isaac-lab-basic-layout">
+              <div class="lerobot-form-grid train-form-grid">
+                <label>
+                  Isaac Lab Path
+                  <input id="isaac-synthetic-isaac-lab-path" type="text" value="{{ isaac_resources.isaac_lab_path }}" placeholder="Configured Isaac Lab directory" />
+                </label>
+                <label>
+                  Isaac Sim Python
+                  <input id="isaac-synthetic-isaac-sim-python" type="text" value="{{ isaac_resources.isaac_sim_python }}" placeholder="Configured Isaac Sim python.sh" />
+                </label>
+                <label>
+                  Isaac Stage Path
+                  <input id="isaac-synthetic-stage-path" type="text" value="{{ isaac_resources.stage_path }}" placeholder="USD scene path" />
+                </label>
+                <label>
+                  Mimic Trials
+                  <input id="isaac-synthetic-mimic-trials" type="number" min="1" max="5000" step="1" value="3" />
+                </label>
+                <label>
+                  Mimic Envs
+                  <input id="isaac-synthetic-mimic-num-envs" type="number" min="1" max="256" step="1" value="3" />
+                </label>
+                <label>
+                  Domain Randomization
+                  <select id="isaac-lab-domain-randomization-profile">
+                    <option value="off">off</option>
+                    <option value="conservative">conservative</option>
+                    <option value="standard" selected>standard</option>
+                    <option value="stress">stress eval only</option>
+                  </select>
+                </label>
+              </div>
+              <div class="lerobot-inline-options">
+                <label class="checkbox-line"><input id="isaac-synthetic-enable-hdf5-export" type="checkbox" checked /> HDF5 export hook</label>
+                <label class="checkbox-line"><input id="isaac-synthetic-enable-mimic" type="checkbox" checked /> Mimic generation hook</label>
+                <label class="checkbox-line"><input id="isaac-lab-mimic-cameras-input" type="checkbox" checked /> Include Lab RGB-D cameras</label>
+              </div>
+            </div>
+          </details>
+          <details id="isaac-lab-basic-actions" class="lerobot-details isaac-lab-basic-actions-panel" open>
+            <summary>Basic actions</summary>
+            <div class="isaac-lab-basic-actions">
+              <button id="isaac-lab-apply-standard-defaults" class="btn">Apply Standard Defaults</button>
+              <button id="isaac-synthetic-status" class="btn">Status</button>
+              <button id="isaac-lab-run-e2e" class="btn primary">Run Mimic + IL E2E</button>
+              <button id="isaac-lab-generate-mimic" class="btn">Generate Mimic</button>
+              <button id="isaac-lab-train-il" class="btn">Train IL</button>
+              <button id="isaac-lab-eval-il" class="btn">Eval IL</button>
+              <button id="isaac-synthetic-mimic-stop" class="btn danger">Stop Mimic Job</button>
+            </div>
+            <div id="isaac-synthetic-action-status" class="lerobot-action-status idle">Waiting for Isaac Lab action.</div>
+          </details>
+          <details id="isaac-lab-advanced-settings" class="lerobot-details isaac-lab-advanced-settings">
+            <summary>Advanced settings</summary>
+            <div class="lerobot-form-grid train-form-grid">
+              <label>
+                Synthetic Pipeline
+                <select id="isaac-synthetic-pipeline-mode">
+                  <option value="isaac_lab_replicator" selected>Isaac Lab + Replicator</option>
+                  <option value="replicator_render_only">Replicator render only</option>
+                  <option value="legacy_sidecar">Legacy sidecar</option>
+                </select>
+              </label>
+              <label>
+                Fallback Policy
+                <select id="isaac-synthetic-fallback-policy">
+                  <option value="block_on_primary_failure" selected>block on primary failure</option>
+                  <option value="allow_legacy_fallback">allow legacy fallback</option>
+                  <option value="legacy_only">legacy only</option>
+                </select>
+              </label>
+              <label>
+                Source Intent
+                <select id="isaac-synthetic-source-intent">
+                  <option value="train_ready_success_only" selected>train-ready successes only</option>
+                  <option value="preview_only">preview only</option>
+                  <option value="debug_include_failed">debug preview with failed rows</option>
+                </select>
+              </label>
+              <label>
+                Mimic Backend
+                <select id="isaac-synthetic-mimic-backend">
+                  <option value="official" selected>official Isaac Lab Mimic</option>
+                  <option value="joint_replay">joint replay</option>
+                </select>
+              </label>
+              <label>
+                RL Teacher Steps
+                <input id="isaac-synthetic-rl-teacher-steps" type="number" min="0" step="1" value="0" />
+              </label>
+            </div>
+            <div class="lerobot-inline-options">
+              <label class="checkbox-line"><input id="isaac-synthetic-enable-replicator" type="checkbox" /> Replicator output</label>
+              <label class="checkbox-line"><input id="isaac-synthetic-enable-rl-teacher" type="checkbox" /> RL teacher hook</label>
+            </div>
+          </details>
+          <details id="isaac-lab-advanced-actions" class="lerobot-details isaac-lab-advanced-actions">
+            <summary>Advanced actions</summary>
+            <h3 class="lerobot-section-subtitle">Build and export actions</h3>
+            <div class="button-row compact">
+              <button id="isaac-synthetic-check-digital-twin" class="btn">Check Digital Twin</button>
+              <button id="isaac-synthetic-build" class="btn primary">Build Synthetic Dataset</button>
+              <button id="isaac-synthetic-run-replicator-worker" class="btn">Run Replicator Worker</button>
+              <button id="isaac-synthetic-run-replicator-visual" class="btn">Open Visual Replicator</button>
+              <button id="isaac-synthetic-run-replicator-smoke" class="btn">Run Replicator Smoke</button>
+              <button id="isaac-synthetic-preview" class="btn">Preview Synthetic Sources</button>
+              <button id="isaac-synthetic-export-hdf5" class="btn">Export HDF5</button>
+              <button id="isaac-lab-annotate-source" class="btn">Annotate Source</button>
+              <button id="isaac-synthetic-e2e-smoke" class="btn">Run 5x10 E2E Smoke</button>
+            </div>
+            <h3 class="lerobot-section-subtitle">Mimic runner actions</h3>
+            <div class="button-row compact">
+              <button id="isaac-synthetic-run-mimic" class="btn primary">Run Mimic</button>
+              <button id="isaac-synthetic-run-mimic-smoke" class="btn">Run Mimic Smoke</button>
+              <button id="isaac-synthetic-mimic-status" class="btn">Mimic Status</button>
+            </div>
+            <h3 class="lerobot-section-subtitle">RL teacher actions</h3>
+            <div class="button-row compact">
+              <button id="isaac-synthetic-run-rl-teacher" class="btn primary">Run RL Teacher</button>
+              <button id="isaac-synthetic-run-rl-teacher-smoke" class="btn">Run RL Smoke</button>
+              <button id="isaac-synthetic-rl-teacher-status" class="btn">RL Status</button>
+              <button id="isaac-synthetic-rl-teacher-stop" class="btn">Stop RL Job</button>
+            </div>
+          </details>
+          <details class="lerobot-details">
+            <summary>Domain Randomization / Augmentation</summary>
+            <div class="lerobot-card-note">
+              Build an immutable sidecar under the selected dataset for synthetic Isaac RGB-D variants, standard_sim2real_v2 common image/depth augmentation, render-domain randomization, and camera pose augmentation when recording metadata is available.
+            </div>
+            <div class="lerobot-form-grid train-form-grid">
+              <label>
+                Augmentation Profile
+                <select id="lerobot-isaac-augment-profile-input">
+                  <option value="conservative" selected>conservative</option>
+                  <option value="sim2real">sim2real</option>
+                  <option value="stress">stress</option>
+                </select>
+              </label>
+              <label>
+                Variants Per Source Frame
+                <input id="lerobot-isaac-augment-variants-input" type="number" min="1" max="256" value="8" />
+              </label>
+              <label>
+                Max Source Frames
+                <input id="lerobot-isaac-augment-max-frames-input" type="number" min="1" value="200" />
+              </label>
+              <label>
+                Seed
+                <input id="lerobot-isaac-augment-seed-input" type="number" value="0" />
+              </label>
+              <label>
+                Cameras
+                <input id="lerobot-isaac-augment-cameras-input" type="text" value="top,front,right" />
+              </label>
+              <label>
+                Augmentation Output Dir (optional)
+                <span class="input-action-row">
+                  <input id="lerobot-isaac-augment-output-dir-input" type="text" placeholder="dataset/sidecar/isaac_augmentation/latest" />
+                  <button id="btn-browse-isaac-augment-output" class="btn mini" type="button">Browse</button>
+                </span>
+              </label>
+              <label>
+                RGB Strength
+                <input id="lerobot-isaac-augment-rgb-strength-input" type="number" min="0" max="2" step="0.05" value="1" />
+              </label>
+              <label>
+                Depth Strength
+                <input id="lerobot-isaac-augment-depth-strength-input" type="number" min="0" max="2" step="0.05" value="1" />
+              </label>
+              <label>
+                Render Strength
+                <input id="lerobot-isaac-augment-render-domain-strength-input" type="number" min="0" max="2" step="0.05" value="1" />
+              </label>
+              <label>
+                Camera Pose Strength
+                <input id="lerobot-isaac-augment-camera-pose-strength-input" type="number" min="0" max="2" step="0.05" value="1" />
+              </label>
+              <label>
+                Preview Rows
+                <input id="lerobot-isaac-augment-preview-count-input" type="number" min="1" max="200" value="20" />
+              </label>
+            </div>
+            <div class="lerobot-inline-options">
+              <label class="checkbox-line"><input id="lerobot-isaac-augment-image-input" type="checkbox" checked /> Common image/depth augmentation</label>
+              <label class="checkbox-line"><input id="lerobot-isaac-augment-photometric-input" type="checkbox" checked /> Photometric</label>
+              <label class="checkbox-line"><input id="lerobot-isaac-augment-sensor-noise-input" type="checkbox" checked /> Sensor noise</label>
+              <label class="checkbox-line"><input id="lerobot-isaac-augment-depth-noise-input" type="checkbox" checked /> Depth noise</label>
+              <label class="checkbox-line"><input id="lerobot-isaac-augment-render-domain-input" type="checkbox" checked /> Render domain</label>
+              <label class="checkbox-line"><input id="lerobot-isaac-augment-camera-pose-input" type="checkbox" checked /> Camera pose augmentation</label>
+              <label class="checkbox-line"><input id="lerobot-isaac-augment-exclude-flagged-episodes-input" type="checkbox" checked /> Exclude flagged sim/synthetic data only</label>
+            </div>
+            <div class="button-row compact">
+              <button id="btn-isaac-augment-run" class="btn primary">Build Isaac Augmentation</button>
+              <button id="btn-isaac-augment-preview" class="btn">Preview Variants</button>
+            </div>
+            <div id="lerobot-isaac-augmentation-action-status" class="lerobot-action-status idle">Waiting for Isaac augmentation action.</div>
+            <div id="lerobot-isaac-augmentation-progress" class="lerobot-training-progress hidden">
+              <div class="training-progress-head">
+                <strong>Isaac Augmentation</strong>
+                <span id="lerobot-isaac-augmentation-progress-label">0 / 0 · 0%</span>
+              </div>
+              <div class="training-progress-track"><span id="lerobot-isaac-augmentation-progress-bar"></span></div>
+            </div>
+            <div id="lerobot-isaac-augmentation" class="lerobot-visualization"></div>
+            <div id="lerobot-isaac-augmentation-preview" class="lerobot-visualization"></div>
+          </details>
+          <details class="lerobot-details" open>
+            <summary>Run output and reports</summary>
+            <div class="lerobot-report-grid compact">
+              <div id="isaac-synthetic-status-compatibility" class="lerobot-report-card"></div>
+              <div id="isaac-synthetic-status-digital-twin" class="lerobot-report-card"></div>
+              <div id="isaac-synthetic-status-source-labels" class="lerobot-report-card"></div>
+              <div id="isaac-synthetic-status-canonical-index" class="lerobot-report-card"></div>
+              <div id="isaac-synthetic-status-generation" class="lerobot-report-card"></div>
+              <div id="isaac-synthetic-status-hdf5" class="lerobot-report-card"></div>
+              <div id="isaac-synthetic-status-training-exposure" class="lerobot-report-card"></div>
+              <div id="isaac-lab-e2e-status-card" class="lerobot-report-card wide"></div>
+            </div>
+            <div id="isaac-synthetic-progress" class="lerobot-training-progress hidden">
+              <div class="training-progress-head">
+                <strong>Synthetic Intelligence</strong>
+                <span id="isaac-synthetic-progress-label">0%</span>
+              </div>
+              <div class="training-progress-track"><span id="isaac-synthetic-progress-bar"></span></div>
+            </div>
+            <div id="isaac-synthetic-step-trace" class="lerobot-visualization"></div>
+            <div id="isaac-synthetic-output" class="lerobot-visualization"></div>
+          </details>
+        </section>
+      </div>
+
+      <section id="session-output" class="split lerobot-output-split">
+        <article class="panel">
+          <div class="panel-title-row">
+            <h2>12. Session Output</h2>
+            <span class="hint">shared server state</span>
+          </div>
+          <h3 class="lerobot-output-subtitle">Recent Sessions</h3>
+          <div id="lerobot-session-list" class="list"></div>
+        </article>
+        <article class="panel">
+          <div class="panel-title-row">
+            <h2>Last Result</h2>
+            <span class="hint">command preview + trace + logs</span>
+          </div>
+          <pre id="lerobot-output" class="command-output">Waiting for action.</pre>
+        </article>
+      </section>
+    </main>
+    <script src="/static/lerobot.js?v=20260923-rtc-defaults-1" defer></script>
+  </body>
+</html>

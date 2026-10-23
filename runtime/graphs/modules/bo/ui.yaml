@@ -1,0 +1,24 @@
+ui:
+  short: BO
+  icon: /static/live_gui_icons/bo_agent.svg
+  report_title: BO Agent
+  chat:
+    mode: open_on_demand
+  renderer:
+    dashboard: module
+    report: module
+    fallback: descriptor
+  cards:
+  - {id: bo_objective_equation, type: chart, title: Objective Equation, span: 12, tone: bo}
+  - {id: bo_live_posterior, type: chart, title: Live Posterior, span: 6, tone: bo}
+  - {id: bo_initial_design, type: chart, title: Initial Design / LHS, span: 6, tone: bo}
+  - {id: bo_next_experiment, type: handoff, title: Next Experiment, span: 4, tone: bo}
+  - {id: bo_optimization_status, type: metric_group, title: Optimization Status, span: 4, tone: bo}
+  - {id: bo_selection_evidence, type: evidence, title: Selection Evidence, span: 4, tone: bo}
+  - {id: bo_agentic_progress, type: evidence, title: Agentic Progress, span: 12, tone: bo}
+  report_sections:
+  - id: bo_optimization_evidence
+    title: BO Optimization Evidence
+    selectors:
+      result: metadata.bo_agent
+      handoff: metadata.next_design_request

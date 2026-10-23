@@ -1,0 +1,383 @@
+"""
+File purpose:
+- Bootstrap runtime dependencies for the AX4LAB application.
+
+Key classes/functions:
+- load_runtime
+
+Inputs/outputs:
+- Input: environment variables + YAML configs
+- Output: initialized MainController
+
+Dependencies:
+- python-dotenv
+- utils.config_loader
+- app.controller.MainController
+
+Modification guide:
+- Safe places to edit: default backend and startup registration
+- Risky places to edit: dependency wiring for orchestrator
+- Related files: app/main.py, app/controller.py
+"""
+
+from __future__ import annotations
+
+import os
+from copy import deepcopy
+from dataclasses import replace
+from typing import Any
+
+from dotenv import load_dotenv
+
+from agents.base_agent import AgentContext
+from agents.module_discovery import discover_agent_modules
+from agents.core.guardian.agent import GuardianAgent
+from agents.core.knowledge.agent import KnowledgeAgent
+from agents.core.orchestrator.agent import OrchestratorAgent
+from agents.registry import AgentRegistry
+from app.controller import ControllerDeps, MainController
+from backends.mock_llm import MockLLMBackend
+from backends.llm_lease import LLMLeaseCoordinator
+from backends.model_router import ModelRouter
+from backends.nemoclaw_client import NemoClawBackend
+from backends.nemoclaw_vllm_runtime import NemoClawVLLMRuntime
+from backends.ollama_client import OllamaBackend
+from backends.openai_client import OpenAIBackend
+from backends.vllm_client import VLLMBackend
+from knowledge.experiment_db import ExperimentDB
+from knowledge.failure_memory import FailureMemory
+from knowledge.rag import HybridRAG, LocalRAGIndex, WebRetriever
+from knowledge.context_service import KnowledgeContextService
+from device_bridges.specimen_pose_tracker import get_specimen_pose_tracker_bridge
+from device_bridges.utm_runtime_bridge import get_utm_runtime_manager
+from device_bridges.utm_state_observer import observe_utm_state_window
+from mcp_tools.camera_tools import register_camera_tools
+from device_bridges.windows_pyautogui.tools import register_equipment_tools
+from mcp_tools.experiment_tools import register_experiment_tools
+from mcp_tools.lerobot_tools import register_lerobot_tools
+from mcp_tools.mock_tools import register_mock_tools
+from mcp_tools.pinn_tools import register_pinn_tools
+from mcp_tools.printer_tools import register_printer_tools
+from mcp_tools.tool_registry import ToolRegistry
+from mcp_tools.utm_tools import register_utm_tools
+from objectives.metric_registry import MetricRegistry
+from objectives.service import ObjectiveService
+from objectives.store import ObjectiveStore
+from objectives.tools import register_objective_tools
+from utils.config_loader import load_all_configs
+from utils.launcher_settings import (
+    SUPPORTED_BACKENDS,
+    normalize_backend_name as _normalize_backend_name,
+    select_backend_name,
+)
+from utils.runtime_paths import (
+    RuntimePaths, current_paths, finalize_paths, resolve_repository_path,
+    resolve_runtime_path, resolve_system_path,
+)
+
+
+def _load_configs(paths: RuntimePaths | None = None) -> dict[str, Any]:
+    binding = paths or current_paths()
+    cfg = load_all_configs(resolve_runtime_path("configs", paths=binding), paths=binding)
+    return cfg
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _apply_model_env_overrides(models_cfg: dict[str, Any], *, backend_name: str = "") -> dict[str, Any]:
+    cfg = dict(models_cfg)
+    models = dict(cfg.get("models", {}))
+    for role in ("orchestrator", "e4b"):
+        models[role] = dict(models.get(role, {}))
+
+    prefix = f"AUTONOMOUS_{backend_name.upper()}_" if backend_name else ""
+    override_map = {
+        "orchestrator": os.getenv(f"{prefix}ORCHESTRATOR_MODEL") or os.getenv("AUTONOMOUS_ORCHESTRATOR_MODEL"),
+        "e4b": os.getenv(f"{prefix}E4B_MODEL") or os.getenv("AUTONOMOUS_E4B_MODEL"),
+    }
+    for role, value in override_map.items():
+        if value:
+            models[role]["primary"] = value
+    cfg["models"] = models
+    return cfg
+
+
+def _models_cfg_for_backend(models_cfg: dict[str, Any], backend_name: str) -> dict[str, Any]:
+    """Build a model-router config for one inference backend branch."""
+    cfg = dict(models_cfg)
+    backend_models = dict(models_cfg.get("backend_models", {}))
+    if backend_name in backend_models:
+        cfg["models"] = dict(backend_models[backend_name])
+    return _apply_model_env_overrides(cfg, backend_name=backend_name)
+
+
+def _build_backend(
+    backend_name: str,
+    *,
+    system_cfg: dict[str, Any],
+    cfg: dict[str, Any],
+) -> OpenAIBackend | OllamaBackend | NemoClawBackend | VLLMBackend:
+    if backend_name == "openai":
+        openai_cfg = cfg.get("system", {}).get("openai", cfg.get("openai", {}))
+        return OpenAIBackend(
+            base_url=str(
+                os.getenv("OPENAI_BASE_URL", openai_cfg.get("base_url", "https://api.openai.com/v1"))
+            ),
+            timeout_s=float(os.getenv("OPENAI_TIMEOUT_S", openai_cfg.get("timeout_seconds", 300))),
+            api_key=str(os.getenv("OPENAI_API_KEY", openai_cfg.get("api_key", ""))),
+            organization=str(os.getenv("OPENAI_ORG_ID", openai_cfg.get("organization", ""))),
+            project=str(os.getenv("OPENAI_PROJECT_ID", openai_cfg.get("project", ""))),
+            reasoning_effort=str(
+                os.getenv("OPENAI_REASONING_EFFORT", openai_cfg.get("reasoning_effort", ""))
+            ),
+        )
+    if backend_name == "nemoclaw":
+        nemoclaw_cfg = cfg.get("system", {}).get("nemoclaw", cfg.get("nemoclaw", {}))
+        return NemoClawBackend(
+            base_url=str(os.getenv("NEMOCLAW_PROXY_URL", nemoclaw_cfg.get("proxy_url", "http://127.0.0.1:11435"))),
+            timeout_s=float(os.getenv("NEMOCLAW_TIMEOUT_S", nemoclaw_cfg.get("timeout_seconds", 60))),
+            token_file=str(os.getenv("NEMOCLAW_TOKEN_FILE", nemoclaw_cfg.get("token_file", "~/.nemoclaw/ollama-proxy-token"))),
+            auto_start_proxy=_env_flag("NEMOCLAW_AUTO_START_PROXY", bool(nemoclaw_cfg.get("auto_start_proxy", True))),
+            proxy_script=str(os.getenv("NEMOCLAW_PROXY_SCRIPT", nemoclaw_cfg.get("proxy_script", ""))),
+            proxy_port=int(os.getenv("NEMOCLAW_PROXY_PORT", str(nemoclaw_cfg.get("proxy_port", 11435)))),
+            backend_port=int(os.getenv("NEMOCLAW_BACKEND_PORT", str(nemoclaw_cfg.get("backend_port", 11434)))),
+            keep_alive=os.getenv("NEMOCLAW_KEEP_ALIVE", str(nemoclaw_cfg.get("keep_alive", "0"))),
+        )
+    if backend_name == "vllm":
+        vllm_cfg = cfg.get("system", {}).get("vllm", cfg.get("vllm", {}))
+        return VLLMBackend(
+            base_url=str(os.getenv("VLLM_BASE_URL", vllm_cfg.get("base_url", "http://127.0.0.1:8000/v1"))),
+            timeout_s=float(os.getenv("VLLM_TIMEOUT_S", vllm_cfg.get("timeout_seconds", 300))),
+            api_key=str(os.getenv("VLLM_API_KEY", vllm_cfg.get("api_key", "EMPTY"))),
+            model_base_urls=dict(vllm_cfg.get("model_base_urls", {})),
+            nemoclaw_runtime=NemoClawVLLMRuntime.from_config(vllm_cfg.get("nemoclaw_k8s", {})),
+        )
+    ollama_cfg = cfg.get("system", {}).get("ollama", cfg.get("ollama", {}))
+    ollama_timeout_s = float(os.getenv("OLLAMA_TIMEOUT_S", ollama_cfg.get("timeout_seconds", 300)))
+    return OllamaBackend(
+        base_url=os.getenv("OLLAMA_BASE_URL", str(ollama_cfg.get("base_url", "http://localhost:11434"))),
+        timeout_s=ollama_timeout_s,
+        keep_alive=os.getenv("OLLAMA_KEEP_ALIVE", str(ollama_cfg.get("keep_alive", "0"))),
+    )
+
+
+def _build_runtime_profile(
+    *,
+    backend_name: str,
+    backend_cfg: dict[str, Any],
+    models_cfg: dict[str, Any],
+    router: ModelRouter,
+) -> dict[str, Any]:
+    """Assemble backend/model metadata for GUI status panels."""
+    labels = {
+        "openai": "OpenAI API",
+        "nemoclaw": "Ollama / NemoClaw",
+        "ollama": "Ollama",
+        "vllm": "NemoClaw / vLLM",
+    }
+    role_routes = {
+        "orchestrator": "orchestrator_plan",
+        "e4b": "design_reasoning",
+    }
+    selected_models: dict[str, dict[str, Any]] = {}
+    role_capabilities = (
+        models_cfg.get("role_capabilities")
+        if isinstance(models_cfg.get("role_capabilities"), dict)
+        else {}
+    )
+    for role, task_type in role_routes.items():
+        selection = router.select(task_type)
+        raw_capabilities = (
+            role_capabilities.get(role)
+            if isinstance(role_capabilities.get(role), dict)
+            else {}
+        )
+        selected_models[role] = {
+            "task_type": task_type,
+            "primary": selection.primary,
+            "fallback": selection.fallback,
+            "capabilities": {
+                "text": bool(raw_capabilities.get("text", True)),
+                "vision": bool(raw_capabilities.get("vision", False)),
+            },
+        }
+
+    return {
+        "backend": {
+            "name": backend_name,
+            "label": labels.get(backend_name, backend_name),
+            "active": True,
+            "proxy_url": (
+                backend_cfg.get("proxy_url")
+                or backend_cfg.get("base_url")
+                or "http://127.0.0.1:11435"
+            ),
+            "model_base_urls": dict(backend_cfg.get("model_base_urls", {})),
+        },
+        "models": selected_models,
+        "task_routes": dict(models_cfg.get("task_routes", {})),
+    }
+
+
+def load_runtime(*, paths: RuntimePaths | None = None) -> MainController:
+    """Create fully initialized runtime controller."""
+    injected = paths is not None
+    paths = paths or current_paths()
+    load_dotenv(resolve_repository_path(".env", paths=paths), override=False)
+    cfg = _load_configs(paths)
+    system_cfg = cfg.get("system", {}).get("system", {})
+    base_models_cfg = cfg.get("models", {})
+    logging_cfg = cfg.get("logging", {})
+
+    # Existing operator values keep their old repository-relative semantics.
+    if system_cfg.get("run_root"):
+        paths = replace(paths, run_root=resolve_repository_path(system_cfg["run_root"], paths=paths))
+    if not injected:
+        paths = finalize_paths(paths)
+    guide_path = (resolve_repository_path(system_cfg["guide_path"], paths=paths)
+                  if system_cfg.get("guide_path")
+                  else resolve_system_path("project/Project_guide.txt", paths=paths))
+    guide_source = (str(guide_path) if system_cfg.get("guide_path")
+                    else str(paths.repository_root / "docs/project/Project_guide.txt"))
+    local_index = LocalRAGIndex.from_file(guide_path, source_label=guide_source)
+    web_retriever = WebRetriever(
+        tavily_api_key=os.getenv("TAVILY_API_KEY"),
+        serper_api_key=os.getenv("SERPER_API_KEY"),
+    )
+    rag = HybridRAG(local_index=local_index, web_retriever=web_retriever)
+
+    backend_name = select_backend_name(cfg.get('system', {}))
+    backend_registry = {
+        name: _build_backend(name, system_cfg=system_cfg, cfg=cfg)
+        for name in SUPPORTED_BACKENDS
+    }
+    allow_mock_fallback = _env_flag(
+        "AUTONOMOUS_ALLOW_MOCK_FALLBACK",
+        bool(system_cfg.get("allow_mock_fallback", False)),
+    )
+    fallback_backend_name = _normalize_backend_name(
+        str(base_models_cfg.get("backend", {}).get("fallback", "")),
+        default="openai",
+    )
+    backend_fallbacks = {
+        name: fallback_backend_name if name != fallback_backend_name else name
+        for name in SUPPORTED_BACKENDS
+    }
+    fallback_registry = {
+        name: (
+            MockLLMBackend()
+            if allow_mock_fallback
+            else backend_registry.get(backend_fallbacks[name], backend)
+        )
+        for name, backend in backend_registry.items()
+    }
+    force_real_llm_in_test = _env_flag(
+        "AUTONOMOUS_USE_REAL_LLM_IN_TEST",
+        bool(system_cfg.get("force_real_llm_in_test", True)),
+    )
+    models_by_backend = {name: _models_cfg_for_backend(base_models_cfg, name) for name in SUPPORTED_BACKENDS}
+    router_registry = {name: ModelRouter(models_by_backend[name]) for name in SUPPORTED_BACKENDS}
+    router = router_registry[backend_name]
+    backend_cfg_by_name = {
+        "openai": cfg.get("system", {}).get("openai", cfg.get("openai", {})),
+        "nemoclaw": cfg.get("system", {}).get("nemoclaw", cfg.get("nemoclaw", {})),
+        "ollama": cfg.get("system", {}).get("ollama", cfg.get("ollama", {})),
+        "vllm": cfg.get("system", {}).get("vllm", cfg.get("vllm", {})),
+    }
+    runtime_profiles = {
+        name: _build_runtime_profile(
+            backend_name=name,
+            backend_cfg=backend_cfg_by_name.get(name, {}),
+            models_cfg=models_by_backend[name],
+            router=router_registry[name],
+        )
+        for name in SUPPORTED_BACKENDS
+    }
+    runtime_profile = dict(runtime_profiles[backend_name])
+
+    tools = ToolRegistry()
+    from knowledge.source_runtime import library_for
+    from mcp_tools.source_tools import register_source_tools
+    register_source_tools(tools, lambda: library_for(
+        library_root=paths.memory_root / "knowledge/source_library", inbox_root=paths.source_inbox_root,
+        runtime_root=paths.runtime_root))
+    register_mock_tools(tools)
+    # Keep repo_root as the explicit-relative compatibility base; typed omitted
+    # defaults use the same frozen source/private binding throughout each graph.
+    register_utm_tools(tools, repo_root=paths.repository_root, paths=paths)
+    utm_runtime_manager = get_utm_runtime_manager(cfg.get("devices", {}), repo_root=paths.repository_root, paths=paths)
+    specimen_pose_tracker = get_specimen_pose_tracker_bridge(cfg.get("devices", {}), repo_root=paths.repository_root, paths=paths)
+    register_camera_tools(
+        tools,
+        utm_state_observer=lambda **kwargs: observe_utm_state_window(
+            **kwargs, ros_setup_paths=utm_runtime_manager.config.ros_setup_paths + utm_runtime_manager.config.extra_setup_paths),
+        utm_runtime_manager=utm_runtime_manager,
+        specimen_pose_tracker=specimen_pose_tracker,
+    )
+    register_printer_tools(tools, cfg.get("devices", {}), repo_root=paths.repository_root, paths=paths)
+    register_equipment_tools(tools, cfg.get("devices", {}), repo_root=paths.repository_root, paths=paths)
+    lerobot_bridge = register_lerobot_tools(tools, cfg.get("lerobot", {}), repo_root=paths.repository_root, paths=paths)
+    lerobot_bridge.config.artifact_run_root = paths.run_root
+    # PINN's sole path is storage: supply the typed default without rewriting
+    # any explicitly configured legacy relative or absolute artifact setting.
+    pinn_raw = cfg.get("devices", {})
+    pinn_devices = pinn_raw.get("devices", pinn_raw) if isinstance(pinn_raw, dict) else {}
+    pinn_section = pinn_devices.get("pinn") if isinstance(pinn_devices, dict) else None
+    pinn_config = deepcopy(pinn_section) if isinstance(pinn_section, dict) else {}
+    pinn_config.setdefault("artifact_dir", str(paths.artifact_root / "pinn"))
+    register_pinn_tools(tools, {"pinn": pinn_config}, repo_root=paths.repository_root, paths=paths)
+    register_experiment_tools(tools, cfg.get("devices", {}))
+
+    agent_context = AgentContext(
+        model_router=router,
+        primary_backend=backend_registry[backend_name],
+        fallback_backend=fallback_registry[backend_name],
+        rag=rag,
+        experiment_db=ExperimentDB(),
+        failure_memory=FailureMemory(),
+        tools=tools,
+        force_real_llm_in_test=force_real_llm_in_test,
+        allow_mock_fallback=allow_mock_fallback,
+        active_backend=backend_name,
+        model_routers=router_registry,
+        primary_backends=backend_registry,
+        fallback_backends=fallback_registry,
+        backend_fallbacks=backend_fallbacks,
+        runtime_profiles=runtime_profiles,
+        llm_lease=LLMLeaseCoordinator(),
+        artifact_run_root=str(paths.run_root),
+        knowledge_service=KnowledgeContextService(paths.repository_root, data_root=paths.memory_root / "knowledge",
+            wiki_corpus_root=paths.system_root / "knowledge/wiki", wiki_source_root=paths.repository_root),
+        paths=paths,
+    )
+
+    objective_service = ObjectiveService(
+        store=ObjectiveStore(paths.memory_root / "objectives", run_root=paths.run_root),
+        registry=MetricRegistry.default(),
+        context=agent_context,
+    )
+    register_objective_tools(tools, objective_service)
+
+    agent_registry = AgentRegistry()
+    agent_registry.register(OrchestratorAgent())
+    for module in discover_agent_modules():
+        agent_registry.register_module(module)
+    agent_registry.register(KnowledgeAgent())
+    agent_registry.register(GuardianAgent())
+
+    deps = ControllerDeps(
+        agent_registry=agent_registry,
+        orchestrator_agent_name="orchestrator_agent",
+        agent_context=agent_context,
+        run_root=paths.run_root,
+        logging_config=logging_cfg,
+        system_config=system_cfg,
+        runtime_profile=runtime_profile,
+        paths=paths,
+    )
+    return MainController(deps)

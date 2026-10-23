@@ -1,0 +1,18 @@
+digraph analysis_execution {
+ graph [rankdir=TB,bgcolor="white",pad="0.35",nodesep="0.4",ranksep="0.45",fontname="DejaVu Sans",fontsize=20,label="Analysis — decisions and numerical authority",labelloc=t];
+ node [shape=box,style="rounded,filled",fillcolor="#EEF4FF",color="#315C9B",fontname="DejaVu Sans",fontsize=14,margin="0.2,0.12"];
+ edge [color="#52667A",fontname="DejaVu Sans",fontsize=12];
+ input [label="Equipment data + experiment geometry"];
+ gate [label="Input validation\nSource · geometry · signal",fillcolor="#FFF1D6"];
+ high1 [label="High — LLM processing decision\nanalyze / hold",fillcolor="#F2ECFA"];
+ numeric [label="Middle — deterministic processing\nStress–strain · metrics · integration"];
+ quality [label="Guardian — data and domain coverage",fillcolor="#FFF1D6"];
+ high2 [label="High — LLM evidence review\naccept / hold",fillcolor="#F2ECFA"];
+ objective [label="Middle — bound-objective evaluation"];
+ output [label="Knowledge — archive + handoff\nMeasured observation → BO"];
+ hold [label="Blocked result\nRetain reason and evidence",fillcolor="#FFE9E7",color="#A33A32"];
+ input -> gate -> high1 -> numeric -> quality -> high2 -> objective -> output;
+ gate -> hold [style=dashed,label="invalid"];
+ high1 -> hold [style=dashed,label="hold"];
+ high2 -> hold [style=dashed,label="hold"];
+}

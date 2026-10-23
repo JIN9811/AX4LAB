@@ -1,0 +1,395 @@
+"""
+Integration tests for controller-driven test mode loop execution.
+"""
+
+import asyncio
+import json
+from pathlib import Path
+
+import pytest
+
+# Initialize numerical dependencies before the scoped external-effect denial.
+# threadpoolctl resolves libc with the read-only ldconfig query on first use.
+# Keep that discovery outside the run; process/network denial remains active
+# for every agent and device boundary during the actual test.
+import torch
+import botorch
+from threadpoolctl import threadpool_info
+threadpool_info()
+
+from app.bootstrap import load_runtime
+from agents.design.agent import DesignAgent
+from agents.core.guardian.agent import GuardianAgent
+from device_bridges.lerobot_bridge import LeRobotBridge
+from orchestrator.state import Mode, Stage
+from utils.agent_artifact_archive import list_executions
+
+pytestmark = pytest.mark.usefixtures("handoff_no_external", "simulated_vision_process")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cycle_count", [2, 20, 3])
+async def test_controller_completes_test_run(monkeypatch: pytest.MonkeyPatch, cycle_count: int) -> None:
+    # Exercise the production graph and agents with explicit virtual boundaries.
+    # An absent disposal policy intentionally requires operator clearance.
+    original_design_payload = DesignAgent._finalize_design_payload
+
+    def virtual_design_payload(self, *args, **kwargs):
+        payload = original_design_payload(self, *args, **kwargs)
+        payload["experiment_spec"].pop("execution_policy", None)
+        payload["experiment_spec"]["ejection"] = {"enabled": True, "allow_ejection": True}
+        payload["experiment_spec"]["printer_test_path"] = "virtual_bridge"
+        payload["experiment_spec"]["test_printer_transport"] = "virtual"
+        payload["experiment_spec"] = controller._apply_specimen_printer_choice_to_spec(
+            payload["experiment_spec"], "virtual_bridge")
+        return payload
+
+    monkeypatch.setattr(DesignAgent, "_finalize_design_payload", virtual_design_payload)
+    monkeypatch.setattr(GuardianAgent, "TEST_LOOP_CYCLE_LIMIT", cycle_count)
+    def virtual_post_place_telemetry(_bridge: LeRobotBridge, session: dict[str, object]) -> dict[str, object]:
+        session_id = str(session.get("session_id") or "test-rollout")
+        packet = {
+            "schema": "atr.robot_joint_telemetry.v1",
+            "type": "joint_sample",
+            "session_id": session_id,
+            "sequence": 2,
+            "actual_source": {"source": "virtual_controller_fixture"},
+            "target_source": {"source": "virtual_controller_fixture"},
+            "motion_state": {
+                "measured": {"base_state": "home", "gripper_state": "idle", "home_gate": {"passed": True}},
+                "policy": {"base_state": "home", "gripper_state": "idle", "home_gate": {"passed": True}},
+            },
+        }
+        return {
+            "joint_telemetry": {
+                "schema": "atr.robot_joint_telemetry.v1",
+                "status": "available",
+                "session_id": session_id,
+                "log_path": "virtual://controller-test-rollout",
+                "packet": packet,
+            },
+            "post_place_interlock": {
+                "schema": "post_place_interlock.v1",
+                "session_id": session_id,
+                "ungrasping_seen": True,
+                "ungrasping_sequence": 1,
+                "measured_base_state": "home",
+                "measured_gripper_state": "idle",
+                "home_gate_passed": True,
+                "home_after_ungrasping": True,
+                "ready_for_utm_snapshot": True,
+                "latest_sequence": 2,
+            },
+        }
+
+    monkeypatch.setattr(LeRobotBridge, "_rollout_joint_telemetry_contract", virtual_post_place_telemetry)
+    controller = load_runtime()
+    if cycle_count == 3:
+        # Explicit user-requested warm start: seven synthetic observations,
+        # then the last LHS specimen and two BO-guided specimens.
+        from agents.bo.agent import BOAgent
+        from learning.bo_parameter_space import BOParameterSpace
+        original_prepare = DesignAgent._prepare_design_payload
+        seeded = False
+        def prepare_with_synthetic_history(self, state, ctx):
+            nonlocal seeded
+            first = not seeded
+            if not seeded:
+                seeded = True
+                points = BOParameterSpace.from_mapping(BOAgent.DEFAULT_PARAMETER_SPACE).lhs_points(8, seed=7)
+                for index, point in enumerate(points[:7]):
+                    score = 0.1 + 0.03 * index
+                    state.experiment_evaluations.append({
+                        "evaluation_id": f"synthetic-sea-{index}", "candidate_id": f"synthetic-sea-{index}",
+                        "source": "analysis_agent", "simulated": True, "fidelity": "synthetic",
+                        "provenance_refs": ["fixture://assumed-prior-data"],
+                        "objective_score": score,
+                        "metrics": {**point, "specific_energy_absorption_J_per_g": score},
+                        "objective": {"metric_name": "specific_energy_absorption_J_per_g", "constraints": point},
+                    })
+            constraints = controller._default_test_constraints({})
+            controller._publish_orchestrator_design_contract(constraints, cycle_index=state.loop_count + 1, total_cycles=3)
+            if first:
+                initial = state.run_metadata["orchestrator_design_contract"]["initial_design"]
+                assert initial["index"] == 8
+            return original_prepare(self, state, ctx)
+        monkeypatch.setattr(DesignAgent, "_prepare_design_payload", prepare_with_synthetic_history)
+
+    def forbidden_replay(_payload):
+        raise AssertionError("explicit virtual clearance must not start a robot replay")
+
+    controller._deps.agent_context.tools.register("lerobot.replay.start", forbidden_replay)
+    goal = "maximize SEA specific energy absorption" if cycle_count == 3 else "integration test run"
+    result = await controller.start(mode=Mode.TEST, goal=goal)
+    assert result["ok"] is True
+    created_events = [event for event in controller.recent_events() if event.get("type") == "run.created"]
+    assert created_events
+    assert created_events[-1]["payload"]["mode"] == Mode.TEST.value
+    assert created_events[-1]["payload"]["graph_id"] == "atr_closed_loop"
+    json_log_path = Path(controller.snapshot()["logs"]["json"])
+    log_records = [json.loads(line) for line in json_log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert any(record["event_type"] == "run.created" for record in log_records)
+
+    timeout_s = max(1200.0, cycle_count * 180.0)
+    start = asyncio.get_running_loop().time()
+    while True:
+        snapshot = controller.snapshot()
+        stage = snapshot["state"]["stage"]
+        if stage in {Stage.COMPLETE.value, Stage.ERROR.value}:
+            break
+        if snapshot["state"]["is_paused"]:
+            controller._run_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await controller._run_task
+            pytest.fail(f"virtual loop paused: {snapshot['state']['run_metadata'].get('guardian', {})}")
+        if asyncio.get_running_loop().time() - start > timeout_s:
+            raise TimeoutError(f"run did not finish within {timeout_s}s; stage={stage}")
+        await asyncio.sleep(0.1)
+
+    assert snapshot["state"]["stage"] == Stage.COMPLETE.value
+    assert snapshot["state"]["loop_count"] == cycle_count
+    assert snapshot["state"]["run_metadata"]["utm_clear_execution"]["success"] is True
+    assert snapshot["state"]["run_metadata"]["utm_clear_execution"]["simulated"] is True
+    assert snapshot["state"]["run_metadata"]["utm_verifications"]["verification_2"]["confirmed"] is True
+    assert snapshot["state"]["run_metadata"]["bo_agent"]["tool"] == "bo.agent"
+    assert snapshot["state"]["run_metadata"]["bo_agent"]["knowledge_context"]
+    assert snapshot["state"]["run_metadata"]["equipment_result"]["tool"] == "equipment.pyautogui.run"
+    assert snapshot["state"]["run_metadata"]["equipment_result"]["status"] == "verified_complete"
+    assert snapshot["state"]["run_metadata"]["equipment_handoff"]["status"] == "ready_for_analysis"
+    assert snapshot["state"]["run_metadata"]["equipment_report"]["schema"] == "equipment_report.v1"
+    assert snapshot["state"]["run_metadata"]["utm_data_ready"]["schema"] == "utm_data_ready.v1"
+    assert snapshot["state"]["run_metadata"]["equipment_report"]["cross_checks"]["data_parse_probe_ok"] is True
+    assert snapshot["state"]["run_metadata"].get("hardware_alerts", []) == []
+    assert any(packet["packet"]["schema"] == "utm_data_ready.v1" for packet in snapshot["state"]["run_metadata"]["handoff_packets"])
+    assert snapshot["state"]["latest_analysis"]["equipment_ok"] is True
+    assert snapshot["state"]["latest_analysis"]["equipment_result_file"]
+    assert "cae_result" not in snapshot["state"]["latest_analysis"]
+    assert snapshot["state"]["latest_analysis"]["bo_observation"]["schema"] == "bo_observation.v1"
+    if cycle_count == 3:
+        observation = snapshot["state"]["latest_analysis"]["bo_observation"]
+        assert observation["metric_name"] == "specific_energy_absorption_J_per_g"
+        assert observation["unit"] == "J/g"
+        assert snapshot["state"]["run_metadata"]["bo_agent"]["optimization_phase"] == "acquisition"
+    assert any(
+        item.get("schema") == "experiment_evaluation.v1" and item.get("source") == "analysis_agent"
+        for item in snapshot["state"].get("experiment_evaluations", [])
+    )
+    assert snapshot["state"]["latest_observations"]["vision_report"]["schema"] == "vision_report.v1"
+    assert snapshot["state"]["latest_observations"]["vision_signal"]["schema"] == "vision_signal.v1"
+    assert snapshot["state"]["run_metadata"]["vision_report"]["schema"] == "vision_report.v1"
+    assert snapshot["state"]["run_metadata"]["vision_signal"]["schema"] == "vision_signal.v1"
+    assert snapshot["state"]["run_metadata"]["vision_handoff_packet"]["schema"] == "vision_signal.v1"
+    assert any(packet["packet"]["schema"] == "vision_signal.v1" for packet in snapshot["state"]["run_metadata"]["handoff_packets"])
+
+    run_dir = json_log_path.parent
+    artifact_paths = {item.relative_to(run_dir).as_posix() for item in run_dir.rglob("*") if item.is_file()}
+    # Current storage is per-loop/per-agent, not the retired runtime/analysis root.
+    for loop_index in range(cycle_count):
+        executions = list_executions(run_dir, loop_index=loop_index)
+        completed_agents = {item["agent"] for item in executions if item["status"] == "completed"}
+        assert {"design_agent", "specimen_agent", "vision_agent", "manipulation_agent",
+                "equipment_agent", "analysis_agent", "knowledge_agent", "bo_agent", "guardian_agent"} <= completed_agents
+        assert all((run_dir / item["result_path"]).is_file() for item in executions)
+        loop_prefix = f"runtime/loops/loop-{loop_index + 1:06d}/"
+        assert any(path.startswith(loop_prefix + "analysis_agent/") and path.endswith("canonical_curve.csv") for path in artifact_paths)
+        assert any(path.startswith(loop_prefix + "analysis_agent/") and path.endswith("analysis_report.json") for path in artifact_paths)
+        assert any(path.startswith(loop_prefix + "bo_agent/") and path.endswith("_bo_agent_result.json") for path in artifact_paths)
+    if cycle_count == 20:
+        # Two-cycle smoke remains in LHS warmup; the long case exercises posterior output.
+        posterior_artifacts = {path for path in artifact_paths if "_posterior." in path}
+        assert {path.rsplit(".", 1)[-1] for path in posterior_artifacts} == {"png", "svg", "csv"}
+    assert any(path.startswith("vision/") and path.endswith("detection.json") for path in artifact_paths)
+    assert any(path.startswith("vision/") and path.endswith("scene_map.svg") for path in artifact_paths)
+
+    await controller.emit_workspace_result(
+        workspace="unit_workspace",
+        tool="unit.tool",
+        result={"ok": True, "status": "done", "workflow": "unit-workflow"},
+        stage=Stage.BO,
+        module_id="bo",
+        agent="bo_agent",
+        node_event=True,
+    )
+    log_records = [json.loads(line) for line in json_log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert any(
+        record["event_type"] == "tool.completed" and record["payload"].get("workspace") == "unit_workspace"
+        for record in log_records
+    )
+    assert any(
+        record["event_type"] == "node.completed" and record["payload"].get("workspace") == "unit_workspace"
+        for record in log_records
+    )
+
+
+@pytest.mark.asyncio
+async def test_safe_physical_printer_preflight_completes_twenty_redesign_cycles_without_actuation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise the real post-print agent chain while every physical boundary is a tripwire."""
+    controller = load_runtime()
+    controller.TEST_MODE_LOOP_CYCLES = 20
+    tools = controller._deps.agent_context.tools
+
+    def forbidden_actuation(_payload: dict[str, object]) -> dict[str, object]:
+        raise AssertionError("safe preflight cycle crossed a physical or camera execution boundary")
+
+    for tool_name in (
+        "camera.capture",
+        "lerobot.active_robot_cam.capture",
+        "vision.utm_runtime.start",
+        "lerobot.rollout.start",
+        "robot.pick_place",
+        "equipment.pyautogui.run",
+        "utm.run_protocol",
+    ):
+        tools.register(tool_name, forbidden_actuation)
+
+    first_spec = controller._apply_specimen_printer_choice_to_spec(
+        controller._default_test_constraints({}),
+        "physical_print",
+    )
+    first_spec.update(
+        {
+            "test_mode_llm_generated": True,
+            "candidate_id": "safe-cycle-01",
+            "test_total_cycles": 20,
+            "specimen_id": "specimen-safe-cycle-01",
+            "execution_policy": {
+                "printer": "preflight_only",
+                "manipulation": "preflight_only",
+                "lab_equipment": "preflight_only",
+                "cae": "execute",
+                "analysis": "execute",
+                "bo": "execute",
+            },
+        }
+    )
+    controller._state.mode = Mode.TEST
+    controller._state.active_goal = "maximize exact 50 percent compression energy density"
+    controller._state.current_experiment_spec = dict(first_spec)
+    controller._bind_planning_cycle_contract(first_spec)
+
+    def install_specimen_contract(spec: dict[str, object]) -> None:
+        specimen_id = str(spec["specimen_id"])
+        for key in ("vision_preflight", "manipulation_preflight", "equipment_preflight"):
+            controller._state.run_metadata.pop(key, None)
+        controller._state.latest_observations = {}
+        controller._state.run_metadata["specimen_result"] = {
+            "ok": True,
+            "specimen_id": specimen_id,
+            "candidate_id": str(spec["candidate_id"]),
+            "handoff_status": "ready",
+            "stl_path": f"virtual://{specimen_id}.stl",
+            "fabrication_report": {
+                "schema": "fabrication_report.v1",
+                "fabrication_outcome": {"status": "preflight_complete", "location": "not_actuated"},
+            },
+        }
+        controller._state.run_metadata["printer_preflight"] = {
+            "schema": "printer_preflight.v1",
+            "run_id": controller._state.run_id,
+            "status": "execution_ready_pending_approval",
+            "actuation_performed": False,
+            "upload_performed": False,
+            "start_command_published": False,
+            "specimen_id": specimen_id,
+            "candidate_id": str(spec["candidate_id"]),
+            "plate_id": 1,
+            "immutable_artifact_path": f"virtual://{specimen_id}.autoeject.gcode.3mf",
+            "artifact_sha256": f"{int(str(spec['candidate_id']).rsplit('-', 1)[-1]):064x}",
+            "source_object_bounds_mm": {
+                "min_x": 120.0,
+                "max_x": 150.0,
+                "min_y": 110.0,
+                "max_y": 140.0,
+                "center_x_mm": 135.0,
+                "center_y_mm": 125.0,
+            },
+        }
+
+    install_specimen_contract(first_spec)
+    applied_recommendations: list[dict[str, float]] = []
+
+    async def fast_design_stage(
+        *,
+        previous_spec: dict[str, object] | None,
+        design_constraints: dict[str, object],
+        cycle_index: int,
+        total_cycles: int,
+        emit_handoff: bool,
+    ) -> dict[str, object]:
+        del total_cycles, emit_handoff
+        spec = dict(previous_spec or first_spec)
+        recommendation = controller._state.run_metadata.get("bo_recommended_constraints")
+        assert isinstance(recommendation, dict)
+        applied = {
+            "cell_size_mm": float(recommendation["cell_size_mm"]),
+            "relative_density": float(recommendation["relative_density"]),
+        }
+        applied_recommendations.append(applied)
+        spec.update(design_constraints)
+        spec.update(recommendation)
+        spec["candidate_id"] = f"safe-cycle-{cycle_index:02d}"
+        spec["specimen_id"] = f"specimen-safe-cycle-{cycle_index:02d}"
+        spec["execution_policy"] = dict(first_spec["execution_policy"])
+        return spec
+
+    async def fast_specimen_stage(spec: dict[str, object], *, emit_handoff: bool = True) -> dict[str, object]:
+        del emit_handoff
+        controller._state.current_experiment_spec = dict(spec)
+        install_specimen_contract(spec)
+        return {"pending": False, "specimen": controller._state.run_metadata["specimen_result"]}
+
+    original_tail = controller._run_planning_loop_tail
+    cycle_records: list[dict[str, object]] = []
+
+    async def audited_tail(
+        spec: dict[str, object],
+        *,
+        cycle_index: int = 1,
+        total_cycles: int = 1,
+    ) -> dict[str, object]:
+        result = await original_tail(spec, cycle_index=cycle_index, total_cycles=total_cycles)
+        observation = controller._state.latest_analysis.get("bo_observation", {})
+        assert observation["status"] == "ready"
+        assert observation["metric_name"] == "energy_density_50pct_MJ_per_m3"
+        assert observation["fidelity"] == "cae_mid"
+        assert observation["objective_score"] > 0.0
+        for key, schema in (
+            ("printer_preflight", "printer_preflight.v1"),
+            ("vision_preflight", "vision_preflight.v1"),
+            ("manipulation_preflight", "manipulation_preflight.v1"),
+            ("equipment_preflight", "equipment_preflight.v1"),
+        ):
+            record = controller._state.run_metadata[key]
+            assert record["schema"] == schema
+            assert record["status"] == "execution_ready_pending_approval"
+            assert record["actuation_performed"] is False
+        assert controller._state.current_experiment_spec["execution_policy"] == first_spec["execution_policy"]
+        cycle_records.append(
+            {
+                "cycle_index": cycle_index,
+                "cell_size_mm": float(spec["cell_size_mm"]),
+                "relative_density": float(spec["relative_density"]),
+                "objective_score": float(observation["objective_score"]),
+            }
+        )
+        return result
+
+    monkeypatch.setattr(controller, "_run_planning_design_stage", fast_design_stage)
+    monkeypatch.setattr(controller, "_run_planning_specimen_stage", fast_specimen_stage)
+    monkeypatch.setattr(controller, "_run_planning_loop_tail", audited_tail)
+
+    result = await controller._run_planning_cycle_series(
+        first_spec=first_spec,
+        design_constraints=first_spec,
+        start_cycle=1,
+    )
+
+    assert result["ok"] is True
+    assert len(cycle_records) == 20
+    assert controller._state.loop_count == 20
+    assert len(applied_recommendations) == 19
+    for applied, cycle in zip(applied_recommendations, cycle_records[1:], strict=True):
+        assert cycle["cell_size_mm"] == pytest.approx(applied["cell_size_mm"])
+        assert cycle["relative_density"] == pytest.approx(applied["relative_density"])

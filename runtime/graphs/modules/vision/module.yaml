@@ -1,0 +1,70 @@
+module:
+  orchestration_contract:
+    version: orchestration_contract.v1
+    admission:
+      authority: existing_owner_and_runtime_validation
+      description: Descriptive only; absent evidence is unknown, not ready.
+    result:
+      required: ["observation"]
+    acceptance:
+      authority: policies/validation_policy.py and existing owner validators
+      description: existing owner vision validators remain authoritative
+  id: vision
+  label: Vision Agent Module
+  handler: agent.vision_agent
+  llm_role: vision_observation
+  editable: true
+  safety:
+    live_requires_validation: true
+    dry_run_supported: true
+    stale_signal_blocks_downstream: true
+  tools:
+  - lerobot.replay.status
+  - lerobot.replay.stop
+  - camera.capture
+  - lerobot.camera.test
+  - lerobot.active_robot_cam.capture
+  - lerobot.rollout.status
+  - lerobot.rollout.stop
+  - vision.utm_runtime.start
+  - vision.utm_specimen_presence.capture
+  execution_graph:
+    schema: ax4lab.execution_graph.v1
+    entry: prepare
+    nodes:
+    - {id: prepare, handler: vision.prepare, label: Task admission and preflight, area: guardian}
+    - {id: observe, handler: vision.observe, label: Composite observation / interlock / stop / review, area: middle, llm: true}
+    - {id: clearance, handler: vision.clearance, label: Composite UTM clearance verification and review, area: middle, llm: true}
+    - {id: deliver, handler: vision.deliver, label: Deliver observation result, area: middle}
+    - {id: deliver_prepared, handler: vision.deliver_prepared, label: Deliver preflight or stop result, area: middle}
+    - {id: deliver_clearance, handler: vision.deliver_clearance, label: Deliver clearance result, area: middle}
+    edges:
+    - {source: prepare, target: observe, 'on': ready, kind: validation}
+    - {source: prepare, target: clearance, 'on': clearance, kind: validation}
+    - {source: prepare, target: deliver_prepared, 'on': prepared_result, kind: evidence}
+    - {source: observe, target: deliver, 'on': next, kind: evidence}
+    - {source: clearance, target: deliver_clearance, 'on': next, kind: evidence}
+    terminals: [deliver, deliver_prepared, deliver_clearance]
+  io_contract:
+    input: OrchestratorState
+    output: AgentResult.data merged into OrchestratorState
+    preserves:
+    - observation.pose_estimate
+    - observation.pickup_target
+    - observation.transfer_readiness
+    produces:
+    - vision_report.v1
+    - vision_signal.v1
+    - vision_decision.v1
+    - decisions
+    - metrics
+    - evidence_refs
+  notes: >-
+    Vision Agent observes and emits freshness-bounded lab perception signals. It
+    selects bounded observation contracts and reviews detector facts with ordered
+    raw/annotated images through the shared LLM image protocol. It may invoke the
+    existing ActiveCam move/capture/return routine and stop an active rollout
+    after deterministic placement checks. Placement model review follows that
+    stop. It cannot start replay or command printer, UTM, or PyAutoGUI actions.
+    Downstream agents must reject stale `vision_signal.v1` signals whose
+    `expires_at` has passed.

@@ -1,0 +1,277 @@
+<!-- atr-doc
+doc_type: index
+subtype: index
+status: active
+authority: navigation
+audience:
+  - researcher
+  - reviewer
+  - artifact_evaluator
+  - operator
+  - developer
+scope:
+  - repository
+  - research_project
+summary: Research project overview of the AX4LAB system and supporting platform.
+related_docs:
+  - docs/README.ko.md
+  - docs/README.md
+  - system/standards/documentation_standard.md
+  - system/runtime/current_code_snapshot.md
+  - system/runtime/three_level_control_model.md
+  - system/modularity.md
+  - docs/project/CONTRIBUTING.md
+  - .github/SECURITY.md
+supersedes: []
+-->
+
+![AX4LAB — Autonomous Research Platform](docs/assets/branding/ax4lab-banner.png)
+
+<div align="center">
+
+# AX4LAB
+
+<sub>Autonomous Research Platform</sub>
+
+<p>
+  <a href="README.md"><img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat&amp;logo=python&amp;logoColor=white" alt="Python 3.11 or later"></a>
+  <a href="system/agents/agent_api_connection_matrix.md"><img src="https://img.shields.io/badge/FastAPI-10324D?style=flat&amp;logo=fastapi&amp;logoColor=white" alt="FastAPI"></a>
+  <a href="system/runtime/langgraph_runtime.md"><img src="https://img.shields.io/badge/LangGraph-10324D?style=flat&amp;logo=langgraph&amp;logoColor=white" alt="LangGraph"></a>
+  <a href="system/device_bridges/lerobot_bridge.md"><img src="https://img.shields.io/badge/LeRobot-10324D?style=flat&amp;logo=huggingface&amp;logoColor=white" alt="LeRobot"></a>
+  <a href="README.md"><img src="https://img.shields.io/badge/vLLM-10324D?style=flat" alt="vLLM"></a>
+</p>
+
+<p align="center"><a href="docs/README.ko.md">Korean</a></p>
+
+### Simple hardware. Structured intelligence. Self-driving laboratories.
+
+<p>
+  <strong>Multi-agent AI for existing laboratories.</strong><br>
+  Connect research reasoning, procedures, and device execution<br>
+  across AI-native robots, API-controlled devices, and PC-operated instruments.
+</p>
+
+<p>
+  <strong>Reuse equipment. Connect with VLA. Coordinate through software.</strong><br>
+  Designed to reduce reliance on bespoke fixtures and dedicated transfer automation<br>
+  while preserving existing equipment and the working environment.
+</p>
+
+</div>
+
+<p align="center">
+  <img src="docs/assets/branding/ax4lab-logo.png" alt="AX4LAB logo" width="180">
+</p>
+
+<div align="center">
+
+| Documentation | What you'll find |
+|:---:|:---:|
+| **[Control model](system/runtime/three_level_control_model.md)** | Reasoning, software processing, device execution, and their boundaries. |
+| **[System architecture](system/runtime/architecture.md)** | Orchestration, agent responsibilities, and execution interfaces. |
+| **[Modularity](system/modularity.md)** | Core and specialist ownership, packages, bridges, and configuration lifecycle. |
+| **[Agent references](system/agents/README.md)** | Each agent's role, LLM decisions, tools, and verification. |
+| **[Device bridges](system/device_bridges/README.md)** | Robotics, equipment, and computation integration contracts. |
+| **[Runtime IDE](system/runtime/runtime_ide.md)** | Plan editing, execution control, and run inspection. |
+| **[Results and evidence](system/runtime/evidence/2026-09-28-campaign-archive-audit.md)** | Demonstrated outcomes and their supporting artifacts. |
+| **[Setup and operation](runtime/install/README.md)** | Installation, configuration, and operator workflows. |
+| **[Cheat sheet](docs/cheatsheet.md)** | Common commands, GUI routes, settings, and quick fixes. |
+| **[Documentation index](docs/README.md)** | All references, guides, and documentation standards. |
+
+</div>
+
+## Graphical Abstract
+
+![AX4LAB transforms an existing laboratory through Multi-Agent AI orchestration, with a Device Bridge connecting AI-native, API-enabled, and PC-operated equipment](docs/assets/presentation/laboratory-transformation-sunburst.webp)
+
+*Multi-agent orchestration connects existing equipment through device bridges.*
+
+## Motivation
+
+<sub>Barriers to adopting self-driving laboratories.</sub>
+
+Building a self-driving laboratory remains a costly integration project, not
+simply a matter of adding an AI model. Existing laboratories contain useful
+instruments designed for human operation, while dedicated automation introduces
+additional hardware, software, and engineering requirements.
+
+- **Acquisition cost:** Replacing working instruments with automation-ready alternatives, or adding dedicated handling systems, increases the investment needed to begin.
+- **Integration complexity:** API-controlled devices, desktop-operated instruments, and manual sample handling expose different interfaces that must work together.
+- **Reconfiguration burden:** Automation tied to particular tasks, fixtures, and device combinations can require substantial reintegration when the experiment changes.
+
+These adoption challenges motivate work on
+[SDL accessibility](https://www.nature.com/articles/s41467-025-59231-1) and
+[modular laboratory interfaces](https://www.nist.gov/programs-projects/development-standards-support-modular-and-autonomous-laboratory-ecosystem).
+Our research question is: **How can an existing laboratory become self-driving
+without rebuilding its automation around every new experimental workflow?**
+
+![Three barriers between an existing laboratory and a self-driving laboratory: acquisition cost, integration complexity, and reconfiguration burden](docs/assets/presentation/self-driving-lab-barriers.webp)
+
+## System Contribution
+
+AX4LAB transforms existing laboratory capabilities through **hierarchical
+automation, multi-agent coordination, and VLA-based manipulation**. The AX4LAB
+framework places the integration logic in reusable software
+interfaces and agent-owned procedures while retaining existing instruments.
+
+![Three parallel system contributions: Hierarchical Automation, Multi-Agent Coordination, and VLA-Based Manipulation](docs/assets/presentation/ax4lab-transformation-approach.webp)
+
+| System contribution | How it addresses the barrier | Read more |
+|---|---|---|
+| Hierarchical automation and Device Bridges | High-Level decisions, Middle-Level procedures, and Low-Level tools separate research logic from API, desktop, and robot interfaces, enabling existing equipment to participate. | [Equipment interfaces](system/device_bridges/README.md) |
+| Multi-agent coordination | Specialist agents own task decisions, procedures, and evidence contracts; orchestration plans compose their capabilities so changes can be localized to the affected agents and interfaces. | [Agent responsibilities](system/agents/README.md) |
+| VLA-based physical integration | A learned-policy robot arm connects otherwise manual handling stages, offering an alternative to task-specific transfer fixtures; LeRobot separates supported robot integration from task coordination. | [Manipulation](system/agents/manipulation_agent.md) |
+
+The contribution is their **integration into a reusable research framework**:
+simple hardware, advanced software coordination, and experiment feedback through
+explicit agent handoffs. The current [experimental cycle](system/runtime/closed_loop_and_pages_reference.md)
+is one configured application of that architecture.
+
+## System Architecture
+
+The framework separates coordination between agents, responsibility within
+agents, and integration with laboratory equipment.
+
+### Framework
+
+The Orchestrator translates research intent into agent tasks and coordinates
+their results through a configurable Orchestration Plan. Specialist agents
+contribute capabilities to that plan rather than defining one fixed sequence.
+
+<p align="center">
+  <img src="docs/assets/presentation/framework-overview.webp" alt="Research intent, configurable Orchestration Plan, and specialist-agent task/result exchange" width="100%">
+</p>
+
+- Task routing and specialist-agent coordination — [System architecture](system/runtime/architecture.md).
+- Plan configuration and execution monitoring — [Runtime IDE](system/runtime/runtime_ide.md).
+
+### Agents
+
+High-Level control owns task decisions, Middle-Level control supervises
+procedures, and Low-Level tools perform execution. Guardian/Safety and
+Knowledge/Evidence span these responsibilities; they are not extra sequential
+stages. LLM decisions use the owning agent's permitted tools and evidence.
+
+![High-Level decisions, Middle-Level procedures, and Low-Level tools with cross-cutting Guardian/Safety and Knowledge/Evidence](docs/assets/presentation/agent-architecture.webp)
+
+- Responsibility levels and shared evidence — [Control model](system/runtime/three_level_control_model.md).
+
+### Integration
+
+Agent procedures reach laboratory capabilities through tools and Device
+Bridges. These adapters accommodate learned robot policies, device APIs, and
+desktop-operated instruments, keeping device-specific execution separate from
+the research plan.
+
+![Agent tools and Device Bridges connect learned robot policies, API-controlled devices, and PC-operated instruments](docs/assets/presentation/integration-architecture.webp)
+
+- Tool calls, contracts, and external connections — [API and connection matrix](system/agents/agent_api_connection_matrix.md).
+
+## Orchestration Route
+
+[![Main GUI runtime map showing agent routes, control gates, device bridges and evidence connections](docs/assets/readme/orchestration-route.svg)](docs/assets/readme/orchestration-route.svg "Open full-size SVG")
+
+The main GUI's runtime map shows the configured agent handoffs and conditional
+returns, alongside control, device-bridge and evidence connections.
+
+- Graph configuration and runtime inspection — [Runtime map and IDE](system/runtime/runtime_ide.md).
+
+## Demonstration and Evidence
+
+The latest [retained campaign audit](system/runtime/evidence/2026-09-28-campaign-archive-audit.md)
+reconciles **15 completed experimental observations** with per-iteration Gyroid
+STL, stress–strain curves, properties and BO input/next-point records. Matching
+artifact hashes and SEA normalization were checked; failed attempts and recovery
+history remain preserved. This is evidence of recorded multi-cycle operation,
+not a claim of unattended manufacturing or controlled scientific superiority.
+
+Earlier supervised mixed-mode one-cycle demonstrations remain separately
+documented, including their skipped deposition and specimen-identity limits.
+
+Compression testing is the current application example, **not the definition
+of the platform**.
+
+| Question | Evidence |
+|---|---|
+| What completed in the recorded cycle? | [Closed-loop results](system/runtime/evidence/2026-09-28-campaign-archive-audit.md) |
+| Which artifacts support the recorded results? | [Artifact checks and results](system/runtime/evidence/2026-09-28-campaign-archive-audit.md#results) |
+| How can the checks be reproduced? | [Archive inspection protocol](system/runtime/evidence/2026-09-28-campaign-archive-audit.md#reproduction-protocol) |
+| Where are per-cycle outputs retained? | [Loop artifact archiving](system/runtime/loop_artifact_archiving.md) |
+
+Agent-local API, local-model, and virtual-device checks are reported in the
+individual references. They do not replace physical validation. Comparative
+cost, causal scientific benefit, and reliability across independent campaigns
+remain evaluation work. The [documentation audit](system/maintenance/code_documentation_audit_20260928.md)
+separates main-code implementation, tests, campaign evidence and isolated RPT development.
+
+## Agent References
+
+Each linked reference opens with a role diagram and current status, followed by
+workflow, tools, interfaces, artifacts, and verification.
+
+| Agent | Responsibility | Detailed reference |
+|---|---|---|
+| Orchestrator | Interpret scoped intent, coordinate handoffs, and admit confirmed Setup only for the next new run | [Orchestrator](system/agents/orchestrator_agent.md) |
+| Design | Review candidate suitability and emit design specifications | [Design](system/agents/design_agent.md) |
+| Specimen Making | Evaluate fabrication suitability and call preparation tools | [Specimen Making](system/agents/specimen_agent.md) |
+| Vision | Capture observations and review visual evidence | [Vision](system/agents/vision_agent.md) |
+| Manipulation | Select robot skills and review transfer completion | [Manipulation](system/agents/manipulation_agent.md) |
+| Lab Equipment | Execute stored workflows and review acquisition results | [Lab Equipment](system/agents/equipment_agent.md) |
+| Analysis | Parse measurements, compute properties and SEA, and publish evidence for BO | [Analysis](system/agents/analysis_agent.md) |
+| Knowledge | Curate Markdown knowledge and retrieve scoped context | [Knowledge](system/agents/knowledge_agent.md) |
+| Bayesian Optimization | Select optimization strategy and review numerical proposals | [BO](system/agents/bo_agent.md) |
+| Guardian | Review execution evidence and advise continuation | [Guardian](system/agents/guardian_agent.md) |
+
+## Platform Contribution
+
+The supporting platform separates experiment logic from device interfaces,
+model backends, and operator workspaces. Its extension surfaces make the
+demonstrated system reusable; compatibility with another laboratory still
+requires integration and validation.
+
+[Platform architecture](system/modularity.md) ·
+[Runtime IDE](system/runtime/runtime_ide.md) ·
+[Interface contracts](system/agents/agent_api_connection_matrix.md)
+
+## Device Bridge References
+
+| Capability | Interface role | Reference |
+|---|---|---|
+| Printer fleet | Select and coordinate printer providers | [Printer Fleet](system/device_bridges/printer_fleet_bridge.md) |
+| Bambu Lab | Printer control and fabrication artifacts | [Bambu X2D](system/device_bridges/bambu_x2d_bridge.md) |
+| Prusa | Printer provider integration | [Prusa MK4S](system/device_bridges/prusa_mk4s_bridge.md) |
+| Robotics | Learned-policy execution, replay, and robot workspaces | [LeRobot](system/device_bridges/lerobot_bridge.md) |
+| Desktop instruments | Stored GUI workflows and acquisition | [Windows PyAutoGUI](system/device_bridges/windows_pyautogui_bridge.md) |
+| Test-area vision | Camera observations and verification evidence | [UTM Vision](system/device_bridges/utm_vision_bridge.md) |
+| Virtual devices | Deterministic substitutes for non-hardware tests | [Base and Simulators](system/device_bridges/base_simulator_bridges.md) |
+
+## Getting Started
+
+Executable source is under `runtime/`; maintained internal references are under
+`system/`, and public documentation is under `docs/`. Git, `.env` and the main
+`.venv` remain at the outer repository root. Private stores use explicit runtime
+path bindings; moving source does not migrate or activate existing state.
+Existing deployments must use the separately approved stopped-maintenance
+[layout cutover runbook](system/maintenance/repository_layout_cutover.md).
+
+For a screenshot-based tour of the existing application, see
+[GUI Structure and Screen Reference](system/runtime/gui/visual_structure.md):
+Main/Live navigation, agent reports, device workspaces, Runtime IDE and Replay
+at 1920 × 1080.
+
+| Reader | Start here |
+|---|---|
+| Researcher or reviewer | [Control model](system/runtime/three_level_control_model.md) → [Recorded results](system/runtime/evidence/2026-09-28-campaign-archive-audit.md) |
+| Operator | [Installation](runtime/install/README.md) → [First-run tutorial](docs/tutorials/first_autonomous_run.en.md) → [Device bridges](system/device_bridges/README.md) |
+| Developer | [Runtime reference](system/runtime/current_code_snapshot.md) → [Agent APIs](system/agents/agent_api_connection_matrix.md) |
+| Contributor | [Contributing](docs/project/CONTRIBUTING.md) → [Documentation rules](system/standards/documentation_standard.md) |
+
+Consult [operational limitations](system/runtime/guardian_graphwide_safety.md)
+before connecting physical equipment. [Security policy](.github/SECURITY.md) covers
+vulnerability reporting.
+
+## Citation and License
+
+Use the repository's [citation metadata](docs/paper/CITATION.cff) and [license](runtime/LICENSE).
+The research manuscript is maintained separately. Publication metadata is
+recorded only when available.

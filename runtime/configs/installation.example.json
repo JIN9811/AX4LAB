@@ -1,0 +1,48 @@
+{
+  "schema": "atr.installation.v1",
+  "resources": {
+    "utm": {
+      "workspace_root": "../external/UTM workspace",
+      "script_path": "../external/UTM workspace/scripts/start_utm_vision_stack.sh",
+      "ros_setup_paths": [
+        "/opt/ros/jazzy/setup.bash"
+      ],
+      "extra_setup_paths": [
+        "../external/UTM workspace/install/setup.bash",
+        "../external/yolo_ros/install/setup.bash"
+      ],
+      "yolo_model_path": "../external/yolo_ros/models/yolov8m.pt"
+    },
+    "realsense": {
+      "native_python_path": "../external/librealsense/build/Release",
+      "native_library_path": "../external/librealsense/build/Release",
+      "ros_setup_paths": [
+        "/opt/ros/jazzy/setup.bash"
+      ],
+      "extra_setup_paths": [
+        "runtime/ros/install/setup.bash"
+      ]
+    },
+    "lerobot": {
+      "conda_executable": "../external/miniconda3/bin/conda",
+      "conda_env_name": "lerobot",
+      "source_root": "../external/lerobot",
+      "dataset_root": "../model cache/lerobot",
+      "hf_home": "../model cache/huggingface",
+      "pi05_conda_env_name": "lerobot-pi05",
+      "xvla_conda_env_name": "lerobot-xvla",
+      "smolvla_conda_env_name": "lerobot-smolvla",
+      "pi05_repo_root": "../external/lerobot-pi05",
+      "pi05_hf_home": "../model cache/huggingface-pi05"
+    },
+    "slicer": {
+      "bambu_studio_executable": "C:\\Program Files\\Bambu Studio\\bambu-studio.exe",
+      "prusa_slicer_executable": "/usr/bin/prusa-slicer"
+    },
+    "isaac": {
+      "lab_root": "../external/IsaacLab",
+      "sim_python": "../external/IsaacSim/python.sh",
+      "scene_path": "runtime/sim/robotis_omx/scene/omx_table_layout_20260915.usda"
+    }
+  }
+}

@@ -1,0 +1,78 @@
+version: 1
+documents:
+  - system/maintenance/2026-10-23-latest-main-integration.md
+  - README.md
+  - docs/README.ko.md
+  - docs/project/CONTRIBUTING.md
+  - .github/SECURITY.md
+  - docs/project/CHANGELOG.md
+  - docs/README.md
+  - docs/cheatsheet.md
+  - system/runtime/gui/visual_structure.md
+  - docs/tutorials/first_autonomous_run.en.md
+  - docs/tutorials/first_autonomous_run.ko.md
+  - docs/tutorials/user_manual.en.md
+  - docs/tutorials/user_manual.ko.md
+  - docs/tutorials/device_workspace_3dp_usage.en.md
+  - docs/tutorials/device_workspace_3dp_usage.ko.md
+  - docs/tutorials/device_workspace_vision_camera_bridge_usage.en.md
+  - docs/tutorials/device_workspace_vision_camera_bridge_usage.ko.md
+  - system/modularity.md
+  - system/maintenance/repository_cleanup.md
+  - system/maintenance/code_documentation_audit_20260928.md
+  - system/retained-history/README.md
+  - system/standards/documentation_standard.md
+  - system/templates/document_types.md
+  - system/agents/README.md
+  - system/agents/agent_api_connection_matrix.md
+  - system/agents/orchestrator_agent.md
+  - system/agents/design_agent.md
+  - system/runtime/evidence/2026-09-07-design-gemma31b-virtual-api-verification.md
+  - system/agents/specimen_agent.md
+  - system/agents/vision_agent.md
+  - system/agents/manipulation_agent.md
+  - system/agents/equipment_agent.md
+  - system/agents/analysis_agent.md
+  - system/agents/knowledge_agent.md
+  - system/agents/bo_agent.md
+  - system/agents/guardian_agent.md
+  - system/device_bridges/README.md
+  - system/device_bridges/bridge_api_connection_matrix.md
+  - system/device_bridges/printer_fleet_bridge.md
+  - system/device_bridges/bambu_x2d_bridge.md
+  - system/device_bridges/prusa_mk4s_bridge.md
+  - system/device_bridges/lerobot_bridge.md
+  - system/device_bridges/windows_pyautogui_bridge.md
+  - system/device_bridges/utm_vision_bridge.md
+  - system/device_bridges/base_simulator_bridges.md
+  - system/device_bridges/plc_safety_bridge.md
+  - system/runtime/evidence/2026-09-07-supervised-closed-loop.md
+  - system/runtime/evidence/2026-09-07-latest-cycle-demonstration.md
+  - system/runtime/evidence/2026-09-28-campaign-archive-audit.md
+  - system/runtime/evidence/architecture_inspection.md
+  - system/runtime/evidence/documentation_validation.md
+  - system/runtime/current_code_snapshot.md
+  - system/runtime/runtime_ide.md
+  - system/runtime/loop_artifact_archiving.md
+  - system/runtime/evidence/2026-09-06-loop-artifact-archiving-tests.md
+  - system/runtime/evidence/2026-09-12-orchestrator-dynamic-setup-verification.md
+  - system/runtime/langgraph_runtime.md
+  - system/runtime/closed_loop_and_pages_reference.md
+  - system/runtime/three_level_control_model.md
+  - system/knowledge/markdown_memory_operations.ko.md
+  - system/knowledge/manual_rag_knowledge.ko.md
+  - system/specs/2026-10-01-repository-layout-design.md
+  - system/plans/2026-10-01-repository-layout-migration.md
+legacy_scope:
+  status: migration_debt
+  note: >-
+    Markdown documents outside this list retain their current locations and are
+    classified in later batches; they are not silently treated as compliant.
+snapshot:
+  document: system/runtime/current_code_snapshot.md
+  expected:
+    api_routes: 420
+    app_routes: 430
+    graph_nodes: 19
+    graph_edges: 73
+    stage_dispatch_edges: 12

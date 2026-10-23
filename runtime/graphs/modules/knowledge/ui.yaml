@@ -1,0 +1,22 @@
+ui:
+  short: KNW
+  icon: /static/live_gui_icons/knowledge_agent.svg
+  report_title: Knowledge Agent
+  chat:
+    mode: open_on_demand
+  renderer:
+    dashboard: module
+    report: module
+    fallback: descriptor
+  cards:
+  - {id: knowledge_activity, type: activity, title: Recorded Knowledge Activity, span: 12, tone: knowledge}
+  - {id: knowledge_delivery, type: handoff, title: Agent Knowledge Supply, span: 12, tone: knowledge}
+  - {id: knowledge_wiki, type: knowledge, title: Reference Library, span: 12, tone: knowledge}
+  - {id: knowledge_memory_intake, type: evidence, title: Recorded Knowledge Outcomes, span: 12, tone: knowledge}
+  - {id: knowledge_pattern_library, type: evidence, title: Learned Patterns, span: 12, tone: knowledge}
+  report_sections:
+  - id: knowledge_memory_report
+    title: Knowledge Memory / Evidence Update
+    selectors:
+      report: metadata.knowledge.knowledge_report
+      context: metadata.knowledge.knowledge_context

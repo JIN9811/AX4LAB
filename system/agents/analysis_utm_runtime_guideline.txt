@@ -1,0 +1,15 @@
+# Experimental Measurement Processing Guideline
+
+Canonical contract: [Analysis Agent](analysis_agent.md).
+
+1. Bind each measurement to the current run, loop and specimen evidence.
+2. Read the equipment-produced CSV/JSON or inline data using its declared parser and units.
+3. Obtain initial dimensions and the objective domain from experimental setup; do not infer fixed dimensions or loading limits.
+4. Normalize force/displacement and stress/strain without changing the source measurements.
+5. Compute numerical metrics and the configured objective over the requested, supported domain.
+6. Use bounded LLM processing selection and evidence review; numerical values remain code-owned.
+7. Block the BO observation when measurement identity, units, coverage or required geometry are invalid.
+8. Persist raw provenance, processed curves, metrics, decisions and the BO handoff in the existing loop-scoped archive.
+
+Virtual data must remain explicitly labeled. Never substitute synthetic data for missing real measurements.
+The Analysis package owns no device bridge and does not operate equipment.

@@ -1,0 +1,27 @@
+digraph bo_execution_effect_boundary {
+  graph [rankdir=TB, bgcolor="#FFFFFF", pad="0.35", nodesep="0.40", ranksep="0.50", fontname="DejaVu Sans", label="BO: five-area decision and execution boundary", labelloc="t", fontsize=22];
+  node [shape=box, style="rounded,filled", fillcolor="#EEF4FF", color="#315C9B", fontname="DejaVu Sans", fontsize=14, margin="0.18,0.12"];
+  edge [color="#52667A", fontname="DejaVu Sans", fontsize=12, arrowsize=0.8];
+  intake [label="Middle: freeze validated context\nObjective identity, observations, bounds, locks"];
+  high [label="High: BO-owned LLM decision\nStrategy / evidence sufficiency / tool choice", fillcolor="#F2ECFA", color="#6B4C9A", penwidth=2];
+  gate [label="Guardian / Safety\nAllowed tool, arguments, evidence refs\nPhase + settings + call-budget checks", fillcolor="#FFF1D6", color="#B26A00"];
+  inspect [label="Knowledge / Evidence\ninspect_diagnostics\nretrieve_knowledge", shape=note, fillcolor="#E9F7EF", color="#2E7D59"];
+  optimize [label="Middle: run_optimizer\nExisting experiment.benchmark\nLHS or BoTorch produces coordinates", penwidth=2];
+  result [label="Middle: freeze numeric result\nExact candidate ID + values + diagnostics"];
+  review [label="High: LLM result review\nAccept, inspect further, or return to owner", fillcolor="#F2ECFA", color="#6B4C9A"];
+  accept [label="accept_recommendation\nValidated solver candidate only\nExisting next_design_request.v1", fillcolor="#E9F7EF", color="#2E7D59"];
+  hold [label="return_to_owner / invalid request / error\nNo ready candidate; preserve evidence", fillcolor="#FFE9E7", color="#A33A32"];
+  archive [label="Knowledge / Evidence\nDecision and tool trace\nNumeric artifacts + loop identity", shape=note, fillcolor="#E9F7EF", color="#2E7D59"];
+  intake -> high -> gate;
+  gate -> inspect [label="read-only"];
+  inspect -> high [label="evidence IDs", style=dashed];
+  gate -> optimize [label="at most once"];
+  optimize -> result -> review;
+  review -> inspect [label="optional inspection", style=dashed];
+  review -> accept [label="ID + hard checks pass"];
+  high -> hold [label="return"];
+  gate -> hold [label="reject"];
+  review -> hold [label="not accepted"];
+  accept -> archive [style=dashed];
+  hold -> archive [style=dashed];
+}

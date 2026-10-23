@@ -1,0 +1,142 @@
+#usda 1.0
+(
+    customLayerData = {
+        string creator = "MuJoCo USD Converter v0.2.0"
+    }
+    defaultPrim = "omx"
+    doc = """Generated from Composed Stage of root layer /tmp/tmpi7god_44/omx.usdc
+
+
+Generated from Composed Stage of root layer /tmp/mjcf_import_omx_joyfm4np/usdex_omx/omx.usdc
+
+
+Generated from Composed Stage of root layer /tmp/mjcf_import_omx_joyfm4np/temp_omx/omx.usd
+
+
+Generated from Composed Stage of root layer sim/robotis_omx/omx/payloads/base.usd
+"""
+    kilogramsPerUnit = 1
+    metersPerUnit = 1
+    subLayers = [
+        @./physics.usda@
+    ]
+    upAxis = "Z"
+)
+
+over "omx"
+{
+    over "Geometry"
+    {
+        over "link0" (
+            prepend apiSchemas = ["PhysxArticulationAPI"]
+        )
+        {
+            int physxArticulation:solverPositionIterationCount = 64
+            int physxArticulation:solverVelocityIterationCount = 4
+
+            over "link1"
+            {
+                over "link2"
+                {
+                    over "link3"
+                    {
+                        over "link4"
+                        {
+                            over "follower_05_tip_1" (
+                                prepend apiSchemas = ["PhysxCollisionAPI", "MaterialBindingAPI"]
+                            )
+                            {
+                                rel material:binding:physics = </omx/Physics/PhysicsMaterial>
+                                float physxCollision:contactOffset = 0.001
+                                float physxCollision:restOffset = 0
+                            }
+
+                            over "link5"
+                            {
+                                over "link6"
+                                {
+                                    over "follower_07_gripper_motorized_1" (
+                                        prepend apiSchemas = ["PhysxCollisionAPI", "MaterialBindingAPI"]
+                                    )
+                                    {
+                                        rel material:binding:physics = </omx/Physics/PhysicsMaterial>
+                                        float physxCollision:contactOffset = 0.0005
+                                        float physxCollision:restOffset = 0
+                                    }
+
+                                    over "Gripper" (
+                                        prepend apiSchemas = ["PhysxJointAPI"]
+                                    )
+                                    {
+                                        float physxJoint:armature = 0.1
+                                        float physxJoint:jointFriction = 0.1
+                                    }
+                                }
+
+                                over "link7"
+                                {
+                                    over "follower_08_gripper_gear_1" (
+                                        prepend apiSchemas = ["PhysxCollisionAPI", "MaterialBindingAPI"]
+                                    )
+                                    {
+                                        rel material:binding:physics = </omx/Physics/PhysicsMaterial>
+                                        float physxCollision:contactOffset = 0.0005
+                                        float physxCollision:restOffset = 0
+                                    }
+
+                                    over "Gripper_mimic" (
+                                        prepend apiSchemas = ["PhysxJointAPI"]
+                                    )
+                                    {
+                                        float physxJoint:armature = 0.1
+                                        float physxJoint:jointFriction = 0.1
+                                    }
+                                }
+
+                                over "Joint5" (
+                                    prepend apiSchemas = ["PhysxJointAPI"]
+                                )
+                                {
+                                    float physxJoint:armature = 0.1
+                                    float physxJoint:jointFriction = 0.1
+                                }
+                            }
+
+                            over "Joint4" (
+                                prepend apiSchemas = ["PhysxJointAPI"]
+                            )
+                            {
+                                float physxJoint:armature = 0.1
+                                float physxJoint:jointFriction = 0.1
+                            }
+                        }
+
+                        over "Joint3" (
+                            prepend apiSchemas = ["PhysxJointAPI"]
+                        )
+                        {
+                            float physxJoint:armature = 0.1
+                            float physxJoint:jointFriction = 0.1
+                        }
+                    }
+
+                    over "Joint2" (
+                        prepend apiSchemas = ["PhysxJointAPI"]
+                    )
+                    {
+                        float physxJoint:armature = 0.1
+                        float physxJoint:jointFriction = 0.1
+                    }
+                }
+
+                over "Joint1" (
+                    prepend apiSchemas = ["PhysxJointAPI"]
+                )
+                {
+                    float physxJoint:armature = 0.1
+                    float physxJoint:jointFriction = 0.1
+                }
+            }
+        }
+    }
+}

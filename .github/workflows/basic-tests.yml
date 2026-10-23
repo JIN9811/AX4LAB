@@ -1,0 +1,96 @@
+name: Basic Tests
+
+on:
+  push:
+    branches: ["main", "feature-*"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e "./runtime[dev]"
+
+      - name: Syntax check
+        run: |
+          python -m py_compile \
+            runtime/experiments/*.py \
+            runtime/mcp_tools/*.py \
+            runtime/agents/*.py \
+            runtime/orchestrator/*.py \
+            runtime/app/*.py
+
+      - name: Lightweight unit tests
+        env:
+          AUTONOMOUS_USE_REAL_LLM_IN_TEST: "0"
+          AUTONOMOUS_ALLOW_MOCK_FALLBACK: "1"
+          AUTONOMOUS_BACKEND: "ollama"
+          OLLAMA_BASE_URL: "http://127.0.0.1:9"
+        run: |
+          pytest \
+            runtime/tests/unit/test_experiment_runtime.py \
+            runtime/tests/unit/test_model_router.py \
+            runtime/tests/unit/test_printer_tools.py \
+            runtime/tests/unit/test_printer_profile.py \
+            runtime/tests/unit/test_guardian_agent.py \
+            runtime/tests/unit/test_distribution_layout.py
+
+  windows-bridge:
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Windows bridge test dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      - name: Parse PowerShell deployment scripts
+        shell: pwsh
+        run: |
+          Get-ChildItem runtime/Pyautogui_server_for_window -Recurse -Filter *.ps1 | ForEach-Object {
+            [scriptblock]::Create((Get-Content -LiteralPath $_.FullName -Raw)) | Out-Null
+          }
+
+      - name: Validate bridge source and packaging contracts
+        shell: pwsh
+        run: |
+          python -m py_compile runtime/Pyautogui_server_for_window/bridge/windows_pyautogui_bridge_server.py
+          pytest -q runtime/tests/unit/test_windows_pyautogui_bridge_server_helper.py
+          pytest -q `
+            runtime/tests/unit/test_install_packaging.py::test_windows_bridge_release_contains_reproducible_installer_and_runtime_dependencies `
+            runtime/tests/unit/test_install_packaging.py::test_windows_bridge_scripts_use_one_data_root_and_bundle_demo_assets `
+            runtime/tests/unit/test_install_packaging.py::test_basic_ci_has_windows_bridge_job
+
+      - name: Validate native acceptance command surface
+        shell: pwsh
+        run: |
+          Get-Help ./runtime/Pyautogui_server_for_window/scripts/native_acceptance.ps1 | Out-Null
+
+      - name: Verify native Windows bootstrap paths without side effects
+        shell: pwsh
+        run: |
+          pytest -q runtime/tests/unit/test_windows_bootstrap_paths.py

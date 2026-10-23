@@ -1,0 +1,794 @@
+Project_guide.txt
+
+Project Title
+Autonomous Researcher Framework for Low-Cost Self-Driving Lab on DGX Spark
+
+Project Goal
+Build a modular, maintainable, local-first autonomous research framework that runs on DGX Spark and uses:
+- NVIDIA NemoClaw / OpenShell-style secure runtime assumptions
+- Ollama-based local model serving
+- MCP-compatible tool interfaces
+- Autonomous Experiment Runtime for common objective/evaluation records
+- LangGraph-based orchestration
+- Test mode for every hardware-facing subsystem
+- Central GUI for monitoring full system state
+- Structured logging and error tracking
+- Codex-driven build/verify workflow
+
+Core Design Principles
+1. Orchestrator-centric architecture
+   - The top-level system is centered on the Autonomous Researcher Architecture.
+   - The primary control flow is driven by the config-driven LangGraph runtime.
+
+2. Local-first execution
+   - All reasoning and orchestration should run with local models via Ollama.
+   - No cloud dependency should be required for normal operation.
+   - Model routing must be configurable.
+
+3. Strict modularity
+   - Every agent, bridge, logger, GUI panel, and test harness must be removable or replaceable with minimal code changes.
+   - Every module must expose a clean interface and avoid hidden coupling.
+
+4. Testability first
+   - Every device-facing subsystem must support a test mode.
+   - Test mode must be executable from the main orchestration loop.
+   - The framework must be runnable without real hardware for development, debugging, and demo purposes.
+   - Test, virtual, and live execution should share the same public Experiment Evaluation API.
+
+5. Maintainability
+   - Every file must include clear maintenance comments.
+   - Folder structure must be explicit and scalable.
+   - Functions and classes must be typed and documented.
+
+6. Codex execution philosophy
+   - When generating code, Codex should follow an internal agent loop:
+     plan -> generate -> run tests -> inspect logs -> revise -> verify
+   - The project should be structured so Codex can iteratively modify and validate parts independently.
+
+==================================================
+1. System Architecture
+==================================================
+
+Top-Level Architecture
+
+[User / Researcher]
+        |
+        v
+[Main GUI + Main Controller]
+        |
+        v
+[LangGraph Orchestrator]
+        |
+        +--> [Design Agent]
+        +--> [BO Agent]
+        +--> [Knowledge Agent]
+        +--> [Analysis Agent]
+        +--> [Guardian Agent]
+        +--> [Specimen Making Agent]
+        +--> [Vision Agent]
+        +--> [Manipulation Agent]
+        +--> [Lab Equipment Agent]
+        |
+        v
+[Autonomous Experiment Runtime]
+        |
+        +--> [ExperimentObjective / ExperimentCandidate / ExperimentExecution]
+        +--> [experiment.evaluate]
+        +--> [experiment.benchmark: random / grid / BO]
+        +--> [Device Job Queue + Session/Experiment ID]
+        |
+        v
+[MCP Tool / Device Interface Layer]
+        |
+        +--> [Ollama Local Models]
+        +--> [BambuLab X2D Bridge: default 3DP provider]
+        +--> [Prusa Bridge]
+        +--> [RealSense Bridge]
+        +--> [Robot Bridge]
+        +--> [UTM Macro Bridge]
+        +--> [Test Simulators]
+        |
+        v
+[Experiment DB / Failure Memory / Logs / File Storage]
+
+Autonomous Experiment Runtime rule
+- The runtime layer improves the current system rather than replacing it.
+- Existing agents and MCP tools remain the owner of their domain-specific logic.
+- `experiment.evaluate` is the standard API for executing/evaluating a candidate.
+- `experiment.benchmark` is the standard API for comparing random/grid/BO proposal strategies.
+- Hardware-facing tools must attach device job/session metadata when they perform queued work.
+
+==================================================
+2. Model Allocation Policy
+==================================================
+
+Primary local serving backend
+- NemoClaw / vLLM by default.
+- Ollama / NemoClaw proxy remains an optional branch for compatibility.
+
+Model roles
+1. Gemma 4 31B orchestration model
+   - Use as the default top-level Live GUI orchestrator model when loaded, prioritizing planning quality and handoff reliability
+   - Responsibilities:
+     - task decomposition
+     - agent routing
+     - high-level planning
+     - recovery decisions
+     - experiment loop control
+     - summary/report generation
+
+2. E4B fast orchestration/design model
+   - Use as the orchestrator fallback and for lower-latency subordinate reasoning paths
+   - Load manually through the dashboard/CLI only when the operator intends to use it; server startup and Live GUI open must not auto-load it
+
+3. E4B subordinate reasoning model
+   - Reuse E4B for mid-level protocol reasoning where longer reasoning depth is needed but not full 31B cost
+   - Suggested responsibilities:
+     - Design Agent
+     - Analysis Agent
+     - Knowledge Agent query reasoning
+     - Guardian policy explanation / structured reasoning
+
+4. Auxiliary E4B model
+   - Use a single subordinate reasoning model for lightweight repeated sub-protocol tasks
+   - Suggested responsibilities:
+     - structured parsing
+     - device command templating
+     - short tool-call formatting
+     - GUI helper text
+     - low-cost test loop reasoning
+     - internal preprocessing prompts
+
+Model router requirements
+- A dedicated model_router module must decide which model to call by task type.
+- The router must be configurable from YAML.
+- Fallback rules must exist if one model is unavailable.
+- Test mode must allow replacement of model calls with deterministic mock outputs.
+
+==================================================
+3. Required Agents
+==================================================
+
+3.1 Orchestrator Agent
+Purpose
+- Owns the global state machine
+- Routes work between agents
+- Manages the experiment loop
+- Triggers test mode runs
+- Sends state updates to GUI
+
+Inputs
+- user goal
+- current state
+- budget
+- constraints
+- device health
+- previous experiment memory
+
+Outputs
+- next stage decision
+- selected agent call
+- loop termination decision
+
+3.2 Design Agent
+Purpose
+- Propose next experiment
+- Support DOE / Bayesian Optimization / Active Learning
+- Respect constraints and cost
+- Emit candidates that can be wrapped as `ExperimentCandidate`
+
+3.2.1 BO Agent
+Purpose
+- Provide advisory Bayesian Optimization / model-based optimization over the current experiment objective.
+- Compare random/grid/BO candidate proposal behavior through `experiment.benchmark`.
+- Expose acquisition controls through the dedicated `/bo` workspace.
+- Recommend candidate parameters for later Design Agent constraint merging.
+
+Modes
+- test/virtual mode by default; no hardware writes.
+- live mode remains advisory unless a downstream agent explicitly executes the selected experiment.
+
+Important rule
+- BO Agent is a mandatory LangGraph runtime stage after Knowledge Agent and before Guardian Agent.
+- BO Agent must not generate STL, slice G-code, move robots, or start prints.
+
+Modes
+- live mode
+- test mode with synthetic candidate generation
+
+3.3 Analysis Agent
+Purpose
+- Parse UTM compression/tensile output curves from Lab Equipment Agent
+- Compute UTM features/objectives: peak force, stiffness, strength, modulus, strain at peak, energy absorption, and specific energy absorption
+- Run CAE closed-loop analysis through `cae.run_static_analysis` when available
+- Use bottom fixed support and top cyclic loading as the default CAE boundary/loading setup
+- Estimate uncertainty from data source and curve quality
+- Produce compact summaries for GUI and memory
+- Consume `ExperimentEvaluationResult` records when available
+- In test mode, generate a deterministic synthetic UTM curve only when no UTM data file/inline curve is available.
+- In test mode, use deterministic equivalent CAE metrics as an additional closed-loop scoring signal.
+- In live mode, require real UTM data from `equipment_result.utm_data` or a readable `result_file`/CSV/JSON path; missing data must block analysis instead of fabricating metrics.
+
+Modes
+- live mode from real UTM experiment files or inline bridge data
+- test mode from real/saved UTM data when provided, otherwise deterministic synthetic UTM data plus deterministic equivalent CAE data
+
+3.4 Knowledge Agent
+Purpose
+- Maintain experiment database access
+- Maintain failure memory
+- Support retrieval and summarization
+- Track prior experiment outcomes
+
+Modes
+- live DB mode
+- in-memory test DB mode
+
+3.5 Guardian Agent
+Purpose
+- Validate candidate experiments
+- Detect anomalies and dangerous states
+- Decide retry / recover / safe-stop
+- Monitor consistency between expected and observed state
+
+Modes
+- live safety enforcement
+- simulation safety mode
+
+3.6 Specimen Making Agent
+Purpose
+- Trigger specimen creation/preparation workflow
+- Delegate print/ejection preparation through `experiment.evaluate -> printer.prepare`
+- Cache existing specimens if possible
+- Surface active-printer slicing settings, G-code/3MF output path, storage readiness, upload/start result, transport/endpoints, and printer.prepare step trace to Live GUI
+- Produce `fabrication_report.v1` with fabrication intent, digital thread, process plan, quality gates, printer runtime, monitoring plan, outcome, and feedback to Design/Knowledge/BO
+- Produce `specimen_fabricated.v1` as the downstream handoff packet for Vision, Manipulation, Knowledge, and BO
+- Do not duplicate Design Agent STL preview rendering
+
+Modes
+- live selected printer bridge
+- test printer simulator
+- Live GUI test-mode virtual printer bridge
+- Live GUI test-mode installed-printer read-only communication check
+- Live GUI/Main GUI test-mode explicit actual-print path for a test-generated specimen
+- Normal Live GUI `실험 수행` uses the active printer profile selected by `PrinterFleetRegistry`.
+- The default physical printer profile is Bambu Lab X2D. Prusa MK4S remains available only when explicitly selected, and the runtime must not silently fallback from one printer vendor to another.
+- Bambu Lab X2D bridge details are documented in `docs/hardware/bambulab_x2d_device_bridge_runtime_guideline.md`. The bridge separates fleet/provider selection, Bambu Studio/Orca slicing, MQTT status/control, FTPS/HTTP artifact transfer, camera evidence, native G-code autoejection validation, and bed-clear gate.
+- Auto ejection is printer-provider-specific. Prusa uses the existing bed-sweep append-G-code path when explicitly enabled. Bambu actual prints use the native `bambu_gcode_patch` path: sliced artifact -> `.autoeject.gcode.3mf` artifact -> validator evidence -> transfer/start gate -> bed-clear gate. Bambu standalone autoejection tests use the same guarded project-file route: `/api/printer/autoejection-test -> standalone .autoeject.gcode.3mf -> MQTT project_file`, recorded in `memory/bambu_autoejection.json.runtime_paths`. The current 3D GUI does not expose manual approval/checklist widgets; requests use owner-managed defaults (`operator_confirmed=true`, `guardian_approved=true`, `dry_run=false`, `operator_managed=true`) while the backend still blocks physical motion on artifact validity, printer safe-state, camera/bed-clear evidence, geometry validation, and post-publish observation.
+- Bambu standalone autoejection must not silently add homing. `home_after_standalone=false` is the current runtime contract; unexpected `G28` inside the generated ejection tail is blocked by the validator.
+- For Bambu publish, `published=true` only means the MQTT `project_file` command was acknowledged. The runtime must attach a fresh post-publish observation and only treat the start as successful when the observed printer state/progress moves into a running/preparing state. IDLE/not-started after ack is `BAMBU_PROJECT_FILE_ACCEPTED_BUT_NOT_STARTED`.
+- For Bambu `.autoeject.*` publish, manual ejection-path checkboxes are not part of the runtime gate. The workstation owner/operator manages front path, ramp/bin, toolhead cover, release surface, and supervision outside the UI; backend evidence records this as `operator_managed=true` while continuing to enforce printer-state, camera, geometry, bed-clear, and start/publish gates.
+- Bambu physical autoejection completion is audited separately. The 3D GUI `Physical Proof Package` controls and `scripts/audit_bambu_autoejection_completion.py` only read/write proof packages; they must not move the printer. Completion requires file-backed camera evidence, post-publish observation, patch manifest/hash evidence, bed-clear evidence, and next-job gate evidence.
+- Design Agent must attach `bambu_autoejection_readiness` to the authoritative experiment spec and design report. The field records `ejection_contact_edge`, `bed_contact_area_mm2`, `bed_contact_area_ratio`, `minimum_pushable_height_mm`, `pushable_edge_height_mm`, object height, and skirt/brim/raft policy before slicing. Specimen Making must preserve the same object in `fabrication_report.process_plan` and the Live GUI specimen report so the printer bridge validator can be interpreted against the original design intent.
+
+3.7 Vision Agent
+Purpose
+- Capture top and wrist camera observations
+- Estimate pose/alignment
+- Detect visible anomalies
+- Provide observations to Manipulation Agent and Guardian
+- After Specimen Making, perform the lightweight 3DP output-area pickup check.
+- Return `pose_estimate`, `pickup_target`, and `transfer_readiness` so the robot policy does not start without a current observation.
+
+Modes
+- live camera mode
+- test mode using stored images or generated dummy frames
+
+3.8 Manipulation Agent
+Purpose
+- Execute pick / place / alignment / transfer tasks
+- Use VLA policy as execution logic
+- Support two bounded short skills: `transfer_to_utm` (`3dp_output_area -> utm_fixture`) and `clear_utm_to_disposal` (`utm_fixture -> discard_bin`).
+- After a ready 3DP specimen and Vision observation, default to Pi0.5 LeRobot rollout for `transfer_to_utm`.
+- Keep X-VLA and SmolVLA as operator-selectable VLA backends for training/rollout experiments; they must not replace the Pi0.5 default transfer path until real rollout success rates justify that change.
+- Keep `fixed_kinematic` available as an explicit compatibility strategy.
+- Use `lerobot.rollout.start`; do not construct LeRobot shell commands inside the agent.
+- Treat Pi0.5 as the low-level VLA executor only. Manipulation Agent owns preflight, task stage, Vision verification dependency, and Guardian/next-agent handoff.
+- Emit `manipulation_report.v1` and `robot_task_result.v1` while preserving legacy `manipulation` and `protocol_note` keys.
+- The `/lerobot` GUI is the Manipulation Agent management surface. Its bridge panel may run the actual Manipulation Agent with selected task, policy/profile/specimen/observation/RTC options.
+- The bridge panel must provide `Save Agent Defaults` and `Test Agent Bridge`. Saved defaults live in `memory/manipulation_agent_bridge.json` and are read by the live/test loop before each Manipulation Agent run; explicit experiment spec fields override saved defaults.
+- Successful rollout without Vision verification must be surfaced as `needs_post_place_vision` or `needs_post_disposal_vision`, not silently treated as final verified handoff.
+
+Modes
+- live robot mode with saved LeRobot profile, camera identities, policy path/repo, and `confirm_live_execute=true`
+- test mode through deterministic LeRobot rollout session using `fake_omx_ai` and a fake or local policy reference such as `fake://pi05_policy`, `fake://xvla_policy`, or `fake://smolvla_policy`
+
+3.9 Lab Equipment Agent
+Purpose
+- Control UTM and other experiment equipment
+- Start/stop test protocols
+- Capture raw result files
+- Report run state
+- Use Windows PyAutoGUI Bridge as the primary macro-control path for Windows-hosted equipment software.
+- Run after Manipulation Agent and before Analysis Agent in the main loop.
+- Return `equipment_result`, `protocol_note`, and `equipment_handoff`.
+- Failed PyAutoGUI bridge results must block stage progression and trigger retry/error rather than silently continuing to Analysis.
+
+Modes
+- live macro bridge
+- test equipment simulator
+
+3.10 CAE Analysis Tool
+Purpose
+- Provide simulation-side mechanical checks for generated specimens
+- Expose a dedicated CAE workspace GUI at `/cae`
+- Return `cae_metrics` for Analysis Agent, Knowledge, Guardian, and BO-style closed-loop evaluation
+
+Default setup
+- bottom face fixed support
+- top face cyclic compression loading
+- CalculiX/ccx solver family
+- Gmsh mesher family
+
+Modes
+- test mode deterministic equivalent CAE, no external solver required
+- live mode solver preflight and gated solver execution path
+
+==================================================
+4. Test Mode Requirements
+==================================================
+
+Absolute rule
+- Every hardware-coupled module must have a test mode.
+- Test mode must be invokable from the main orchestration GUI and the main orchestration loop.
+
+Test mode capabilities
+1. Full dry run
+   - Runs the full orchestration pipeline without real devices
+   - Uses synthetic outputs or stored sample data
+
+2. Per-agent dry run
+   - Run only one agent with mocked dependencies
+
+3. Step replay mode
+   - Replay a previously logged run from stored events
+
+4. Fault injection mode
+   - Intentionally simulate failure conditions:
+     - printer failure
+     - camera disconnect
+     - grasp failure
+     - UTM not ready
+     - model timeout
+     - malformed tool output
+
+5. Verification mode
+   - Compare actual output schema against expected schema
+   - Confirm state transitions are valid
+
+Main orchestration behavior
+- A GUI control and a CLI flag must both allow:
+  - live mode
+  - test mode
+  - replay mode
+  - fault-injection mode
+
+==================================================
+5. Logging and Error Handling
+==================================================
+
+Logging must be a first-class subsystem, not scattered ad hoc prints.
+
+Required logging layers
+1. System log
+   - framework startup/shutdown
+   - config loading
+   - mode selection
+   - routing decisions
+
+2. Agent log
+   - each agent call
+   - input summary
+   - output summary
+   - duration
+   - model used
+
+3. Tool/device log
+   - commands sent
+   - response received
+   - retries
+   - timeouts
+
+4. Error log
+   - structured exceptions
+   - stack trace
+   - related state snapshot
+   - recommended recovery action
+
+5. Experiment log
+   - design selected
+   - execution result
+   - analysis outcome
+   - objective score
+   - uncertainty
+
+6. Failure memory log
+   - failure type
+   - stage
+   - context
+   - recovery attempted
+   - final result
+
+Logging implementation requirements
+- Make a dedicated logging package.
+- Use structured JSON logging where possible.
+- Also create human-readable summary logs.
+- Include run IDs and experiment IDs in all relevant logs.
+- Logs must be visible in GUI and stored on disk.
+- The logger must work identically in test mode and live mode.
+
+==================================================
+6. MCP and LangGraph Requirements
+==================================================
+
+MCP usage
+- The system must use MCP-compatible abstractions for tool access.
+- Device bridges should be wrapped as tool endpoints with structured input/output schemas.
+- Model-side tool calling must not directly depend on raw hardware code.
+
+LangGraph usage
+- The orchestrator must be implemented with the LangGraph-backed runtime:
+  - explicit typed state object
+  - config-driven graph nodes
+  - allowlisted handler registry
+  - validated graph transitions
+  - module-declared pre-execution steps for any pre-stage agent calls; do not hide Design/Orchestrator coupling in Python run-loop conditionals
+  - Live GUI route text, prompt route descriptions, and post-Specimen planning tails must be derived from the active graph transitions, not duplicated as hard-coded Python lists
+  - legacy compatibility helpers such as stage-to-agent and default-next-stage must delegate to graph/module config instead of carrying separate hard-coded maps
+  - dry-run compile before live execution
+  - resumable execution support
+  - easy debugging of branch paths
+
+State requirements
+- A typed global state object must include:
+  - current mode
+  - current stage
+  - active goal
+  - device health
+  - current experiment spec
+  - latest observations
+  - latest analysis
+  - retry counters
+  - run metadata
+
+==================================================
+7. Main GUI Requirements
+==================================================
+
+The main entry point must include a GUI that shows the full system state.
+
+GUI requirements
+1. Global overview panel
+   - current mode
+   - active goal
+   - current stage
+   - current model routing
+   - overall health
+
+2. Agent status panel
+   - each agent state
+   - last run time
+   - success/failure
+   - test/live indicator
+
+3. Device status panel
+   - printer status
+   - robot status
+   - camera status
+   - UTM status
+   - CAE solver/bridge status
+   - simulator status if in test mode
+
+4. Run control panel
+   - start
+   - pause
+   - stop
+   - safe stop
+   - test mode toggle
+   - replay mode toggle
+   - fault injection menu
+
+5. Log viewer panel
+   - filter by run ID
+   - filter by agent
+   - filter by level
+   - show errors only
+
+6. Experiment memory panel
+   - previous runs
+   - best result
+   - recent failures
+   - suggested next experiment
+
+7. Configuration panel
+   - model selection
+   - mode selection
+   - path selection
+   - test dataset selection
+   - retry policy settings
+
+GUI framework
+- Use a Python GUI stack that is maintainable and practical.
+- Keep the GUI modular so additional panels can be attached or removed.
+
+==================================================
+8. Folder Structure
+==================================================
+
+Suggested project structure
+
+autonomous_researcher/
+├── README.md
+├── pyproject.toml
+├── requirements.txt
+├── .env.example
+├── configs/
+│   ├── system.yaml
+│   ├── models.yaml
+│   ├── devices.yaml
+│   ├── logging.yaml
+│   ├── gui.yaml
+│   ├── test_modes.yaml
+│   └── langgraph.yaml
+├── app/
+│   ├── main.py
+│   ├── cli.py
+│   └── bootstrap.py
+├── gui/
+│   ├── main_window.py
+│   ├── panels/
+│   │   ├── global_overview_panel.py
+│   │   ├── agent_status_panel.py
+│   │   ├── device_status_panel.py
+│   │   ├── run_control_panel.py
+│   │   ├── log_viewer_panel.py
+│   │   ├── experiment_memory_panel.py
+│   │   └── config_panel.py
+│   └── viewmodels/
+├── orchestrator/
+│   ├── graph.py
+│   ├── state.py
+│   ├── transitions.py
+│   ├── router.py
+│   ├── run_loop.py
+│   └── test_loop.py
+├── agents/
+│   ├── base_agent.py
+│   ├── orchestrator_agent.py
+│   ├── design_agent.py
+│   ├── analysis_agent.py
+│   ├── knowledge_agent.py
+│   ├── guardian_agent.py
+│   ├── specimen_agent.py
+│   ├── vision_agent.py
+│   ├── manipulation_agent.py
+│   └── equipment_agent.py
+├── submodules/
+│   └── vla/
+├── backends/
+│   ├── llm_backend.py
+│   ├── ollama_client.py
+│   ├── model_router.py
+│   ├── prompt_registry.py
+│   ├── mock_llm.py
+│   └── embedding_client.py
+├── mcp_tools/
+│   ├── schemas/
+│   ├── tool_registry.py
+│   ├── printer_tools.py
+│   ├── camera_tools.py
+│   ├── robot_tools.py
+│   ├── utm_tools.py
+│   └── mock_tools.py
+├── device_bridges/
+│   ├── base_bridge.py
+│   ├── prusa_bridge.py
+│   ├── realsense_bridge.py
+│   ├── robot_bridge.py
+│   ├── utm_macro_bridge.py
+│   └── simulator/
+│       ├── printer_sim.py
+│       ├── camera_sim.py
+│       ├── robot_sim.py
+│       └── utm_sim.py
+├── memory/
+│   ├── experiment_db.py
+│   ├── failure_memory.py
+│   ├── retrieval.py
+│   └── schemas.py
+├── learning/
+│   ├── surrogate_model.py
+│   ├── bo_engine.py
+│   ├── active_learning.py
+│   ├── uncertainty.py
+│   └── evaluation.py
+├── logging_system/
+│   ├── logger_factory.py
+│   ├── structured_logger.py
+│   ├── event_logger.py
+│   ├── error_logger.py
+│   └── run_trace.py
+├── policies/
+│   ├── retry_policy.py
+│   ├── recovery_policy.py
+│   ├── safe_stop_policy.py
+│   └── validation_policy.py
+├── utils/
+│   ├── paths.py
+│   ├── ids.py
+│   ├── timing.py
+│   ├── config_loader.py
+│   └── comments.py
+├── tests/
+│   ├── unit/
+│   ├── integration/
+│   ├── replay/
+│   └── fault_injection/
+└── docs/
+    ├── README.md
+    ├── project/
+    │   └── Project_guide.txt
+    ├── runtime/
+    │   ├── architecture.md
+    │   ├── agent_program_baseline.md
+    │   ├── test_mode.md
+    │   └── logging.md
+    ├── agents/
+    │   └── specimen_design_existing_runtime_guideline.txt
+    ├── hardware/
+    │   └── printer_agent_prusabridge_phase1_runtime_guideline.txt
+    ├── gui/
+    │   └── gui.md
+    ├── process/
+    │   └── codex_workflow.md
+    └── strategy/
+        └── low_cost_sdl_improvement_full_guideline.md
+
+==================================================
+9. File Commenting Rules
+==================================================
+
+Every file must begin with a maintenance header comment.
+
+Required header example
+
+File purpose:
+- What this file is responsible for
+
+Key classes/functions:
+- List core exported symbols
+
+Inputs/outputs:
+- Describe major interfaces
+
+Dependencies:
+- What this file depends on
+
+Modification guide:
+- Safe places to edit
+- Risky places to edit
+- Related files
+
+Additional rules
+- Add docstrings to every public class and function.
+- Add inline comments only where logic is non-obvious.
+- Do not add noisy comments that restate simple code.
+- Keep comments updated whenever logic changes.
+
+==================================================
+10. Modularity Rules
+==================================================
+
+All modules must be plug-and-play where possible.
+
+Rules
+1. Agent registration must be dynamic.
+2. Tool registration must be dynamic.
+3. GUI panels must be attachable/removable.
+4. Device bridges must be swappable between live and simulated implementations.
+5. Model backends must be swappable without changing agent logic.
+6. Policies must be configurable via YAML.
+7. New agents should be addable without rewriting the orchestrator core.
+
+Preferred approach
+- Use interfaces / abstract base classes
+- Use registries for agents/tools/panels
+- Use dependency injection from bootstrap/config
+
+==================================================
+11. Codex Build and Verification Workflow
+==================================================
+
+Codex must generate code under an internal loop.
+
+Required Codex workflow
+1. Read relevant guide/config/files
+2. Plan target modification
+3. Implement one bounded change
+4. Run related tests
+5. Inspect logs/errors
+6. Repair if needed
+7. Confirm schema/behavior
+8. Move to next bounded change
+
+Project requirements for this workflow
+- Tests must be runnable independently by folder/module.
+- Logging must make failures easy to localize.
+- Mock/test mode must allow quick validation without hardware.
+- Each module should have a narrow responsibility.
+
+Codex-focused development policy
+- Avoid giant monolithic files.
+- Prefer smaller files with stable interfaces.
+- Prefer explicit schemas and typed state objects.
+- Prefer deterministic test harnesses.
+
+==================================================
+12. Minimum Deliverables for First Working Version
+==================================================
+
+Phase 1
+- project skeleton
+- config loader
+- structured logging system
+- Ollama backend
+- model router
+- LangGraph-backed state + config-driven orchestrator runtime
+- mock MCP tools
+- main GUI shell
+- test mode end-to-end dry run
+
+Phase 2
+- Design Agent
+- Analysis Agent
+- Knowledge Agent
+- Guardian Agent
+- failure memory
+- replay mode
+- fault injection mode
+
+Phase 3
+- specimen/printer bridge
+- vision bridge
+- robot bridge
+- UTM macro bridge
+- live/test switching from GUI
+
+Phase 4
+- VLA integration
+- BO / AL integration
+- richer experiment memory
+- multi-run dashboard
+
+==================================================
+13. Non-Negotiable Constraints
+==================================================
+
+- NemoClaw/vLLM must be the default inference backend; Ollama remains an optional compatibility branch.
+- NemoClaw/vLLM managed models must support simultaneous residency for the active 31B orchestrator and the E4B subordinate model.
+- Test mode must exist for all device-facing components.
+- Test mode must be launchable from main orchestration and GUI.
+- Logging must be implemented as its own subsystem.
+- MCP and actual LangGraph runtime must be reflected in architecture.
+- 31B handles top orchestration by default, with E4B retained as the fast fallback/design model.
+- The E4B subordinate model handles subordinate protocol tasks.
+- Every file must include maintenance-oriented comments.
+- All files must live in structured folders.
+- Main must include a full-system GUI.
+- All modules must be addable/removable with minimal coupling.
+- Code generation and validation should support Codex iterative agent-loop execution.
+
+End of guide.
+
+
+LangGraph Runtime IDE update: graph edits must validate/compile before activation, transition edits must update YAML logical edges and actual runtime transitions, and module edits must expose both `pre_execution` and `internal_graph` step lists and use module validate/dry-run endpoints before live use. Python source editing remains forbidden from the Runtime IDE.
+
+2026-05-29 Vision Agent upgrade:
+- Vision Agent emits `vision_report.v1` and `vision_signal.v1` while preserving
+  legacy `observation.pose_estimate`, `pickup_target`, and `transfer_readiness`.
+- Vision signals include freshness (`timestamp`, `expires_at`, `stable_for_ms`),
+  confidence, zone id, consumer agents, and evidence refs.
+- Manipulation must block expired Vision signals and request refreshed perception
+  instead of using stale pickup/fixture state.
+- Vision observes only; it does not directly command robot, printer, UTM, or
+  PyAutoGUI equipment.

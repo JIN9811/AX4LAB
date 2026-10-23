@@ -1,0 +1,147 @@
+# Python / local environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+node_modules/
+.venv/
+venv/
+env/
+/env
+
+# Local secrets and machine-specific environment files
+memory/api_keys.json
+.env
+.env.*
+!.env.example
+/installation.local.json
+docs/runtime/api_keys.local.md
+*.pem
+*.key
+*token*
+*secret*
+*password*
+
+# Runtime/user state. Keep folder README files tracked.
+memory/*
+!memory/README.md
+!memory/.gitkeep
+!memory/__init__.py
+!memory/*.py
+runs/*
+!runs/README.md
+!runs/.gitkeep
+artifacts/*
+!artifacts/README.md
+!artifacts/.gitkeep
+outputs/*
+!outputs/README.md
+!outputs/.gitkeep
+output/*
+!output/README.md
+!output/.gitkeep
+# Raw Knowledge source inputs are private; only the inbox guide is public.
+docs/knowledge/manuals/sources/*
+!docs/knowledge/manuals/sources/README.md
+!docs/knowledge/manuals/sources/.gitkeep
+# Optional voice files are acquired locally, not redistributed by AX4LAB.
+/runtime/models/tts/piper/en_US-lessac-medium/*.onnx
+/runtime/models/tts/piper/en_US-lessac-medium/*.onnx.json
+user_files/*
+!user_files/README.md
+!user_files/.gitkeep
+logs/
+test-results/
+meta/
+
+# Generated hardware / experiment outputs
+/runtime/ros/build/
+/runtime/ros/install/
+/runtime/ros/log/
+/ros/build/
+/ros/install/
+/ros/log/
+/result.json
+*.stl
+*.gcode
+*.3mf
+*.obj
+*.ply
+*.step
+*.stp
+*.log
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
+
+# Local GUI/image rendering environments
+image/.render_venv/
+.superpowers/
+
+# Generated Graphify cache; runtime graph artifacts already live under memory/.
+/graphify-out/
+
+# Local-only retired outputs may contain screenshots, recordings or personal data.
+/oldversion/
+
+# Split-layout private stores; publication guard also rejects forced additions.
+/workspace/
+/runtime/memory/*
+!/runtime/memory/README.md
+!/runtime/memory/__init__.py
+!/runtime/memory/experiment_db.py
+!/runtime/memory/failure_memory.py
+!/runtime/memory/retrieval.py
+!/runtime/memory/schemas.py
+/runtime/runs/*
+!/runtime/runs/README.md
+/runtime/artifacts/*
+!/runtime/artifacts/README.md
+/runtime/output/
+/runtime/outputs/*
+!/runtime/outputs/README.md
+/runtime/user_files/*
+!/runtime/user_files/README.md
+/runtime/logs/
+/runtime/test-results/
+/runtime/oldversion/
+/system/knowledge/manuals/sources/
+
+# Public UI design tokens, not authentication tokens; include only these assets.
+!/docs/oldversion/livegui_package/autonomous_researcher_live_gui_uiux_package_v2/01_design_tokens/
+/docs/oldversion/livegui_package/autonomous_researcher_live_gui_uiux_package_v2/01_design_tokens/*
+!/docs/oldversion/livegui_package/autonomous_researcher_live_gui_uiux_package_v2/01_design_tokens/design_tokens.css
+!/docs/oldversion/livegui_package/autonomous_researcher_live_gui_uiux_package_v2/01_design_tokens/design_tokens.json
+
+# OS/editor noise
+/.venv.backup.*/
+/.cache/uv/
+/installation.manifest.local.json
+/.worktrees/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Windows bridge local/generated artifacts
+/C:*
+/C:
+/C:\ATR\bridge_artifacts/
+/C:\ATR\equipment_locators/
+/bridge_requests.jsonl
+/Pyautogui_server_for_window/artifacts/
+/Pyautogui_server_for_window/bridge/artifacts/
+/Pyautogui_server_for_window/tmp*/
+/Pyautogui_server_for_window/bridge_requests.jsonl
+/Pyautogui_server_for_window/.bridge_token

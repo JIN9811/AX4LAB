@@ -1,0 +1,2 @@
+# Compatibility entry point. Windows installs should use requirements-windows.txt.
+-r requirements-windows.txt

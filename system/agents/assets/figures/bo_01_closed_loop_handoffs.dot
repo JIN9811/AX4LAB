@@ -1,0 +1,23 @@
+digraph bo_closed_loop_handoffs {
+  graph [rankdir=TB, bgcolor="#FFFFFF", pad="0.35", nodesep="0.38", ranksep="0.48", fontname="DejaVu Sans", label="BO in the existing closed loop", labelloc="t", fontsize=22];
+  node [shape=box, style="rounded,filled", fillcolor="#EEF4FF", color="#315C9B", fontname="DejaVu Sans", fontsize=14, margin="0.18,0.12"];
+  edge [color="#52667A", fontname="DejaVu Sans", fontsize=12, arrowsize=0.8];
+  analysis [label="Analysis\nAccepted objective observations"];
+  knowledge [label="Knowledge / Evidence\nCompatible history + source IDs", shape=note, fillcolor="#E9F7EF", color="#2E7D59"];
+  settings [label="Operator / Orchestrator\nObjective + continuous bounds\nFixed settings + LHS policy"];
+  bo [label="BO AGENT\nLLM: strategy + tool decisions + review\nLHS / BoTorch: numeric coordinates", penwidth=2.2];
+  guardian [label="Existing Guardian / Orchestrator\nContinuation and handoff governance", fillcolor="#FFF1D6", color="#B26A00"];
+  design [label="Design\nCheck suitability; preserve requested values"];
+  specimen [label="Specimen and existing downstream cycle\nDevice approval and execution stay downstream"];
+  review [label="Return to owner / failure\nNo ready Design handoff", fillcolor="#FFE9E7", color="#A33A32"];
+  evidence [label="Loop-scoped artifacts\nDecision + tool trace + numeric result\nnext_design_request.v1 + plots", shape=note, fillcolor="#E9F7EF", color="#2E7D59"];
+  {rank=same; analysis; settings; knowledge;}
+  analysis -> bo [label="validated observations"];
+  settings -> bo [label="read-only contract"];
+  knowledge -> bo [label="bounded context", style=dashed];
+  bo -> guardian [label="accepted numerical candidate"];
+  bo -> review [label="held / invalid"];
+  guardian -> design [label="orchestrator_design_contract.v1"];
+  design -> specimen [label="design_candidate.v1"];
+  bo -> evidence [label="record every outcome", style=dashed, color="#2E7D59"];
+}

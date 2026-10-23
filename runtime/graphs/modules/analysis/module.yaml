@@ -1,0 +1,45 @@
+module:
+  orchestration_contract:
+    version: orchestration_contract.v1
+    admission:
+      authority: existing_owner_and_runtime_validation
+      description: Descriptive only; absent evidence is unknown, not ready.
+    result:
+      required: ["analysis"]
+    acceptance:
+      authority: policies/validation_policy.py and existing owner validators
+      description: analysis must be a mapping and analysis.ok must not be false
+  id: analysis
+  label: Analysis Agent Module
+  handler: agent.analysis_agent
+  llm_role: ""
+  editable: true
+  safety:
+    live_requires_validation: true
+    dry_run_supported: true
+  tools: []
+  execution_graph:
+    schema: ax4lab.execution_graph.v1
+    entry: task
+    nodes:
+    - id: task
+      handler: analysis.task
+      label: Measurement processing and objective evaluation
+      area: middle
+      llm: true
+    - id: deliver
+      handler: analysis.deliver
+      label: Deliver owner result
+      area: middle
+    edges:
+    - {source: task, target: deliver, 'on': next, kind: evidence}
+    terminals: [deliver]
+  io_contract:
+    input: OrchestratorState
+    output: AgentResult.data merged into OrchestratorState
+  notes: >-
+    The executable graph invokes the measurement owner once. High-level LLM
+    decisions select data processing and review measured evidence. Middle-level
+    deterministic code parses curves, normalizes geometry, computes metrics and
+    evaluates the bound objective. Existing quality gates control BO admission.
+    Analysis has no physical Low boundary and no device bridge dependency.

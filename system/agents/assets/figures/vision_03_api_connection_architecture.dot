@@ -1,0 +1,35 @@
+digraph vision_api_connection_architecture {
+  graph [rankdir=LR, bgcolor="transparent", pad="0.25", nodesep="0.30", ranksep="0.54", fontname="DejaVu Sans", label="Vision multimodal decision and existing service connections", labelloc="t", fontsize=18];
+  node [shape=box, style="rounded,filled", fillcolor="#EEF4FF", color="#315C9B", fontname="DejaVu Sans", fontsize=12, margin="0.09,0.06"];
+  edge [color="#52667A", fontname="DejaVu Sans", fontsize=10, arrowsize=0.64];
+
+  runtime [label="AgentContext / ModuleRuntimeContext\nlease + configured fallbacks"];
+  helper [label="agents/vision/decision.py\nstrict JSON + full scope recheck", penwidth=2.1];
+  images [label="LLMImageInput list\n1 raw · 2 annotated", shape=note, fillcolor="#E9F7EF", color="#2E7D59"];
+  backend [label="Shared API / vLLM backend\nvision_observation", shape=component, fillcolor="#F2ECFA", color="#6B4C9A"];
+  decision [label="Bounded local tool\ncontract_id only", shape=diamond, fillcolor="#FFF1D6", color="#B26A00"];
+
+  capture [label="Existing camera capture + detector\nregistered paths and facts", shape=component, fillcolor="#F2ECFA", color="#6B4C9A"];
+  active [label="ActiveCam service\nmove · capture · return", shape=octagon, fillcolor="#FFE9E7", color="#A33A32", penwidth=2];
+  rollout [label="Rollout status / verified stop", shape=component, fillcolor="#F2ECFA", color="#6B4C9A"];
+  clear [label="Managed UTM clear lifecycle\nreplay code-owned", shape=component, fillcolor="#F2ECFA", color="#6B4C9A"];
+  gates [label="Existing Vision + Guardian gates\nidentity · freshness · detector · lifecycle", shape=diamond, fillcolor="#FFF1D6", color="#B26A00"];
+  evidence [label="vision_decision.v1\nreport · signal · image hashes · events", shape=note, fillcolor="#E9F7EF", color="#2E7D59"];
+  forbidden [label="NOT EXPOSED\npose · ROI · threshold · mode\narbitrary driver command · replay.start", fillcolor="#FFE9E7", color="#A33A32"];
+
+  runtime -> helper;
+  capture -> images [label="same capture"];
+  images -> helper;
+  helper -> backend [label="prompt + optional images"];
+  backend -> helper [label="JSON text"];
+  helper -> decision;
+  decision -> capture [label="registered callback"];
+  decision -> active [label="whole active_cam contract"];
+  rollout -> gates [label="status / STOPPED"];
+  clear -> gates [label="completed + measured home"];
+  capture -> gates [label="detector truth"];
+  active -> gates [label="capture + return proof"];
+  helper -> gates [label="accept / review"];
+  gates -> evidence [label="final disposition", color="#2E7D59"];
+  decision -> forbidden [style=dashed, arrowhead=tee, label="schema rejects"];
+}

@@ -1,0 +1,17 @@
+digraph analysis_handoffs {
+ graph [rankdir=LR,bgcolor="white",pad="0.35",nodesep="0.45",ranksep="0.6",fontname="DejaVu Sans",fontsize=20,label="Analysis — measured evidence and handoffs",labelloc=t];
+ node [shape=box,style="rounded,filled",fillcolor="#EEF4FF",color="#315C9B",fontname="DejaVu Sans",fontsize=14,margin="0.2,0.14"];
+ edge [color="#52667A",fontname="DejaVu Sans",fontsize=12];
+ eq [label="Equipment\nMeasured curve + acquisition evidence"];
+ setup [label="Experiment setup\nInitial geometry + objective binding"];
+ anl [label="Analysis\nValidate · normalize · compute"];
+ knw [label="Knowledge\nEvidence + scoped reference"];
+ bo [label="BO\nAdmissible observation"];
+ orc [label="Orchestrator / Guardian\nExisting plan and admission gates",fillcolor="#FFF1D6"];
+ eq -> anl [label="source data"];
+ setup -> anl [label="configured inputs"];
+ knw -> anl [style=dashed,label="reference only"];
+ anl -> knw [label="metrics + provenance"];
+ anl -> bo [label="bound objective + quality"];
+ anl -> orc [label="owner result"];
+}

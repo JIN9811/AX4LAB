@@ -1,0 +1,49 @@
+module:
+  orchestration_contract:
+    version: orchestration_contract.v1
+    admission:
+      authority: existing_owner_and_runtime_validation
+      description: Descriptive only; absent evidence is unknown, not ready.
+    result:
+      required: ["guardian"]
+    acceptance:
+      authority: policies/validation_policy.py and existing owner validators
+      description: existing guardian decision controls stop/error/continue routes
+  id: guardian
+  label: Guardian Agent Module
+  handler: agent.guardian_agent
+  llm_role: guardian_review
+  editable: true
+  safety:
+    live_requires_validation: true
+    dry_run_supported: true
+  tools:
+  - device.health
+  - experiment.queue.status
+  execution_graph:
+    schema: ax4lab.execution_graph.v1
+    entry: task
+    nodes:
+    - id: task
+      handler: guardian.task
+      label: Composite deterministic gates and advisory policy task
+      area: middle
+      llm: true
+    - id: deliver
+      handler: guardian.deliver
+      label: Deliver owner result
+      area: middle
+    edges:
+    - {source: task, target: deliver, 'on': next, kind: evidence}
+    terminals: [deliver]
+  io_contract:
+    input: OrchestratorState
+    output: AgentResult.data merged into OrchestratorState
+  notes: >-
+    GUI/module editor may edit this module config, but execution remains bound to
+    allowlisted Python handlers. Python source is not modified by the GUI.
+
+  metadata:
+    control_view:
+      empty_roles:
+        low: No direct device execution in this agent

@@ -1,0 +1,812 @@
+"""Integration tests for LeRobot GUI routes and API workflow."""
+
+from __future__ import annotations
+
+import copy
+import json
+from pathlib import Path
+from typing import Any
+
+from fastapi.testclient import TestClient
+
+import app.main as main_module
+from device_bridges.lerobot_bridge import LeRobotBridge, LeRobotBridgeConfig
+from utils.config_loader import load_all_configs
+import utils.lerobot_rollout_profile as rollout_profile_module
+import utils.manipulation_profile as manipulation_profile_module
+from utils.runtime_paths import resolve_runtime_path
+
+
+def test_lerobot_gui_and_test_mode_api_workflow(tmp_path: Path, monkeypatch: Any) -> None:
+    from dataclasses import replace
+    monkeypatch.setattr(main_module, "RUNTIME_PATHS",
+        replace(main_module.RUNTIME_PATHS, memory_root=tmp_path / "memory"))
+    monkeypatch.setattr(main_module.controller, "_paths", main_module.RUNTIME_PATHS)
+    monkeypatch.setattr(main_module.controller._deps.agent_context, "paths", main_module.RUNTIME_PATHS)
+    cfg = copy.deepcopy(load_all_configs(resolve_runtime_path("configs")).get("lerobot", {}))
+    cfg["device_memory_path"] = str(tmp_path / "memory" / "lerobot_device_ports.json")
+    cfg["fake_dataset_root"] = str(tmp_path / "fake_datasets")
+    cfg["fake_checkpoint_root"] = str(tmp_path / "fake_checkpoints")
+    cfg["dataset_root"] = str(tmp_path / "datasets")
+    cfg["output_root"] = str(tmp_path / "outputs")
+    cfg["policy_root"] = str(tmp_path / "outputs")
+    cfg["session_log_root"] = str(tmp_path / "logs")
+    bridge = LeRobotBridge(LeRobotBridgeConfig.from_config(cfg, repo_root=tmp_path))
+    bridge._post_isaac_mirror_state = lambda endpoint, payload, timeout_s=0.5: {"ok": True, "status_code": 200}  # type: ignore[method-assign]
+    monkeypatch.setattr(main_module, "_LEROBOT_BRIDGE", bridge)
+    manipulation_profile_path = tmp_path / "memory" / "manipulation_agent_bridge.json"
+    monkeypatch.setattr(manipulation_profile_module, "MANIPULATION_AGENT_PROFILE_PATH", manipulation_profile_path)
+    monkeypatch.setattr(main_module, "MANIPULATION_AGENT_PROFILE_PATH", manipulation_profile_path)
+    rollout_profile_path = tmp_path / "memory" / "lerobot_rollout_profile.json"
+    monkeypatch.setattr(rollout_profile_module, "LEROBOT_ROLLOUT_PROFILE_PATH", rollout_profile_path)
+    monkeypatch.setattr(main_module, "LEROBOT_ROLLOUT_PROFILE_PATH", rollout_profile_path)
+    client = TestClient(main_module.app)
+
+    page = client.get("/lerobot")
+    assert page.status_code == 200
+    assert "LeRobot / ROBOTIS Workspace" in page.text
+    assert "Device Port Setup" in page.text
+    assert "+ Camera" in page.text
+    assert "RealSense SDK" in page.text
+    assert "D455F top / D405 wrist" in page.text
+    assert '<option value="xvla">xvla (X-VLA)</option>' in page.text
+    assert '<option value="smolvla" selected>smolvla (SmolVLA)</option>' in page.text
+    assert 'id="lerobot-train-source-policy-input" type="hidden" value="lerobot/smolvla_base"' in page.text
+    assert "lerobot/smolvla_base" in page.text
+    assert "lerobot/xvla-base" in page.text
+    assert "jin/record-test" not in page.text
+    assert "Pick up the cube and place it" in page.text
+    assert 'id="lerobot-episodes-input" type="number" min="1" value="60"' in page.text
+    assert "lerobot-action-status" in page.text
+    assert "Batch Size" in page.text
+    assert "Additional Train CLI Args" in page.text
+    assert "WandB Local Server" in page.text
+    assert "btn-wandb-local-start" in page.text
+    assert "Resume dataset" in page.text
+    assert "Resume training from checkpoint" in page.text
+    assert "Manipulation Agent Bridge" in page.text
+    assert "lerobot-manipulation-task-id-input" in page.text
+    assert "lerobot-rollout-policy-type-input" in page.text
+    assert "Rollout Policy Type" in page.text
+    assert "RTC Enable" in page.text
+    assert "RTC Execution Horizon" in page.text
+    assert "RTC Guidance Weight" in page.text
+    assert "RTC Action Queue Refresh Threshold" in page.text
+    assert 'id="lerobot-rollout-rtc-enabled-input"' in page.text
+    assert 'id="lerobot-manipulation-rtc-enabled-input"' in page.text
+    assert "Manipulation Agent Runtime Report" in page.text
+    assert "Save Task Defaults" in page.text
+    assert "Test Agent Bridge" in page.text
+    assert "3. Isaac Sim Link" in page.text
+    assert "Mirror during Teleop / Recording" in page.text
+    assert "Active Robot-Cam specimen tracking" in page.text
+    assert "D405 wrist primary" in page.text
+    assert "D455F top fallback" in page.text
+    assert "lerobot-active-robot-cam-enabled-input" in page.text
+    assert "lerobot-active-robot-cam-record-start-input" in page.text
+    assert "Open Isaac Sim Mirror" in page.text
+    assert "Check Isaac Link" in page.text
+    assert "Send Test Pose" in page.text
+    assert "Standalone Mirror Test" in page.text
+    assert "Launch Isaac Receiver" not in page.text
+    assert "Receiver Health" not in page.text
+    assert "Receiver Status" not in page.text
+    assert "btn-isaac-mirror-loop-start" in page.text
+    assert "btn-isaac-mirror-receiver-start" in page.text
+    assert "btn-isaac-mirror-receiver-status" in page.text
+    assert "btn-isaac-mirror-receiver-stop" in page.text
+    assert "btn-isaac-mirror-health" in page.text
+    assert "btn-isaac-mirror-verify" in page.text
+    assert "4. Local Paths" in page.text
+    assert "5. Teleoperation" in page.text
+    assert "6. Recording" in page.text
+    assert "7. Isaac Lab Synthetic Intelligence" in page.text
+    assert "Isaac Lab Synthetic Intelligence" in page.text
+    assert "isaac-synthetic-pipeline-mode" in page.text
+    assert "Build Synthetic Dataset" in page.text
+    assert "Check Digital Twin" in page.text
+    assert "Augmentation Profile" in page.text
+    assert "standard_sim2real_v2" in page.text
+    assert "Common image/depth augmentation" in page.text
+    assert "Photometric" in page.text
+    assert "Sensor noise" in page.text
+    assert "Depth noise" in page.text
+    assert "Render domain" in page.text
+    assert "Camera pose augmentation" in page.text
+    assert "RGB Strength" in page.text
+    assert "Depth Strength" in page.text
+    assert "Render Strength" in page.text
+    assert "Camera Pose Strength" in page.text
+    assert "btn-isaac-augment-run" in page.text
+    assert "8. Dataset Visualization" in page.text
+    assert "9. Training" in page.text
+    assert "10. Inference / Rollout" in page.text
+    assert "Save Rollout Defaults" in page.text
+    assert "11. Manipulation Agent Bridge" in page.text
+    assert "Dataset Manage" in page.text
+    assert "dataset-manage-tab" in page.text
+    assert "12. Session Output" in page.text
+
+    home = client.get("/")
+    assert home.status_code == 200
+    assert 'id="btn-open-lerobot"' in home.text
+    assert '<strong>Manipulation</strong><small>Workspace</small>' in home.text
+
+    config = client.get("/api/lerobot/config").json()
+    assert config["ok"] is True
+    assert any(profile["profile_id"] == "fake_omx_ai" for profile in config["profiles"])
+    assert any(policy["policy_type"] == "smolvla" and policy["value"] == "lerobot/smolvla_base" for policy in config["policy_presets"])
+    assert any(policy["policy_type"] == "xvla" and policy["value"] == "lerobot/xvla-base" for policy in config["policy_presets"])
+
+    selected = client.post("/api/lerobot/config", json={"profile_id": "fake_omx_ai", "mode": "test"}).json()
+    assert selected["selected_profile_id"] == "fake_omx_ai"
+
+    monkeypatch.setattr(
+        bridge,
+        "mirror_receiver_process_start",
+        lambda payload: {"ok": True, "tool": "lerobot.mirror.receiver_process.start", "status": "RUNNING", "pid": 123, "health": {"ok": True}},
+    )
+    monkeypatch.setattr(
+        bridge,
+        "mirror_receiver_process_status",
+        lambda payload: {"ok": True, "tool": "lerobot.mirror.receiver_process.status", "status": "RUNNING", "pid": 123, "health": {"ok": True}},
+    )
+    monkeypatch.setattr(
+        bridge,
+        "mirror_receiver_process_stop",
+        lambda payload: {"ok": True, "tool": "lerobot.mirror.receiver_process.stop", "status": "STOPPED", "pid": 123},
+    )
+    assert client.post("/api/lerobot/mirror/receiver-process/start", json={"mode": "test", "profile_id": "fake_omx_ai"}).json()["status"] == "RUNNING"
+    assert client.post("/api/lerobot/mirror/receiver-process/status", json={"mode": "test", "profile_id": "fake_omx_ai"}).json()["status"] == "RUNNING"
+    assert client.post("/api/lerobot/mirror/receiver-process/stop", json={"mode": "test", "profile_id": "fake_omx_ai"}).json()["status"] == "STOPPED"
+
+    mirror_loop = client.post(
+        "/api/lerobot/mirror/loop/start",
+        json={"mode": "test", "profile_id": "fake_omx_ai", "isaac_mirror_max_samples": 2},
+    ).json()
+    assert mirror_loop["ok"] is True
+    assert mirror_loop["workflow"] == "isaac_mirror"
+    assert mirror_loop["sample_count"] == 2
+    monkeypatch.setattr(
+        bridge,
+        "_fetch_isaac_mirror_receiver_health",
+        lambda endpoint, timeout_s=0.5: {
+            "ok": True,
+            "health_url": "http://127.0.0.1:8766/health",
+            "apply_mode": "deferred_update_tick",
+            "sample_count": 2,
+        },
+    )
+    receiver_health = client.post(
+        "/api/lerobot/mirror/receiver-health",
+        json={"mode": "test", "profile_id": "fake_omx_ai", "isaac_mirror_endpoint": "http://127.0.0.1:8766/joints"},
+    ).json()
+    assert receiver_health["ok"] is True
+    assert receiver_health["apply_mode"] == "deferred_update_tick"
+    bridge._post_isaac_mirror_state = lambda endpoint, payload, timeout_s=0.5: {"ok": True, "status_code": 200}  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        bridge,
+        "_fetch_isaac_mirror_receiver_state",
+        lambda endpoint, timeout_s=0.5: {
+            "ok": True,
+            "state_url": "http://127.0.0.1:8766/state",
+            "sample_count": 3,
+            "last_payload_summary": {"session_id": next(reversed(bridge._sessions)), "sample_index": 1, "joint_count": 6, "target_count": 6},
+        },
+    )
+    receiver_verify = client.post(
+        "/api/lerobot/mirror/receiver-verify",
+        json={"mode": "test", "profile_id": "fake_omx_ai", "isaac_mirror_endpoint": "http://127.0.0.1:8766/joints"},
+    ).json()
+    assert receiver_verify["ok"] is True
+    assert receiver_verify["verification"]["receiver_sample_count_after"] == 3
+    mirror_status = client.post(
+        "/api/lerobot/mirror/loop/status",
+        json={"mode": "test", "profile_id": "fake_omx_ai", "session_id": mirror_loop["session_id"]},
+    ).json()
+    assert mirror_status["status"] == "COMPLETED"
+    mirror_stop = client.post(
+        "/api/lerobot/mirror/loop/stop",
+        json={"mode": "test", "profile_id": "fake_omx_ai", "session_id": mirror_loop["session_id"]},
+    ).json()
+    assert mirror_stop["ok"] is True
+
+    ports = client.get("/api/lerobot/ports", params={"profile_id": "fake_omx_ai", "mode": "test"}).json()
+    assert ports["ok"] is True
+    assert ports["ports"][0]["detected"] is True
+
+    baseline = client.post(
+        "/api/lerobot/ports/baseline",
+        json={"mode": "test", "profile_id": "fake_omx_ai", "device_role": "leader"},
+    ).json()
+    assert baseline["ok"] is True
+
+    detected = client.post(
+        "/api/lerobot/ports/detect",
+        json={"mode": "test", "profile_id": "fake_omx_ai", "device_role": "leader"},
+    ).json()
+    assert detected["ok"] is True
+    assert detected["saved_devices"]["leader"]["port"]
+
+    camera = client.post(
+        "/api/lerobot/camera/test",
+        json={"mode": "test", "profile_id": "fake_omx_ai", "device_role": "camera", "port": "/dev/video0", "camera_key": "top"},
+    ).json()
+    assert camera["ok"] is True
+    assert camera["capture"]["synthetic"] is True
+
+    side_camera = client.post(
+        "/api/lerobot/ports/save",
+        json={"mode": "test", "profile_id": "fake_omx_ai", "device_role": "camera", "port": "/dev/video4", "camera_key": "side"},
+    ).json()
+    assert side_camera["ok"] is True
+    deleted_side_camera = client.post(
+        "/api/lerobot/ports/delete",
+        json={"mode": "test", "profile_id": "fake_omx_ai", "device_role": "camera", "camera_key": "side"},
+    ).json()
+    assert deleted_side_camera["ok"] is True
+    assert "side" not in deleted_side_camera["saved_devices"]["cameras"]
+
+    teleop = client.post("/api/lerobot/teleoperate/start", json={"mode": "test", "profile_id": "fake_omx_ai"}).json()
+    assert teleop["ok"] is True
+    assert teleop["workflow"] == "teleoperate"
+
+    record = client.post(
+        "/api/lerobot/record/start",
+        json={"mode": "test", "profile_id": "fake_omx_ai", "dataset_repo_id": "local/fake_dataset", "task_instruction": "Pick up the cylinder"},
+    ).json()
+    assert record["ok"] is True
+    assert record["workflow"] == "record"
+    assert "--dataset.single_task=Pick up the cylinder" in record["command_preview"]
+
+    finished = client.post(
+        "/api/lerobot/record/control",
+        json={"mode": "test", "profile_id": "fake_omx_ai", "session_id": record["session_id"], "action": "finish"},
+    ).json()
+    assert finished["status"] == "DATASET_COMPLETE"
+
+    train = client.post(
+        "/api/lerobot/train/start",
+        json={
+                "mode": "test",
+                "profile_id": "fake_omx_ai",
+                "observation_pipeline_id": "legacy_lerobot",
+                "dataset_repo_id": "jin/record-test",
+                "policy_type": "act",
+            "device": "cuda",
+            "batch_size": 32,
+            "steps": 20000,
+            "num_workers": 16,
+            "policy_repo_id": "jin/robotis_omx_ai_act_policy",
+        },
+    ).json()
+    assert train["ok"] is True
+    assert train["workflow"] == "train"
+    assert "--steps=20000" in train["command_preview"]
+    assert train["training"]["progress_percent"] == 100.0
+
+    rollout = client.post(
+        "/api/lerobot/rollout/start",
+        json={"mode": "test", "profile_id": "fake_omx_ai", "policy_path": "fake://policy"},
+    ).json()
+    assert rollout["ok"] is True
+    assert rollout["workflow"] == "rollout"
+
+    manipulation_config = client.get("/api/lerobot/manipulation-agent/config").json()
+    assert manipulation_config["ok"] is True
+    assert manipulation_config["profile"]["manipulation_strategy"] == "lerobot_policy"
+    assert manipulation_config["profile"]["policy_type"] == "smolvla"
+
+    manipulation_save = client.post(
+        "/api/lerobot/manipulation-agent/config",
+        json={
+            "mode": "test",
+            "profile_id": "fake_omx_ai",
+            "manipulation_strategy": "pi05_lerobot_policy",
+            "task_id": "transfer_to_utm",
+            "skill_id": "transfer_to_utm",
+            "policy_backend": "lerobot_cli",
+            "policy_type": "pi05",
+            "policy_path": "fake://pi05_policy_saved",
+            "rollout_rtc_execution_horizon": 10,
+            "rollout_rtc_max_guidance_weight": 1.0,
+            "rollout_action_queue_size_to_get_new_actions": 60,
+            "fps": 60,
+            "camera_fps": 30,
+            "max_duration_s": 30,
+            "task_instruction": "Saved 3DP to UTM manipulation default",
+            "source_location": "3dp_output_area",
+            "target_location": "utm_fixture",
+            "camera_enabled": True,
+            "continuous_rollout": True,
+        },
+    ).json()
+    assert manipulation_save["ok"] is True
+    assert manipulation_save["tool"] == "manipulation_agent.config.save"
+    assert manipulation_save["profile"]["policy_path"] == "fake://pi05_policy_saved"
+    assert manipulation_save["profile"]["task_id"] == "transfer_to_utm"
+    assert manipulation_save["profile"]["policy_backend"] == "lerobot_cli"
+    assert manipulation_save["profile"]["rollout_rtc_execution_horizon"] == 10
+    assert manipulation_save["profile"]["rollout_action_queue_size_to_get_new_actions"] == 60
+    assert manipulation_save["profile"]["fps"] == 60
+    assert manipulation_save["profile"]["camera_fps"] == 30
+    assert manipulation_profile_path.exists()
+
+    rollout_migration = client.get("/api/lerobot/rollout/config").json()
+    assert rollout_migration["ok"] is True
+    assert rollout_migration["source"] == "manipulation_agent_profile"
+    assert rollout_migration["profile"]["policy_path"] == "fake://pi05_policy_saved"
+
+    rollout_save = client.post(
+        "/api/lerobot/rollout/config",
+        json={
+            "mode": "test",
+            "profile_id": "fake_omx_ai",
+            "policy_type": "smolvla",
+            "policy_path": "fake://saved-standalone-rollout",
+            "policy_checkpoint_path": "fake://saved-standalone-rollout",
+            "task_instruction": "Saved standalone rollout",
+            "continuous_rollout": False,
+            "max_duration_s": 90,
+            "rollout_action_clamp": True,
+            "rollout_max_relative_target": 4,
+        },
+    ).json()
+    assert rollout_save["ok"] is True
+    assert rollout_save["profile"]["policy_path"] == "fake://saved-standalone-rollout"
+    assert rollout_profile_path.exists()
+
+    rollout_reloaded = client.get("/api/lerobot/rollout/config").json()
+    assert rollout_reloaded["source"] == "saved_rollout_profile"
+    assert rollout_reloaded["profile"]["policy_path"] == "fake://saved-standalone-rollout"
+    assert rollout_reloaded["profile"]["max_duration_s"] == 90.0
+
+    manipulation_test = client.post(
+        "/api/lerobot/manipulation-agent/test",
+        json={
+            "mode": "live",
+            "profile_id": "fake_omx_ai",
+            "manipulation_strategy": "pi05_lerobot_policy",
+            "task_id": "transfer_to_utm",
+            "policy_backend": "lerobot_cli",
+            "policy_type": "pi05",
+            "policy_path": "fake://pi05_policy",
+            "rollout_rtc_execution_horizon": 10,
+            "rollout_rtc_max_guidance_weight": 1.0,
+            "rollout_action_queue_size_to_get_new_actions": 60,
+            "fps": 60,
+            "camera_fps": 30,
+            "max_duration_s": 30,
+            "task_instruction": "Test 3DP to UTM manipulation bridge",
+            "source_location": "3dp_output_area",
+            "target_location": "utm_fixture",
+            "camera_enabled": True,
+            "continuous_rollout": True,
+            "specimen_result": {
+                "ok": True,
+                "specimen_id": "specimen-test-001",
+                "candidate_id": "candidate-test-001",
+                "handoff_status": "ready",
+            },
+        },
+    ).json()
+    assert manipulation_test["ok"] is True
+    assert manipulation_test["tool"] == "manipulation_agent.test"
+    assert manipulation_test["test_mode_forced"] is True
+    assert manipulation_test["mode"] == "test"
+    assert manipulation_test["manipulation"]["strategy"] == "pi05_lerobot_policy"
+    assert manipulation_test["manipulation_report"]["schema"] == "manipulation_report.v1"
+    assert manipulation_test["robot_task_result"]["schema"] == "robot_task_result.v1"
+    assert manipulation_test["robot_task_result"]["handoff_status"] == "needs_post_place_vision"
+    assert "--policy.type=pi05" not in manipulation_test["manipulation"]["command_preview"]
+    assert "--fps=60" in manipulation_test["manipulation"]["command_preview"]
+    assert "--action_queue_size_to_get_new_actions=60" in manipulation_test["manipulation"]["command_preview"]
+
+    manipulation = client.post(
+        "/api/lerobot/manipulation-agent/run",
+        json={
+            "mode": "test",
+            "profile_id": "fake_omx_ai",
+            "manipulation_strategy": "pi05_lerobot_policy",
+            "task_id": "transfer_to_utm",
+            "policy_backend": "lerobot_cli",
+            "policy_type": "pi05",
+            "policy_path": "fake://pi05_policy",
+            "rollout_rtc_execution_horizon": 10,
+            "rollout_rtc_max_guidance_weight": 1.0,
+            "rollout_action_queue_size_to_get_new_actions": 60,
+            "fps": 60,
+            "camera_fps": 30,
+            "max_duration_s": 30,
+            "task_instruction": "Move test specimen from 3DP to UTM",
+            "source_location": "3dp_output_area",
+            "target_location": "utm_fixture",
+            "camera_enabled": True,
+            "continuous_rollout": True,
+            "specimen_result": {
+                "ok": True,
+                "specimen_id": "specimen-api-001",
+                "candidate_id": "candidate-api-001",
+                "handoff_status": "ready",
+            },
+            "observation": {
+                "observation_id": "obs-api-001",
+                "anomaly": False,
+                "transfer_readiness": {"ready": True, "pose_confidence": 0.82},
+            },
+        },
+    ).json()
+    assert manipulation["ok"] is True
+    assert manipulation["tool"] == "manipulation_agent.run"
+    assert manipulation["manipulation"]["strategy"] == "pi05_lerobot_policy"
+    assert manipulation["manipulation"]["transfer_task"]["source"] == "3dp_output_area"
+    assert manipulation["manipulation"]["transfer_task"]["target"] == "utm_fixture"
+    assert manipulation["manipulation_report"]["task"]["task_id"] == "transfer_to_utm"
+    assert manipulation["manipulation_report"]["policy_plan"]["rtc_execution_horizon"] == 10
+    assert manipulation["robot_task_result"]["terminal_pose"] == "standby_clear_of_utm"
+    assert "--policy.type=pi05" not in manipulation["manipulation"]["command_preview"]
+    assert "--fps=60" in manipulation["manipulation"]["command_preview"]
+    assert "--action_queue_size_to_get_new_actions=60" in manipulation["manipulation"]["command_preview"]
+    assert manipulation["state"]["current_experiment_spec"]["rollout_action_queue_size_to_get_new_actions"] == 60
+    assert manipulation["state"]["current_experiment_spec"]["camera_fps"] == 30
+
+    sessions = client.get("/api/lerobot/sessions").json()
+    assert sessions["ok"] is True
+    assert len(sessions["sessions"]) >= 3
+
+    policies = client.get("/api/lerobot/policies").json()
+    assert policies["ok"] is True
+    assert policies["policies"]
+
+    browse = client.post("/api/lerobot/files/browse", json={"kind": "dataset", "path": ""}).json()
+    assert browse["ok"] is True
+    assert "allowed_roots" in browse
+
+    dataset_manage = client.post(
+        "/api/lerobot/dataset-manage/list",
+        json={"mode": "test", "profile_id": "fake_omx_ai", "dataset_root": str(tmp_path / "datasets"), "namespace": "jin", "date_prefix": "20260901"},
+    ).json()
+    assert dataset_manage["ok"] is True
+    assert dataset_manage["tool"] == "lerobot.dataset_manage.list"
+    assert dataset_manage["suggested_repo_id"] == "jin/20260901_1"
+
+    monkeypatch.setattr(
+        bridge,
+        "dataset_manage_merge",
+        lambda payload: {"ok": True, "tool": "lerobot.dataset_manage.merge", "output_repo_id": payload.get("output_repo_id"), "sources": payload.get("sources")},
+    )
+    merged_dataset = client.post(
+        "/api/lerobot/dataset-manage/merge",
+        json={
+            "mode": "test",
+            "profile_id": "fake_omx_ai",
+            "dataset_root": str(tmp_path / "datasets"),
+            "sources": [
+                {"dataset_repo_id": "jin/source_a", "episode_range": "0-2"},
+                {"dataset_repo_id": "jin/source_b", "episode_range": "3,4"},
+            ],
+            "output_repo_id": "jin/merged",
+        },
+    ).json()
+    assert merged_dataset["ok"] is True
+    assert merged_dataset["tool"] == "lerobot.dataset_manage.merge"
+    assert merged_dataset["output_repo_id"] == "jin/merged"
+
+    monkeypatch.setattr(
+        bridge,
+        "dataset_manage_split",
+        lambda payload: {"ok": True, "tool": "lerobot.dataset_manage.split", "splits": payload.get("splits")},
+    )
+    split_dataset = client.post(
+        "/api/lerobot/dataset-manage/split",
+        json={
+            "mode": "test",
+            "profile_id": "fake_omx_ai",
+            "dataset_root": str(tmp_path / "datasets"),
+            "source": {"dataset_repo_id": "jin/source", "episode_range": "all"},
+            "splits": [{"name": "train", "episode_range": "0-9"}],
+        },
+    ).json()
+    assert split_dataset["ok"] is True
+    assert split_dataset["tool"] == "lerobot.dataset_manage.split"
+    assert split_dataset["splits"][0]["episode_range"] == "0-9"
+
+    monkeypatch.setattr(
+        bridge,
+        "dataset_manage_delete",
+        lambda payload: {"ok": True, "tool": "lerobot.dataset_manage.delete", "delete_episode_range": payload.get("delete_episode_range")},
+    )
+    compact_dataset = client.post(
+        "/api/lerobot/dataset-manage/delete",
+        json={
+            "mode": "test",
+            "profile_id": "fake_omx_ai",
+            "dataset_root": str(tmp_path / "datasets"),
+            "source": {"dataset_repo_id": "jin/source", "episode_range": "all"},
+            "delete_episode_range": "3,4",
+            "output_repo_id": "jin/source_compact",
+        },
+    ).json()
+    assert compact_dataset["ok"] is True
+    assert compact_dataset["tool"] == "lerobot.dataset_manage.delete"
+    assert compact_dataset["delete_episode_range"] == "3,4"
+
+    visual = client.post(
+        "/api/lerobot/visualize/dataset",
+        json={"mode": "test", "profile_id": "fake_omx_ai", "dataset_repo_id": "local/fake_dataset"},
+    ).json()
+    assert visual["ok"] is True
+    assert visual["tool"] == "lerobot.dataset.visualize"
+
+    monkeypatch.setattr(
+        bridge,
+        "augment_isaac_dataset",
+        lambda payload: {
+            "ok": True,
+            "tool": "lerobot.augment.isaac",
+            "summary": {"variant_count": 4, "manifest_path": "/tmp/manifest.jsonl"},
+            "command_preview": ["python3", "scripts/lerobot_isaac_data_augmentation.py"],
+        },
+    )
+    augmented = client.post(
+        "/api/lerobot/augment/isaac",
+        json={"mode": "test", "profile_id": "fake_omx_ai", "dataset_repo_id": "local/fake_dataset"},
+    ).json()
+    assert augmented["ok"] is True
+    assert augmented["tool"] == "lerobot.augment.isaac"
+    assert augmented["summary"]["variant_count"] == 4
+
+    monkeypatch.setattr(
+        bridge,
+        "augment_isaac_preview",
+        lambda payload: {
+            "ok": True,
+            "tool": "lerobot.augment.preview",
+            "preview_count": payload.get("isaac_data_augmentation_preview_count"),
+            "rows": [{"variant_id": "e000_f000000_v000", "camera": "top"}],
+        },
+    )
+    preview = client.post(
+        "/api/lerobot/augment/preview",
+        json={
+            "mode": "test",
+            "profile_id": "fake_omx_ai",
+            "dataset_repo_id": "local/fake_dataset",
+            "isaac_data_augmentation_preview_count": 3,
+        },
+    ).json()
+    assert preview["ok"] is True
+    assert preview["tool"] == "lerobot.augment.preview"
+    assert preview["preview_count"] == 3
+
+    wandb_local = client.post(
+        "/api/lerobot/wandb-local/start",
+        json={"mode": "test", "profile_id": "fake_omx_ai", "wandb_base_url": "http://127.0.0.1:8081"},
+    ).json()
+    assert wandb_local["ok"] is True
+    assert wandb_local["tool"] == "lerobot.wandb_local.start"
+    assert wandb_local["url"] == "http://127.0.0.1:8081"
+
+
+def test_lerobot_wandb_local_api_key_is_saved_locally_without_echoing_secret(tmp_path: Path, monkeypatch: Any) -> None:
+    settings_path = tmp_path / "memory" / "wandb_local_api_key.json"
+    monkeypatch.setattr(main_module, "WANDB_LOCAL_API_KEY_SETTINGS_PATH", settings_path)
+
+    client = TestClient(main_module.app)
+
+    saved = client.post(
+        "/api/lerobot/wandb-local/api-key",
+        json={"api_key": "local-wandb-test-key-123456", "enabled": True},
+    ).json()
+
+    assert saved["ok"] is True
+    assert saved["provider"] == "wandb_local"
+    assert saved["has_key"] is True
+    assert saved["enabled"] is True
+    assert "api_key" not in saved
+    assert "masked_key" not in saved
+    stored = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert stored["api_key"] == "local-wandb-test-key-123456"
+    assert stored["enabled"] is True
+
+    status = client.get("/api/lerobot/wandb-local/api-key").json()
+    assert status["ok"] is True
+    assert status["has_key"] is True
+    assert "api_key" not in status
+    assert "masked_key" not in status
+
+
+def test_lerobot_rollout_api_hardware_alert_is_guardian_ready(monkeypatch: Any) -> None:
+    def fake_call(name: str, payload: dict[str, object]) -> dict[str, object]:
+        return {
+            "ok": False,
+            "tool": name,
+            "mode": payload.get("mode", "live"),
+            "profile_id": payload.get("profile_id", "robotis_omx_ai"),
+            "session_id": "",
+            "workflow": "rollout",
+            "status": "blocked",
+            "failure_code": "LEROBOT_DEVICE_PORT_REQUIRED",
+            "message": "Save required LeRobot device ports before live rollout: follower",
+            "command_preview": [],
+            "step_trace": [{"step": "PRECHECK", "status": "blocked", "detail": "LEROBOT_DEVICE_PORT_REQUIRED"}],
+            "events": [{"step": "PRECHECK", "status": "blocked", "detail": "LEROBOT_DEVICE_PORT_REQUIRED"}],
+        }
+
+    monkeypatch.setattr(main_module.controller._deps.agent_context.tools, "call", fake_call)
+    client = TestClient(main_module.app)
+
+    result = client.post(
+        "/api/lerobot/rollout/start",
+        json={"mode": "live", "profile_id": "robotis_omx_ai", "policy_path": "fake://pi05"},
+    ).json()
+
+    assert result["ok"] is False
+    alert = result["hardware_alert"]
+    assert alert["schema"] == "hardware_alert.v1"
+    assert alert["device_class"] == "robot"
+    assert alert["component"] == "robot_io_port"
+    assert alert["reason_code"] == "MISSING_REQUIRED_INPUT"
+    assert alert["blocks_workflow"] is True
+    assert alert["requires_ack"] is True
+    assert alert["guardian_contract"]["schema_version"] == "guardian_contract.v1"
+    assert alert["guardian_contract"]["ok_for_next_stage"] is False
+    assert alert["guardian_decision"]["schema"] == "guardian_decision.v1"
+    assert alert["guardian_decision"]["decision"] == "block"
+    assert alert["incident_record"]["schema"] == "incident_record.v1"
+
+    guardian_log = main_module.controller._logger_bundle.run_dir / "guardian_events.jsonl"
+    assert guardian_log.exists()
+    records = [json.loads(line) for line in guardian_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert any(record.get("incident_id") == alert["alert_id"] for record in records)
+    assert any(
+        event.get("event_type") == "hardware.alert"
+        and event.get("payload", {}).get("hardware_alert", {}).get("alert_id") == alert["alert_id"]
+        for event in main_module.controller.recent_events()
+    )
+
+
+def test_lerobot_rollout_api_uses_backend_tool_registry(monkeypatch: Any) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_call(name: str, payload: dict[str, object]) -> dict[str, object]:
+        calls.append((name, payload))
+        return {
+            "ok": True,
+            "tool": name,
+            "mode": payload.get("mode", "test"),
+            "profile_id": payload.get("profile_id", ""),
+            "session_id": "lr-rollout-api-registry",
+            "workflow": "rollout",
+            "status": "POLICY_ACTIVE",
+            "command_preview": ["backend-tool-registry"],
+            "step_trace": [{"step": "QUEUE", "status": "ok", "detail": "backend tool registry"}],
+            "events": [{"step": "QUEUE", "status": "ok", "detail": "backend tool registry"}],
+        }
+
+    monkeypatch.setattr(main_module.controller._deps.agent_context.tools, "call", fake_call)
+    client = TestClient(main_module.app)
+
+    result = client.post(
+        "/api/lerobot/rollout/start",
+        json={
+            "mode": "test",
+            "profile_id": "fake_omx_ai",
+            "policy_path": "fake://policy",
+            "plc_rollout_stop_enabled": True,
+        },
+    ).json()
+
+    assert result["ok"] is True
+    assert result["command_preview"] == ["backend-tool-registry"]
+    assert calls and calls[0][0] == "lerobot.rollout.start"
+    assert calls[0][1]["policy_path"] == "fake://policy"
+    assert calls[0][1]["plc_rollout_stop_enabled"] is True
+
+
+def test_device_workspace_manipulation_request_preserves_plc_stop_checkbox() -> None:
+    request = main_module.ManipulationAgentBridgeRequest(
+        mode="test",
+        profile_id="fake_omx_ai",
+        policy_path="fake://policy",
+        plc_rollout_stop_enabled=True,
+    )
+
+    spec = main_module._manipulation_spec_from_request(request)
+
+    assert spec["plc_rollout_stop_enabled"] is True
+
+
+def test_lerobot_resume_checkboxes_pin_auto_generated_names() -> None:
+    script = resolve_runtime_path("web/static/lerobot.js").read_text(encoding="utf-8")
+
+    assert "function resumeDatasetRequested()" in script
+    assert "function resumeTrainingRequested()" in script
+    assert "const resumeDataset = resumeDatasetRequested();" in script
+    assert "const resumeTraining = resumeTrainingRequested();" in script
+    assert "if (!resumeDataset && datasetInput" in script
+    assert "if (!resumeTraining) syncTrainNamingFromDataset();" in script
+
+
+def test_lerobot_train_output_name_includes_policy_type_suffix() -> None:
+    script = resolve_runtime_path("web/static/lerobot.js").read_text(encoding="utf-8")
+
+    assert "function currentTrainPolicySuffix()" in script
+    assert 'String(policyTypeInput.value || "smolvla")' in script
+    assert "`${runName}_train(${suffix})`" in script
+    assert "syncTrainNamingFromDataset({ policyChanged: true })" in script
+
+
+def test_lerobot_active_robot_cam_payload_fields_are_wired() -> None:
+    script = resolve_runtime_path("web/static/lerobot.js").read_text(encoding="utf-8")
+
+    assert 'const activeRobotCamEnabledInput = $("lerobot-active-robot-cam-enabled-input");' in script
+    assert "active_robot_cam_enabled: boolValue(activeRobotCamEnabledInput)" in script
+    assert 'active_robot_cam_camera_priority: "d405,d455f"' in script
+    assert 'active_robot_cam_primary_camera_key: "wrist"' in script
+    assert 'active_robot_cam_fallback_camera_key: "top"' in script
+    assert "active_robot_cam_record_start_enabled: boolValue(activeRobotCamRecordStartInput)" in script
+
+
+def test_lerobot_gui_api_default_rgbd_render_cameras_are_top_front_right() -> None:
+    request = main_module.LeRobotAPIRequest()
+
+    assert request.isaac_rgbd_render_cameras == "top,front,right"
+    assert request.isaac_data_augmentation_cameras == "top,front,right"
+
+
+def test_lerobot_gui_api_preserves_isaac_augmentation_options() -> None:
+    request = main_module.LeRobotAPIRequest.model_validate(
+        {
+            "isaac_data_augmentation_profile": "sim2real",
+            "isaac_data_augmentation_sensor_noise_enabled": False,
+            "isaac_data_augmentation_rgb_strength": 0.75,
+            "isaac_data_augmentation_depth_strength": 1.25,
+            "isaac_data_augmentation_render_domain_strength": 1.1,
+            "isaac_data_augmentation_camera_pose_strength": 0.6,
+            "isaac_data_augmentation_preview_count": 12,
+            "dataset_mix_real_original_weight": 0.8,
+            "dataset_mix_isaac_rgbd_weight": 0.3,
+            "dataset_mix_isaac_augmentation_weight": 0.2,
+            "dataset_mix_isaac_lab_synthetic_weight": 0.4,
+            "dataset_mix_isaac_rgbd_max_samples": 20,
+            "dataset_mix_isaac_augmentation_max_samples": 30,
+            "dataset_mix_isaac_lab_synthetic_max_samples": 40,
+            "dataset_mix_seed": 7,
+            "fidelity_weighting_enabled": True,
+            "fidelity_real_original_weight": 1.0,
+            "fidelity_isaac_rgbd_weight": 0.45,
+            "fidelity_isaac_augmentation_weight": 0.25,
+            "fidelity_isaac_lab_synthetic_weight": 0.2,
+        }
+    )
+    payload = request.model_dump()
+
+    assert payload["isaac_data_augmentation_profile"] == "sim2real"
+    assert payload["isaac_data_augmentation_sensor_noise_enabled"] is False
+    assert payload["isaac_data_augmentation_rgb_strength"] == 0.75
+    assert payload["isaac_data_augmentation_depth_strength"] == 1.25
+    assert payload["isaac_data_augmentation_render_domain_strength"] == 1.1
+    assert payload["isaac_data_augmentation_camera_pose_strength"] == 0.6
+    assert payload["isaac_data_augmentation_preview_count"] == 12
+    assert payload["dataset_mix_real_original_weight"] == 0.8
+    assert payload["dataset_mix_isaac_rgbd_weight"] == 0.3
+    assert payload["dataset_mix_isaac_augmentation_weight"] == 0.2
+    assert payload["dataset_mix_isaac_lab_synthetic_weight"] == 0.4
+    assert payload["dataset_mix_isaac_rgbd_max_samples"] == 20
+    assert payload["dataset_mix_isaac_augmentation_max_samples"] == 30
+    assert payload["dataset_mix_isaac_lab_synthetic_max_samples"] == 40
+    assert payload["dataset_mix_seed"] == 7
+    assert payload["fidelity_weighting_enabled"] is True
+    assert payload["fidelity_real_original_weight"] == 1.0
+    assert payload["fidelity_isaac_rgbd_weight"] == 0.45
+    assert payload["fidelity_isaac_augmentation_weight"] == 0.25
+    assert payload["fidelity_isaac_lab_synthetic_weight"] == 0.2
+
+
+def test_lerobot_gui_isaac_augmentation_camera_default_is_top_front_right() -> None:
+    page = resolve_runtime_path("web/templates/lerobot.html").read_text(encoding="utf-8")
+    script = resolve_runtime_path("web/static/lerobot.js").read_text(encoding="utf-8")
+
+    assert 'id="lerobot-isaac-augment-cameras-input" type="text" value="top,front,right"' in page
+    assert 'top,front,right' in script

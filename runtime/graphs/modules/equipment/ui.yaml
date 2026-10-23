@@ -1,0 +1,30 @@
+ui:
+  short: EQP
+  icon: /static/live_gui_icons/equipment_agent.svg
+  report_title: Lab Equipment Agent
+  chat:
+    mode: open_on_demand
+  renderer:
+    dashboard: module
+    report: module
+    fallback: descriptor
+  cards:
+  - {id: equipment_bridge_runtime, type: runtime, title: Bridge / Runtime, span: 4, tone: equipment}
+  - {id: equipment_active_program_skill, type: runtime, title: Active Program / Skill, span: 4, tone: equipment}
+  - {id: equipment_recovery_boundary, type: runtime, title: Recovery Boundary, span: 4, tone: equipment}
+  - {id: equipment_agentic_progress, type: progress, title: Agentic Progress, span: 12, tone: equipment}
+  - {id: equipment_method_values, type: metric_group, title: Method Values, span: 4, tone: equipment}
+  - {id: equipment_screen_transitions, type: evidence, title: Screen Transitions, span: 4, tone: equipment}
+  - {id: equipment_raw_data_next_specimen, type: evidence, title: Raw Data / Next Specimen, span: 4, tone: equipment}
+  - {id: equipment_execution_evidence, type: evidence, title: Execution Evidence, span: 8, tone: equipment}
+  - {id: equipment_handoff, type: handoff, title: Handoff, span: 4, tone: equipment}
+  report_sections:
+  - id: equipment_execution_report
+    title: Equipment Execution Evidence
+    selectors:
+      equipment_report: metadata.equipment_report
+      equipment_result: metadata.equipment_result
+  - id: equipment_analysis_handoff
+    title: Analysis Handoff
+    selectors:
+      handoff: metadata.equipment_handoff

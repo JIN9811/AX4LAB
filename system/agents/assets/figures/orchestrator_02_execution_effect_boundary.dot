@@ -1,0 +1,28 @@
+digraph orchestrator_execution_effect_boundary {
+  graph [rankdir=TB, bgcolor="#F8FAFC", pad="0.25", nodesep="0.30", ranksep="0.50", fontname="DejaVu Sans", label="Orchestrator decision and effect boundary", labelloc="t", fontsize=18];
+  node [shape=box, style="rounded,filled", fillcolor="#EEF4FF", color="#315C9B", fontname="DejaVu Sans", fontsize=9, margin="0.10,0.07"];
+  edge [color="#52667A", fontname="DejaVu Sans", fontsize=8, arrowsize=0.7];
+
+  intake [label="Canonical session +\nscoped Chat / pending request"];
+  context [label="Bounded current contract\nSetup / candidates / evidence"];
+  decision [label="Schema-validated\nregistered decision tool", shape=diamond, fillcolor="#FFF1D6", color="#B26A00"];
+  owner [label="Owner validation /\nreadback or admitted handoff"];
+  runtime [label="Existing controller /\nLangGraph consumption"];
+  model [label="orchestrator_plan\nregistered model backend", shape=component, fillcolor="#F2ECFA", color="#6B4C9A"];
+  evidence [label="Transcript · Setup history\ndecision · checkpoint · event", shape=note, fillcolor="#E9F7EF", color="#2E7D59"];
+  pending [label="Defer / owner review /\nrejected scope", fillcolor="#FFE9E7", color="#A33A32", penwidth=2];
+  route [label="Existing authorized\nnext route / next new run"];
+  boundary [label="Effect ceiling:\nmodel + local state", shape=octagon, fillcolor="#FFE9E7", color="#A33A32", penwidth=2];
+  no_device [label="No direct printer / robot /\ndesktop / instrument path", fillcolor="#FFE9E7", color="#A33A32", penwidth=2];
+
+  intake -> context;
+  context -> decision -> owner -> runtime -> route;
+  decision -> pending [label="defer / review / reject"];
+  model -> decision [style=dashed, label="bounded JSON choice"];
+  intake -> evidence [label="session evidence", color="#2E7D59"];
+  context -> evidence [label="context evidence", color="#2E7D59"];
+  owner -> evidence [label="receipt / handoff", color="#2E7D59"];
+  runtime -> evidence [label="checkpoint / event", color="#2E7D59"];
+  route -> boundary [label="coordination only"];
+  boundary -> no_device [style=dashed, arrowhead=tee, label="prohibited bypass"];
+}

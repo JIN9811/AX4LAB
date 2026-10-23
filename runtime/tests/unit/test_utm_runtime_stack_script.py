@@ -1,0 +1,87 @@
+"""Static contract checks for the cloned UTM runtime stack script."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import pytest
+
+
+@pytest.fixture(scope="module")
+def utm_repo() -> Path:
+    # These contracts inspect an external checkout, not shipped AX4LAB code.
+    # Supply a checkout visible inside the validation sandbox to opt in.
+    configured = os.environ.get("AX4LAB_TEST_UTM_REPO")
+    if not configured:
+        pytest.skip("Set AX4LAB_TEST_UTM_REPO to validate an external UTM checkout")
+    root = Path(configured).expanduser()
+    assert root.is_dir(), f"Configured UTM checkout is missing: {root}"
+    return root
+
+
+def test_cloned_utm_stack_script_runs_camera_monitor_and_yolo(utm_repo: Path) -> None:
+    script = utm_repo / "scripts" / "start_utm_vision_stack.sh"
+    text = script.read_text(encoding="utf-8")
+
+    assert "camera_rect.launch.py" in text
+    assert "green_dot_monitor.launch.py" in text
+    assert "yolov8.launch.py" in text
+    assert "input_image_topic:=/camera/image_rect" in text
+    assert "output_image_topic:=/image_utm" in text
+    assert "input_image_topic:=/image_utm" in text
+    assert "image_reliability:=1" in text
+    assert "UTM_VISION_ROOT" in text
+    assert "YOLO_MODEL_PATH" in text
+    assert 'CAMERA_DEVICE="${UTM_CAMERA_DEVICE' in text
+    assert 'CAMERA_WIDTH="${UTM_CAMERA_WIDTH' in text
+    assert 'CAMERA_HEIGHT="${UTM_CAMERA_HEIGHT' in text
+    assert 'CAMERA_FPS="${UTM_CAMERA_FPS:-60.0}"' in text
+    assert 'CAMERA_PIXEL_FORMAT="${UTM_CAMERA_PIXEL_FORMAT:-mjpeg2rgb}"' in text
+    assert 'CAMERA_INFO_URL="${UTM_CAMERA_INFO_URL' in text
+    assert 'video_device:="$CAMERA_DEVICE"' in text
+    assert 'image_width:="$CAMERA_WIDTH"' in text
+    assert 'image_height:="$CAMERA_HEIGHT"' in text
+    assert 'framerate:="$CAMERA_FPS"' in text
+    assert 'camera_info_url:="$CAMERA_INFO_URL"' in text
+
+
+def test_cloned_utm_stack_uses_large_shared_memory_for_raw_images(utm_repo: Path) -> None:
+    script = (utm_repo / "scripts" / "start_utm_vision_stack.sh").read_text(
+        encoding="utf-8"
+    )
+    profile_path = utm_repo / "config" / "fastdds_utm_shm.xml"
+
+    assert profile_path.is_file()
+    profile = profile_path.read_text(encoding="utf-8")
+    assert 'FASTDDS_DEFAULT_PROFILES_FILE' in script
+    assert 'RMW_FASTRTPS_PUBLICATION_MODE' in script
+    assert '<type>UDPv4</type>' in profile
+    assert '<type>SHM</type>' in profile
+    assert '<segment_size>16777216</segment_size>' in profile
+    assert '<maxMessageSize>1048576</maxMessageSize>' in profile
+    assert '<useBuiltinTransports>false</useBuiltinTransports>' in profile
+
+
+def test_cloned_utm_launch_files_match_atr_expected_topics(utm_repo: Path) -> None:
+    camera_rect = (utm_repo / "src/compression_tester_monitor/launch/camera_rect.launch.py").read_text(encoding="utf-8")
+    green_dot = (utm_repo / "src/compression_tester_monitor/launch/green_dot_monitor.launch.py").read_text(encoding="utf-8")
+    green_dot_node = (
+        utm_repo / "src/compression_tester_monitor/compression_tester_monitor/green_dot_monitor.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'namespace="camera"' in camera_rect
+    assert 'name="usb_cam"' in camera_rect
+    assert 'name="rectify_node"' in camera_rect
+    assert '("image", "image_raw")' in camera_rect
+    assert '("image_rect", "image_rect")' in camera_rect
+    assert 'default_value="/camera/image_rect"' in green_dot
+    assert 'default_value="/image_utm"' in green_dot
+    assert 'executable="green_dot_monitor"' in green_dot
+    assert "QoSReliabilityPolicy.RELIABLE" in green_dot_node
+    assert 'self.declare_parameter("output_image_max_fps", 30.0)' in green_dot_node
+    assert "self.output_image_tokens" in green_dot_node
+    assert "QoSHistoryPolicy.KEEP_LAST" in green_dot_node
+    assert "depth=1" in green_dot_node
+    assert "self.output_image_pub = self.create_publisher(Image, output_image_topic, image_qos_profile)" in green_dot_node
+    assert "self.create_subscription(Image, \"image\", self.image_cb, image_qos_profile)" in green_dot_node

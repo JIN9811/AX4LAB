@@ -1,0 +1,303 @@
+"""Knowledge decisions must change real note/retrieval effects, not just summaries."""
+from copy import deepcopy
+import importlib.util
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from orchestrator.state import Mode, OrchestratorState, Stage
+
+
+def request(tool, **arguments):
+    return json.dumps({"tool": tool, "arguments": arguments})
+
+
+def setup(tmp_path, responses):
+    from knowledge.markdown_runtime import store_for
+    state = OrchestratorState(run_id="decision-run", experiment_id="exp-a", mode=Mode.TEST, stage=Stage.KNOWLEDGE,
+                              active_goal="Preserve an exported result and retrieve relevant process evidence")
+    class Context:
+        force_real_llm_in_test = True
+        active_backend = "fixture"
+        artifact_run_root = str(tmp_path / "runs")
+        def __init__(self):
+            self.prompts = []
+        async def complete(self, task_type, prompt, **kwargs):
+            assert task_type == "knowledge_query"
+            self.prompts.append(prompt)
+            return SimpleNamespace(text=responses.pop(0), model="fixture")
+    evidence = [{"id": "current-analysis", "source_ref": "runs/decision-run/analysis.json",
+                 "agent_id": "analysis_agent", "content": {"objective_score": 1.25, "result": "verified export"}}]
+    return state, Context(), store_for(project_root=tmp_path), evidence
+
+
+def test_evidence_prompt_groups_repeated_guardian_history_without_rewriting_audit():
+    from agents.core.knowledge.decision import _model_observations
+    records = [{"incident_id": f"incident-{i}", "loop_id": i,
+                "stage": "equipment", "status": "open", "severity": "near_miss",
+                "immediate_cause": "RESULT_NOT_OK", "summary": "Owner review needed",
+                "risk_score": i / 100, "message": "duplicate detail " * 200}
+               for i in range(20)]
+    alert = {"status": "active", "failure_code": "DEVICE_ERROR", "blocks_workflow": True}
+    content = {"objective_score": 4.512143499, "metrics": {"mass_g": 13.72},
+               "artifact_refs": ["runs/example/analysis.json"],
+               "guardian_incidents": {"incident_count": 20, "incident_records": records,
+                   "current_failure_tags": ["DEVICE_ERROR"], "active_hardware_alerts": [alert]}}
+    trace = [{"tool": "inspect_evidence", "observation": {"sources": [
+        {"id": "current-analysis", "source_ref": "runs/example/intake.json", "content": content}]}}]
+    original = deepcopy(trace)
+    projected = _model_observations(trace)[0]["observation"]["sources"][0]
+    assert trace == original
+    assert projected["source_ref"] == "runs/example/intake.json"
+    assert projected["content"]["objective_score"] == 4.512143499
+    assert projected["content"]["metrics"] == {"mass_g": 13.72}
+    guardian = projected["content"]["guardian_incidents"]
+    assert len(guardian["incident_records"]) == 1
+    assert guardian["incident_records"][0]["count"] == 20
+    assert guardian["incident_records"][0]["loop_ids"] == list(range(20))
+    assert guardian["incident_records"][0]["max_risk_score"] == .19
+    assert guardian["active_hardware_alerts"] == [alert]
+    assert guardian["current_failure_tags"] == ["DEVICE_ERROR"]
+    assert projected["content"]["artifact_ref_count"] == 1
+    assert "source_ref" in projected["content"]["projection_note"]
+    assert len(json.dumps(projected)) < 2500
+
+
+@pytest.mark.asyncio
+async def test_model_inspects_writes_real_md_and_publishes_cited_context(tmp_path):
+    assert importlib.util.find_spec("agents.core.knowledge.decision") is not None
+    from agents.core.knowledge.decision import run_knowledge_decision
+    responses = [request("inspect_evidence"), request("write_knowledge_note", title="Verified export",
+        body="The current analysis reports verified export; no causal claim is made.", ontology_type="KnowledgeClaim",
+        evidence_kind="derived", source_ids=["current-analysis"], tags=["export"]),
+        request("publish_context", summary="The current result has a verified export.",
+                source_ids=["current-analysis"], no_knowledge_reason="")]
+    state, ctx, store, evidence = setup(tmp_path, responses)
+    before = deepcopy(evidence)
+    result = await run_knowledge_decision(state, ctx, store=store, evidence=evidence, scope={"run_id": "decision-run"})
+    assert result["status"] == "accepted" and result["llm_used"]
+    assert [event["tool"] for event in result["trace"]] == ["inspect_evidence", "write_knowledge_note", "publish_context"]
+    assert store.search("verified", scope={"run_id": "decision-run"})["hits"]
+    assert result["citations"][0]["source_ref"] == "runs/decision-run/analysis.json"
+    assert evidence == before
+    assert "verified export" in ctx.prompts[1]
+    assert set(json.loads(ctx.prompts[0])["tools"]) == {"inspect_evidence"}
+    assert "publish_context" in json.loads(ctx.prompts[1])["tools"]
+
+
+@pytest.mark.asyncio
+async def test_model_can_withhold_derived_knowledge_when_evidence_is_insufficient(tmp_path):
+    assert importlib.util.find_spec("agents.core.knowledge.decision") is not None
+    from agents.core.knowledge.decision import run_knowledge_decision
+    responses = [request("inspect_evidence"), request("search_knowledge", query="root cause", scope={}, top_k=3),
+        request("publish_context", summary="No supported root cause is available.", source_ids=[],
+                no_knowledge_reason="The current export observation does not establish a cause.")]
+    state, ctx, store, evidence = setup(tmp_path, responses)
+    result = await run_knowledge_decision(state, ctx, store=store, evidence=evidence, scope={"run_id": "decision-run"})
+    assert result["status"] == "accepted"
+    assert result["no_knowledge_reason"]
+    assert store.status()["records"] == 0
+
+
+@pytest.mark.asyncio
+async def test_model_can_read_its_successful_write_receipt_without_new_search(tmp_path):
+    from agents.core.knowledge.decision import run_knowledge_decision
+    state, ctx, store, evidence = setup(tmp_path, [])
+    async def complete(task, prompt, **kwargs):
+        observations = json.loads(prompt)["observations"]
+        step = len(observations)
+        if step == 0: value = request("inspect_evidence")
+        elif step == 1:
+            value = request("write_knowledge_note", title="Bounded interval", body="Measured interval only; no ultimate-peak claim.",
+                ontology_type="KnowledgeClaim", evidence_kind="derived", source_ids=["current-analysis"])
+        elif step == 2:
+            value = request("read_knowledge", record_id=observations[-1]["observation"]["record_id"])
+        else:
+            value = request("publish_context", summary="Preserved interval interpretation.",
+                source_ids=[observations[-1]["observation"]["citation_id"]], no_knowledge_reason="")
+        return SimpleNamespace(text=value, model="fixture")
+    ctx.complete = complete
+    result = await run_knowledge_decision(state, ctx, store=store, evidence=evidence, scope={"run_id": state.run_id})
+    assert result["status"] == "accepted"
+    assert len(result["note_receipts"]) == 1
+    assert store.status()["records"] == 1
+
+
+@pytest.mark.asyncio
+async def test_prompt_separates_citable_evidence_from_unread_write_receipts(tmp_path):
+    from agents.core.knowledge.decision import run_knowledge_decision
+    state, ctx, store, evidence = setup(tmp_path, [])
+    async def complete(task, prompt, **kwargs):
+        packet = json.loads(prompt)
+        observations = packet["observations"]
+        if not observations:
+            value = request("inspect_evidence")
+        elif len(observations) == 1:
+            value = request("write_knowledge_note", title="Result", body="Evidence preserved.",
+                ontology_type="KnowledgeClaim", evidence_kind="derived", source_ids=["current-analysis"])
+        else:
+            assert packet["available_citation_ids"] == ["current-analysis"]
+            assert observations[-1]["observation"]["record_id"] in packet["readable_record_ids"]
+            value = request("publish_context", summary="Evidence preserved.",
+                source_ids=packet["available_citation_ids"])
+        return SimpleNamespace(text=value, model="fixture")
+    ctx.complete = complete
+    result = await run_knowledge_decision(state, ctx, store=store, evidence=evidence, scope={"run_id": state.run_id})
+    assert result["status"] == "accepted"
+    assert result["citations"][0]["source_id"] == "current-analysis"
+
+
+@pytest.mark.asyncio
+async def test_unknown_citation_is_rejected_before_effect_and_model_can_correct_it(tmp_path):
+    from agents.core.knowledge.decision import run_knowledge_decision
+    responses = [request("inspect_evidence"),
+        request("publish_context", summary="Result", source_ids=["unread-note"]),
+        request("publish_context", summary="Original evidence only", source_ids=["current-analysis"],
+                no_knowledge_reason="No new note needed")]
+    state, ctx, store, evidence = setup(tmp_path, responses)
+    result = await run_knowledge_decision(state, ctx, store=store, evidence=evidence, scope={"run_id": state.run_id})
+    assert result["status"] == "accepted"
+    assert result["citations"][0]["source_id"] == "current-analysis"
+    assert store.status()["records"] == 0
+    error = json.loads(ctx.prompts[-1])["observations"][-1]
+    assert error["tool"] == "protocol_error"
+    assert "Unknown or unread source identity" in error["observation"]["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [
+    request("search_knowledge", query="x", scope={"run_id": "other-run"}),
+    request("write_knowledge_note", title="x", body="Invented", ontology_type="Observation", evidence_kind="observed", source_ids=["fake"]),
+    request("publish_context", summary="Unsupported", source_ids=["fake"], no_knowledge_reason=""),
+    "not json",
+])
+async def test_invalid_decision_is_not_success_and_does_not_write(tmp_path, bad):
+    assert importlib.util.find_spec("agents.core.knowledge.decision") is not None
+    from agents.core.knowledge.decision import run_knowledge_decision
+    state, ctx, store, evidence = setup(tmp_path, [request("inspect_evidence"), bad])
+    result = await run_knowledge_decision(state, ctx, store=store, evidence=evidence, scope={"run_id": "decision-run"})
+    assert result["status"] == "failed"
+    assert store.status()["records"] == 0
+
+
+@pytest.mark.asyncio
+async def test_model_can_correct_argument_shape_before_any_tool_effect(tmp_path):
+    from agents.core.knowledge.decision import run_knowledge_decision
+    responses = [request("inspect_evidence", query="not an allowed argument"),
+                 request("inspect_evidence"), request("publish_context", summary="No new note needed.",
+                    source_ids=["current-analysis"], no_knowledge_reason="Reference already retained.")]
+    state, ctx, store, evidence = setup(tmp_path, responses)
+    result = await run_knowledge_decision(state, ctx, store=store, evidence=evidence, scope={"run_id": state.run_id})
+    assert result["status"] == "accepted"
+    assert result["trace"][0]["tool"] == "protocol_error"
+    assert store.status()["records"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("failure", [OSError, KeyError])
+async def test_optional_source_storage_failure_does_not_break_markdown_decision(tmp_path, monkeypatch, enabled, failure):
+    from agents.core.knowledge.decision import run_knowledge_decision
+    def unavailable(_ctx):
+        if not enabled:
+            raise AssertionError("Excluded source corpus must not be resolved")
+        raise failure("Optional source catalog unavailable")
+    monkeypatch.setattr("mcp_tools.source_tools.source_library_for_context", unavailable)
+    state, ctx, store, evidence = setup(tmp_path, [request("inspect_evidence"),
+        request("publish_context", summary="Current evidence retained.", source_ids=["current-analysis"],
+                no_knowledge_reason="No new reusable note needed.")])
+    result = await run_knowledge_decision(state, ctx, store=store, evidence=evidence, scope={},
+        settings={"corpora": ["markdown", "sources"] if enabled else ["markdown"]})
+    assert result["status"] == "accepted"
+    assert result["source_library_status"] == ("unavailable" if enabled else "excluded")
+
+
+def test_source_prompt_projection_avoids_replaying_full_citation_catalogs():
+    from agents.core.knowledge.decision import _model_observations
+    record = {"record_id": "record-one", "corpus": "sources", "title": "Consolidated source",
+              "body": "Complete curated content retained. Final qualification: 73 days.",
+              "applicability": {"variant": "Azure"}, "citations": [{"page": 1}] * 1000,
+              "source_refs": ["source:long-source#block-long-id"] * 1000}
+    trace = [{"tool": "search_knowledge", "arguments": {}, "observation": {
+        "corpus": "sources", "scope": {}, "hits": [{**record, "excerpt": "Complete curated content"}]}},
+        {"tool": "read_knowledge", "arguments": {}, "observation": {"record": record, "citation_id": "record-one"}}]
+    before = deepcopy(trace)
+    projected = _model_observations(trace)
+    assert len(json.dumps(projected)) < 3000
+    assert projected[1]["observation"]["record"]["body"] == record["body"]
+    assert projected[1]["observation"]["citation_id"] == "record-one"
+    assert projected[1]["observation"]["record"]["applicability"] == record["applicability"]
+    assert trace == before  # Raw audit and final handoff remain complete.
+
+
+@pytest.mark.asyncio
+async def test_search_then_detail_uses_scope_and_passes_observation_back_to_model(tmp_path):
+    assert importlib.util.find_spec("agents.core.knowledge.decision") is not None
+    from agents.core.knowledge.decision import run_knowledge_decision
+    responses = []
+    state, ctx, store, evidence = setup(tmp_path, responses)
+    receipt = store.write_note(dict(run_id="decision-run", cycle_id="loop-000001", agent_id="equipment",
+        event_id="prior", ontology_type="Observation", title="Export guidance", body="Confirmed export file was present.",
+        source_refs=["runs/decision-run/prior.json"]))
+    responses.extend([request("inspect_evidence"), request("search_knowledge", query="export", scope={}, top_k=2),
+        request("read_knowledge", record_id=receipt["record_id"]),
+        request("publish_context", summary="A previous export file was present.", source_ids=[receipt["record_id"]],
+                no_knowledge_reason="Existing note already captures the observation.")])
+    result = await run_knowledge_decision(state, ctx, store=store, evidence=evidence, scope={"run_id": "decision-run"})
+    assert result["status"] == "accepted"
+    assert result["selected_knowledge"][0]["record_id"] == receipt["record_id"]
+    assert "Confirmed export file" in ctx.prompts[-1]
+
+
+def test_bo_receives_scoped_knowledge_citations_without_changing_analysis_values():
+    from agents.bo.agent import BOAgent
+    state = OrchestratorState(run_id="run-a", experiment_id="a", mode=Mode.TEST, stage=Stage.BO,
+        latest_analysis={"objective_score": 1.25}, run_metadata={"knowledge": {
+            "memory_summary": "Supported export", "scope": {"run_id": "run-a"},
+            "selected_knowledge": [{"record_id": "note-a", "excerpt": "Export exists"}],
+            "citations": [{"source_id": "note-a", "source_ref": "runs/run-a/note.md"}]}})
+    before = deepcopy(state.latest_analysis)
+    result = BOAgent._knowledge_context_from_state(state)
+    assert result["citations"][0]["source_ref"] == "runs/run-a/note.md"
+    assert result["selected_knowledge"][0]["record_id"] == "note-a"
+    assert result["scope"] == {"run_id": "run-a"}
+    assert state.latest_analysis == before
+
+
+def test_llm_scope_cannot_drop_required_tags_but_can_add_constraints():
+    from agents.core.knowledge.decision import _narrow_scope
+    base = {"tags": ["export", "reviewed"], "run_id": ["a", "b"]}
+    with pytest.raises(ValueError):
+        _narrow_scope(base, {"tags": ["export"]})
+    assert _narrow_scope(base, {"tags": ["export", "reviewed", "csv"], "run_id": "a"}) == {
+        "tags": ["export", "reviewed", "csv"], "run_id": "a"}
+
+
+@pytest.mark.asyncio
+async def test_derived_note_inherits_source_conditions_without_relabeling(tmp_path):
+    from agents.core.knowledge.decision import run_knowledge_decision
+    responses = [request("inspect_evidence"), request("write_knowledge_note", title="Export",
+        body="Source-conditioned export observation.", ontology_type="KnowledgeClaim",
+        source_ids=["current-analysis"]), request("publish_context", summary="Export observed.",
+        source_ids=["current-analysis"], no_knowledge_reason="")]
+    state, ctx, store, evidence = setup(tmp_path, responses)
+    evidence[0]["applicability"] = {"material": "PLA", "protocol": "v2"}
+    result = await run_knowledge_decision(state, ctx, store=store, evidence=evidence,
+        scope={"applicability": {"material": "PLA"}})
+    assert result["status"] == "accepted"
+    assert store.search("", scope={"applicability": {"material": "PLA", "protocol": "v2"}})["hits"]
+
+
+def test_research_context_preserves_markdown_source_classification():
+    from knowledge.retrieval import retrieve_research_context
+    result = retrieve_research_context(query="export", retrieval_result={"local_chunks": [{
+        "source": "memory/note.md", "source_type": "markdown_knowledge",
+        "trust_level": "derived", "text": "Export"}]})
+    assert result["sources"][0]["source_type"] == "markdown_knowledge"
+    assert result["sources"][0]["trust_level"] == "derived"
+    from agents.core.knowledge.agent import _source_refs_from_retrieval
+    typed = _source_refs_from_retrieval({"local_chunks": [{"chunk_id": "note-a",
+        "source": "memory/note.md", "source_type": "markdown_knowledge", "trust_level": "derived"}]})
+    assert typed[0].source_type == "experiment_memory"
+    assert typed[0].trust_level == "derived"

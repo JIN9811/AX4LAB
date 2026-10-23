@@ -1,0 +1,323 @@
+const { test } = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+
+function viewer() {
+  const source = fs.readFileSync("web/frontend/omx_telemetry_viewer/src/index.js", "utf8")
+    .replace(/^import .*;$/gm, "").split("window.ATRRobotTelemetryCards =")[0];
+  const context = vm.createContext({
+    THREE: { Vector3: class {}, Quaternion: class {}, Euler: class {} },
+    document: { querySelector: () => null, querySelectorAll: () => [] },
+    window: { requestAnimationFrame: () => 1 },
+  });
+  vm.runInContext(source + `
+    const originalApplyMotionState = applyMotionState;
+    const originalScheduleChartRender = scheduleChartRender;
+    scheduleChartRender = () => {};
+    globalThis.api = { runtime, appendSample, consumePacket, chartOption, loadSnapshot,
+      scheduleChartRender:originalScheduleChartRender, connectTelemetrySocket, closeTelemetrySocket,
+      applyMotionState: originalApplyMotionState, applyArtifacts, restoreTelemetryStatus };
+  `, context);
+  return context;
+}
+
+const sample = (sequence, elapsed_s = sequence - 1) => ({
+  type: "joint_sample", session_id: "test", sequence, elapsed_s,
+  actual_source: { Joint1: sequence, Gripper: sequence % 100 },
+  target_source: { Joint1: sequence + 1, Gripper: sequence % 100 + 1 },
+});
+
+test('legacy server snapshot cannot overwrite isolated worker grasp evidence', async () => {
+  const context = viewer(), {api} = context;
+  api.runtime.telemetryUrl = 'ws://worker/joints';
+  const evidence = {latest_grasp_outcome: {status: 'success'}};
+  api.runtime.artifacts = evidence;
+  context.fetch = async () => ({ok:true, json:async () => ({
+    artifacts:{latest_grasp_outcome:{status:'failed'}}, status:'idle'
+  })});
+  await api.loadSnapshot();
+  assert.equal(api.runtime.artifacts, evidence);
+});
+
+test('chart projection appends once and resets for a joint or session change without losing points', () => {
+  const {api}=viewer();
+  for(let i=1;i<=5000;i++) api.appendSample(sample(i));
+  const first=api.chartOption();
+  const points=first.series[0].data;
+  assert.equal(points.length,5000);
+  assert.equal(api.chartOption().series[0].data,points);
+  api.appendSample(sample(5001));
+  assert.equal(api.chartOption().series[0].data,points);
+  assert.equal(points.length,5001);
+  api.runtime.selectedJoint='Joint1';
+  assert.notEqual(api.chartOption().series[0].data,points);
+  assert.equal(api.chartOption().series[0].data.at(-1)[1],5001);
+  api.appendSample({...sample(1),session_id:'new'});
+  assert.equal(api.chartOption().series[0].data.length,1);
+});
+
+test('chart bursts coalesce at 15 FPS while every received sample remains available', () => {
+  const context=viewer(), {api}=context;
+  let now=0, timer, frame, delay, paints=0;
+  context.performance={now:()=>now};
+  context.window.setTimeout=(fn,ms)=>{timer=fn;delay=ms;return 1;};
+  context.window.requestAnimationFrame=fn=>{frame=fn;return 2;};
+  api.runtime.chart={setOption:(option,config)=>{
+    paints++;assert.equal(config.notMerge,false);
+    assert.equal(option.series[0].data.length,api.runtime.history.length);
+  }};
+  for(let i=1;i<=128;i++){api.appendSample(sample(i));api.scheduleChartRender();}
+  timer();frame();
+  assert.equal(paints,1);
+  now=10;api.appendSample(sample(129));api.scheduleChartRender();
+  assert.ok(delay>56&&delay<57);
+  now=67;timer();frame();
+  assert.equal(paints,2);
+  assert.equal(api.runtime.history.length,129);
+});
+
+test('remount reuses worker discovery but unexpected disconnect discovers a new worker', async () => {
+  const context=viewer(),{api}=context;
+  context.document.querySelector=()=>({});
+  context.window.location={protocol:'http:',host:'127.0.0.1:7860'};
+  context.AbortSignal=AbortSignal;
+  context.window.setTimeout=()=>1;
+  context.window.clearTimeout=()=>{};
+  let discoveries=0;
+  context.fetch=async()=>{discoveries++;return {ok:true,json:async()=>({isolated:true,websocket_url:'ws://worker/joints'})};};
+  context.WebSocket=class {static CONNECTING=0;static OPEN=1;readyState=1;close(){}};
+  await api.connectTelemetrySocket();
+  api.closeTelemetrySocket();
+  await api.connectTelemetrySocket();
+  assert.equal(discoveries,1);
+  api.runtime.websocket.onclose();
+  await api.connectTelemetrySocket();
+  assert.equal(discoveries,2);
+});
+
+test("remounted terminal cards restore accepted status without consuming old samples", () => {
+  const context = viewer();
+  const {api} = context;
+  api.appendSample(sample(30));
+  api.runtime.status = 'complete';
+  api.runtime.latestMotionState = {measured: {base_state:'home', gripper_state:'idle'}};
+  vm.runInContext(`
+    applyRobotMotionLabel = annotation => { globalThis.label = annotation; };
+    setPoseStatus = text => { globalThis.poseStatus = text; };
+    setTrackingStatus = text => { globalThis.trackingStatus = text; };
+  `, context);
+  api.restoreTelemetryStatus();
+  assert.equal(context.label.base_state, 'home');
+  assert.equal(context.poseStatus, 'complete');
+  assert.equal(context.trackingStatus, '1 samples');
+  assert.equal(api.runtime.latestSequence,30);
+  assert.equal(api.runtime.history.length,1);
+});
+
+test("reconnection history cannot rewind the latest pose or runtime view", () => {
+  const {api} = viewer();
+  api.consumePacket({type:'joint_samples', samples:[{...sample(200), execution_index:2,
+    actual_rad:{Joint1:.8}}], runtime_view:{execution:{status:'current'}}});
+  for (const execution_index of [1, 2]) {
+    api.consumePacket({type:'joint_history', samples:[{...sample(1),execution_index,
+      actual_rad:{Joint1:-1}}], runtime_view:{execution:{status:'old'}}});
+  }
+  assert.equal(api.runtime.latestSequence,200);
+  assert.equal(api.runtime.latestActualRad.Joint1,.8);
+  assert.equal(api.runtime.runtimeView.execution.status,'current');
+  assert.equal(api.runtime.history.length,1);
+});
+
+test("reset clears real tracking state, rejects old history and accepts a new rollout", () => {
+  const {api} = viewer();
+  api.consumePacket({type:'joint_history',samples:[sample(1)],reset_at_ms:0});
+  api.runtime.latestTargetRad={Joint1:.4};
+  api.consumePacket({type:'telemetry_state',status:'idle',session:{},reset_at_ms:100});
+  assert.equal(api.runtime.history.length,0);
+  assert.equal(Object.keys(api.runtime.latestTargetRad).length,0);
+  api.consumePacket({type:'joint_history',samples:[sample(1)],reset_at_ms:0});
+  assert.equal(api.runtime.history.length,0);
+  api.consumePacket({type:'joint_history',reset_at_ms:100,session:{session_id:'new'},samples:[{...sample(1),session_id:'new'}]});
+  assert.equal(api.runtime.sessionId,'new');
+  assert.equal(api.runtime.history.length,1);
+});
+
+test("a compact batch preserves every curve point and applies its latest pose and grasp once", () => {
+  const context = viewer();
+  const { api } = context;
+  const status = { textContent: "idle" };
+  const container = { dataset: {}, querySelector: s => s === "[data-atr-grasp-status]" ? status : null };
+  let graspUpdates = 0;
+  context.document.querySelectorAll = selector => {
+    if (selector === "[data-atr-grasp-outcome]") { graspUpdates++; return [container]; }
+    return [];
+  };
+  api.appendSample(sample(1));
+  graspUpdates = 0;
+  const samples = Array.from({ length: 128 }, (_, i) => sample(i + 2));
+  const latest = { ...samples.at(-1), actual_rad: { Joint1: 0.4 }, target_rad: { Joint1: 0.5 },
+    motion_state: { grasp_outcome: { status: "failed", attempt_index: 2 },
+      grasp_achievement: { achieved: true, first_success: { status: "success", attempt_index: 1 } } } };
+  api.consumePacket({ type: "joint_samples", sample_format: "compact-v1", samples, latest_sample: latest });
+  assert.equal(api.runtime.history.length, 129);
+  assert.equal(api.runtime.latestSequence, 129);
+  assert.equal(api.runtime.latestActualRad.Joint1, 0.4);
+  assert.equal(api.runtime.latestTargetRad.Joint1, 0.5);
+  assert.equal(status.textContent, "success");
+  assert.equal(graspUpdates, 1);
+  assert.equal(api.runtime.latestMotionState.grasp_outcome.attempt_index, 2);
+  api.runtime.selectedJoint = "Gripper";
+  assert.equal(api.chartOption().series[0].data.length, 129);
+  assert.deepEqual(Array.from(api.chartOption().series[0].data.at(-1)), [128, 29]);
+  // Re-delivery must neither duplicate chart points nor reapply an older pose.
+  api.consumePacket({ type: "joint_samples", samples: [sample(128)],
+    latest_sample: { ...sample(128), actual_rad: { Joint1: 99 } } });
+  assert.equal(api.runtime.history.length, 129);
+  assert.equal(api.runtime.latestActualRad.Joint1, 0.4);
+  assert.equal(graspUpdates, 1);
+});
+
+test("legacy full-sample history also updates status only once per batch", () => {
+  const context = viewer();
+  context.api.appendSample(sample(1));
+  let updates = 0;
+  context.document.querySelectorAll = selector => {
+    if (selector === "[data-atr-grasp-outcome]") updates++;
+    return [];
+  };
+  context.api.consumePacket({ type: "joint_history", samples: [sample(1), sample(2), sample(3)] });
+  assert.equal(context.api.runtime.history.length, 3);
+  assert.equal(updates, 1);
+});
+
+test("compact execution rollover keeps the new pose and runtime view without old curve points", () => {
+  const { api } = viewer();
+  api.appendSample({ ...sample(100), execution_index: 1 });
+  const point = { ...sample(1, 0), execution_index: 2 };
+  api.consumePacket({ type: "joint_samples", samples: [point],
+    latest_sample: { ...point, actual_rad: { Gripper: 0.2 } },
+    runtime_view: { execution: { status: "running" } } });
+  assert.equal(api.runtime.executionIndex, 2);
+  assert.deepEqual(Array.from(api.runtime.history, p => p.sequence), [1]);
+  assert.equal(api.runtime.latestActualRad.Gripper, 0.2);
+  assert.equal(api.runtime.runtimeView.execution.status, "running");
+  const nextSession = { ...sample(1, 0), session_id: "next-rollout", execution_index: 1 };
+  api.consumePacket({ type: "joint_history", session: { session_id: "next-rollout" },
+    samples: [nextSession], latest_sample: { ...nextSession, actual_rad: { Gripper: 0.3 } } });
+  assert.equal(api.runtime.sessionId, "next-rollout");
+  assert.equal(api.runtime.history.length, 1);
+  assert.equal(api.runtime.latestActualRad.Gripper, 0.3);
+});
+
+test("detail for a different sample cannot advance a compact batch's pose", () => {
+  const { api } = viewer();
+  api.consumePacket({ type: "joint_history", samples: [sample(1), sample(2)],
+    latest_sample: { ...sample(100), actual_rad: { Joint1: 99 } } });
+  assert.equal(api.runtime.latestSequence, 2);
+  assert.notEqual(api.runtime.latestActualRad.Joint1, 99);
+  assert.equal(api.runtime.history.length, 2);
+});
+
+for (const compact of [false, true]) {
+  test(`release followed by idle in one ${compact ? "compact" : "legacy"} batch stays released`, () => {
+    const context = viewer();
+    const { api } = context;
+    api.appendSample(sample(1));
+    // Only replace geometry calculations; exercise the actual grasp/release latch.
+    vm.runInContext(`
+      specimenObject = () => ({});
+      syncHeldSpecimenPose = () => true;
+      settleSpecimenOnSupport = () => true;
+      runtime.viewer = { environmentGroup: {}, measuredRobot: { joints: new Map() },
+        specimenGraspState: { held: true, attemptIndex: 1, releasedAttemptIndex: null } };
+    `, context);
+    const points = ["ungrasping", "idle"].map((gripper_state, index) => ({
+      ...sample(index + 2),
+      ...(compact ? { grasp_visual: { status: "success", attempt_index: 1, gripper_state } }
+        : { motion_state: { grasp_outcome: { status: "success", attempt_index: 1 }, measured: { gripper_state } } }),
+    }));
+    api.consumePacket({ type: "joint_samples", samples: points,
+      latest_sample: { ...sample(3), motion_state: {
+        grasp_outcome: { status: "success", attempt_index: 1 }, measured: { gripper_state: "idle" } } } });
+    assert.equal(api.runtime.viewer.specimenGraspState.held, false);
+    assert.equal(api.runtime.viewer.specimenGraspState.releasedAttemptIndex, 1);
+    assert.equal(api.runtime.history.length, 3);
+  });
+}
+
+test("all recorded samples survive live updates and reconnect backfill", () => {
+  const { api } = viewer();
+  for (let i = 1; i <= 1501; i++) api.appendSample(sample(i));
+  assert.equal(api.runtime.history.length, 1501);
+  api.consumePacket({ type: "joint_history", samples: [sample(1), sample(2)] });
+  api.consumePacket({ type: "joint_samples", samples: [sample(3), sample(4)] });
+  assert.equal(api.runtime.history.length, 1501);
+  assert.equal(api.runtime.latestSequence, 1501);
+  api.consumePacket({type:'joint_samples', samples:[sample(1502)]});
+  assert.equal(api.runtime.history.length, 1502);
+});
+
+test("joint chart uses session time, never rebases a partial history to zero", () => {
+  const { api } = viewer();
+  api.appendSample(sample(20, 24.5));
+  api.appendSample(sample(21, 24.6));
+  for (const joint of ["Joint1", "Gripper"]) {
+    api.runtime.selectedJoint = joint;
+    assert.equal(api.chartOption().series[0].data[0][0], 24.5);
+  }
+});
+
+test("late snapshot cannot advance the history cursor and discard backfill", async () => {
+  const context = viewer();
+  const { api } = context;
+  api.consumePacket({ type: "joint_history", samples: [sample(1), sample(2)] });
+  context.fetch = async () => ({ ok: true, json: async () => ({ packet: sample(100), status: "live" }) });
+  await api.loadSnapshot();
+  api.appendSample(sample(3));
+  assert.deepEqual(Array.from(api.runtime.history, s => s.sequence), [1, 2, 3]);
+});
+
+test("HTTP snapshot cannot overwrite a socket update received while awaiting response", async () => {
+  const context = viewer();
+  const {api} = context;
+  context.fetch = async () => {
+    api.consumePacket({type:'joint_samples',samples:[sample(1)],
+      runtime_view:{execution:{status:'fresh'}}});
+    return {ok:true,json:async()=>({status:'complete',runtime_view:{execution:{status:'old'}}})};
+  };
+  await api.loadSnapshot();
+  assert.equal(api.runtime.runtimeView.execution.status,'fresh');
+});
+
+test("first success stays on result card while 3D uses the latest raw attempt", () => {
+  const context = viewer();
+  const status = { textContent: "idle" };
+  const container = { dataset: {}, querySelector: s => s === "[data-atr-grasp-status]" ? status : null };
+  context.document.querySelectorAll = s => s === "[data-atr-grasp-outcome]" ? [container] : [];
+  vm.runInContext("applySpecimenGraspVisualization = outcome => { globalThis.rawVisualization = outcome; };", context);
+  const first = { status: "success", attempt_index: 1, contact_gap: 3.5 };
+  const latest = { status: "failed", attempt_index: 2, contact_gap: 0.1 };
+  const achievement = { achieved: true, first_success: first };
+  context.api.applyMotionState({ grasp_outcome: latest, grasp_achievement: achievement });
+  assert.equal(status.textContent, "success");
+  assert.equal(context.rawVisualization.attempt_index, 2);
+  assert.equal(context.rawVisualization.status, "failed");
+  context.api.applyArtifacts({ latest_grasp_outcome: latest, grasp_achievement: achievement });
+  assert.equal(status.textContent, "success");
+  context.api.applyMotionState({ grasp_outcome: { status: "idle" }, grasp_achievement: { achieved: false, first_success: null } });
+  assert.equal(status.textContent, "idle");
+});
+
+test("reusing a rollout name starts fresh history when the logger execution changes", () => {
+  const { api } = viewer();
+  api.appendSample({ ...sample(100), execution_index: 1 });
+  api.appendSample({ ...sample(1, 0), execution_index: 2 });
+  assert.deepEqual(Array.from(api.runtime.history, s => s.sequence), [1]);
+  api.consumePacket({ type: "joint_history", samples: [
+    { ...sample(1), execution_index: 1 }, { ...sample(2), execution_index: 1 },
+    { ...sample(1), execution_index: 2 }, { ...sample(2), execution_index: 2 },
+  ] });
+  assert.deepEqual(Array.from(api.runtime.history, s => s.sequence), [1, 2]);
+  assert.ok(api.runtime.history.every(s => s.execution_index === 2));
+});

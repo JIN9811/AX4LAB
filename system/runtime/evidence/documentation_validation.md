@@ -1,0 +1,79 @@
+---
+doc_type: evidence
+subtype: test_report
+status: active
+authority: evidentiary
+audience:
+  - researcher
+  - reviewer
+  - artifact_evaluator
+scope:
+  - paper
+  - documentation_validation
+summary: Records the initial focused tests for general and paper-specific documentation contracts.
+evidence_date: 2026-08-09
+method: Focused pytest execution plus documentation validator execution in the repository virtual environment.
+related_docs:
+  - docs/project/CONTRIBUTING.md
+  - system/standards/documentation_standard.md
+supersedes: []
+---
+
+# Documentation Validation Evidence
+
+## Summary
+
+Evidence ID `E-TEST-DOC-001` records the initial automated checks for document
+front matter, manifests, local links, snapshot labels, required paper files,
+narrative priority, claim-evidence references, output hashes, figure pairs, and
+personal-path rejection.
+
+This is a historical record from 2026-08-09. The manuscript-specific files,
+validator, and tests were later retired when the manuscript moved outside
+this repository. Commands and outcomes below describe the recorded baseline;
+see [Contributing](../../../docs/project/CONTRIBUTING.md#tests-and-verification) for current
+documentation checks.
+
+## Environment
+
+- Evidence class: `test`
+- Date: 2026-08-09
+- Validator implementation commit: `d0b7063`
+- Paper Standard commit: `78b0913`
+- Complete public paper package commit: `beca57f`
+- Working directory: repository root
+- Python: repository `.venv`
+
+## Commands
+
+```bash
+.venv/bin/python -m pytest -q tests/unit/test_documentation_validation.py tests/unit/test_paper_publication_validation.py
+.venv/bin/python scripts/validate_documentation.py
+.venv/bin/python scripts/validate_paper_publication.py
+```
+
+## Observed Output
+
+```text
+.......................                                                  [100%]
+23 passed in 0.06s
+documentation validation passed
+paper publication validation passed
+```
+
+## Result
+
+`pass` for the 23 selected test cases, governed document set, and complete
+paper-first public file set at package commit `beca57f`.
+
+## Interpretation Boundary
+
+These checks validate documentation and claim-evidence package contracts. They
+do not execute the ATR research loop, validate scientific conclusions, test a
+browser workflow, operate physical equipment, or establish safety
+effectiveness.
+
+## Related Documents
+
+- [Current documentation checks](../../../docs/project/CONTRIBUTING.md#tests-and-verification)
+- [Documentation standard](../../standards/documentation_standard.md)

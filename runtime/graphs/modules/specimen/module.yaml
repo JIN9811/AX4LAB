@@ -1,0 +1,72 @@
+module:
+  implementation:
+    schema: ax4lab.agent_module.v1
+    id: specimen
+    version: 1.0.0
+    registration: installed_code
+  orchestration_contract:
+    version: orchestration_contract.v1
+    admission:
+      authority: existing_owner_and_runtime_validation
+      description: Descriptive only; absent evidence is unknown, not ready.
+    result:
+      required: []
+    acceptance:
+      authority: policies/validation_policy.py and existing owner validators
+      description: existing printer_preflight checks apply only when that contract is present
+  id: specimen
+  label: Specimen Making Agent Module
+  handler: agent.specimen_agent
+  llm_role: specimen_reasoning
+  editable: true
+  safety:
+    live_requires_validation: true
+    dry_run_supported: true
+  tools:
+  - geometry.generate_metamaterial_stl
+  - geometry.check_mesh_quality
+  - geometry.check_manufacturability
+  - artifact.create_specimen_handoff
+  - experiment.evaluate
+  - printer.prepare
+  execution_graph:
+    schema: ax4lab.execution_graph.v1
+    entry: prepare
+    nodes:
+    - id: prepare
+      handler: specimen.prepare
+      label: Prepare geometry and manufacturing evidence
+      area: middle
+    - id: decide
+      handler: specimen.decide
+      label: Bounded fabrication decision and execution
+      area: middle
+      llm: true
+    - id: finalize
+      handler: specimen.finalize
+      label: Build fabrication report and handoff
+      area: middle
+    - id: review
+      handler: specimen.review
+      label: Return owner review result
+      area: guardian
+    - id: operator_input
+      handler: specimen.operator_input
+      label: Return printer path request
+      area: middle
+    edges:
+    - {source: prepare, target: decide, 'on': ready, kind: execution}
+    - {source: prepare, target: operator_input, 'on': operator_input, kind: validation}
+    - {source: decide, target: finalize, 'on': executed, kind: execution}
+    - {source: decide, target: review, 'on': blocked, kind: validation}
+    terminals: [finalize, review, operator_input]
+  io_contract:
+    input: OrchestratorState
+    output: AgentResult.data merged into OrchestratorState
+  notes: >-
+    GUI/module editor may edit this module config, but execution remains bound to
+    allowlisted Python handlers. Python source is not modified by the GUI.
+    Specimen reasoning selects bounded local inspect/execute/return tools after
+    hard geometry/manufacturing checks; execution retains experiment.evaluate and
+    printer.prepare. CODE relationships document inner functions; only registered
+    owner operations participate in execution routing.

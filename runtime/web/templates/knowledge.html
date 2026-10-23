@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<!-- Knowledge-only retrieval workspace. Raw archives and typed memory remain authoritative. -->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{{ title }}</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/knowledge.css?v=20260915-wiki-reading-1" />
+    <link rel="preload" as="image" href="/static/ax4lab-logo-transparent.png">
+    <link rel="stylesheet" href="/static/workspace_boot.css?v=1">
+  </head>
+  <body class="knowledge-page">
+    {% set workspace_title = "Knowledge Workspace" %}
+    {% include "workspace_boot.html" %}
+    <main class="knowledge-shell">
+      <header class="knowledge-hero">
+        <div>
+          <p class="knowledge-eyebrow">AX4LAB Knowledge</p>
+          <h1>Knowledge Workspace</h1>
+          <p>Shared Wiki, scoped memory, source-backed references and agent delivery evidence.</p>
+        </div>
+        <div class="knowledge-hero-actions">
+          <a class="knowledge-button secondary" href="/">Main GUI</a>
+          <button id="knowledge-refresh" class="knowledge-button primary" type="button">Refresh</button>
+        </div>
+      </header>
+
+      <p id="knowledge-workspace-summary" class="knowledge-scope-summary" aria-live="polite">Loading Wiki and memory scope…</p>
+      <section class="knowledge-status-strip" aria-label="Execution knowledge status">
+        <article><span>Storage</span><strong id="knowledge-backend-status">Loading</strong><small id="knowledge-backend-detail">Local Markdown records</small></article>
+        <article><span>Ontology</span><strong id="knowledge-ontology-version">-</strong><small>active classification version</small></article>
+        <article><span>Records / revisions</span><strong id="knowledge-record-count">0</strong><small id="knowledge-revision-count">0 preserved revisions</small></article>
+        <article><span>Validity</span><strong id="knowledge-valid-count">0 valid</strong><small id="knowledge-review-count">0 needs review · 0 superseded</small></article>
+        <article><span>Index</span><strong id="knowledge-index-status">Loading</strong><small id="knowledge-index-detail">incremental, rebuildable</small></article>
+      </section>
+
+      <nav class="knowledge-tabs" aria-label="Knowledge workspace sections">
+        <button class="active" type="button" data-knowledge-tab="wiki">AX4LAB Wiki</button>
+        <button type="button" data-knowledge-tab="memory">Memory</button>
+        <button type="button" data-knowledge-tab="manuals">Source Library</button>
+        <button type="button" data-knowledge-tab="delivery">Agent Delivery</button>
+        <button type="button" data-knowledge-tab="ontology">Ontology</button>
+      </nav>
+
+      <section class="knowledge-tab-panel active" data-knowledge-panel="wiki">
+        <div class="knowledge-section-head"><div><span>Shared Platform Knowledge</span><h2>AX4LAB Wiki</h2></div><small>Reviewed references · freshness checked</small></div>
+        <div id="knowledge-wiki-browser"></div>
+      </section>
+
+      <section class="knowledge-tab-panel" data-knowledge-panel="memory">
+        <div class="knowledge-section-head"><div><span>Scoped Retained Context</span><h2>Private Memory</h2></div><small>Confirmation is separate from experiment approval</small></div>
+        <div id="knowledge-private-browser"></div>
+        <details class="knowledge-card knowledge-preserved-memory">
+          <summary>Execution knowledge · source-backed Markdown</summary>
+        <form id="knowledge-markdown-form" class="knowledge-query-bar knowledge-markdown-query-bar">
+          <label class="knowledge-search-field">Search knowledge
+            <input id="knowledge-markdown-query" type="search" maxlength="1000" placeholder="Search observations, outcomes, or reusable knowledge" />
+          </label>
+          <label>Run<input id="knowledge-markdown-run" maxlength="180" placeholder="Any run" /></label>
+          <label>Cycle<input id="knowledge-markdown-cycle" maxlength="180" placeholder="Any cycle" /></label>
+          <label>Agent<input id="knowledge-markdown-agent" maxlength="180" placeholder="Any agent" /></label>
+          <label>Ontology type<select id="knowledge-markdown-type"><option value="">Any type</option></select></label>
+          <label>Fidelity<select id="knowledge-markdown-fidelity"><option value="">Any fidelity</option><option value="measured">Measured</option><option value="simulated">Simulated</option><option value="virtual">Virtual</option><option value="unknown">Unknown</option></select></label>
+          <label>Validity<select id="knowledge-markdown-status"><option value="valid">Valid</option><option value="needs_review">Needs review</option><option value="superseded">Superseded</option><option value="all">All statuses</option></select></label>
+          <label>Tags<input id="knowledge-markdown-tags" maxlength="1000" placeholder="Comma-separated tags" /></label>
+          <label class="knowledge-applicability-field">Applicability (exact JSON object)<input id="knowledge-markdown-applicability" maxlength="2000" placeholder='{"equipment":"utm"}' /></label>
+          <label>Result limit<input id="knowledge-markdown-limit" type="number" min="1" max="50" value="6" /></label>
+          <button id="knowledge-run-query" class="knowledge-button primary" type="submit">Search Knowledge</button>
+          <p class="knowledge-filter-hint">Filters apply before retrieval. Blank fields leave that dimension unrestricted. “Valid” means eligible for retrieval, not scientifically verified.</p>
+        </form>
+        <div class="knowledge-markdown-layout">
+          <article class="knowledge-card">
+            <div class="knowledge-card-head"><div><span>Scoped Retrieval</span><h2>Knowledge Records</h2></div><small id="knowledge-query-summary" aria-live="polite">Loading</small></div>
+            <div id="knowledge-markdown-scope" class="knowledge-scope-summary"></div>
+            <div id="knowledge-markdown-results" class="knowledge-markdown-results" aria-live="polite"><p>Loading knowledge records.</p></div>
+          </article>
+          <article class="knowledge-card">
+            <div class="knowledge-card-head"><div><span>Selected Evidence</span><h2>Record Detail</h2></div><small>same retrieval scope</small></div>
+            <div id="knowledge-markdown-detail" class="knowledge-markdown-detail" aria-live="polite"><p>Select a record to read its Markdown body and source references.</p></div>
+          </article>
+        </div>
+        <details id="knowledge-intake-controls" class="knowledge-card knowledge-intake">
+          <summary>Archive intake · explicit post-processing</summary>
+          <p>Import a bounded batch of existing agent archives into Markdown. No experiment replay, device action, or model call. Nothing is scanned automatically on page load.</p>
+          <form id="knowledge-intake-form" class="knowledge-query-bar knowledge-intake-bar">
+            <label>Run (blank = all runs)<input id="knowledge-intake-run" maxlength="180" pattern="[A-Za-z0-9][A-Za-z0-9_.\-]*" placeholder="Optional run ID" /></label>
+            <label>Archive limit<input id="knowledge-intake-limit" type="number" min="1" max="500" value="100" /></label>
+            <label>Continuation cursor<input id="knowledge-intake-cursor" maxlength="1000" placeholder="Optional cursor from a completed job" /></label>
+            <button id="knowledge-intake-start" class="knowledge-button secondary" type="submit">Start Archive Intake</button>
+          </form>
+          <div class="knowledge-intake-job-bar">
+            <label class="knowledge-field">Persisted job ID<input id="knowledge-intake-job" maxlength="32" placeholder="Returned after starting intake" /></label>
+            <button id="knowledge-intake-refresh" class="knowledge-button secondary" type="button">Check Job</button>
+          </div>
+          <pre id="knowledge-intake-result" aria-live="polite">No archive intake requested.</pre>
+        </details>
+        </details>
+        <details class="knowledge-card knowledge-preserved-memory">
+          <summary>Operational memory, patterns and recorded activity</summary>
+        <div class="knowledge-section-head"><div><span>Authoritative Records</span><h2>Knowledge Memory</h2></div><small>JSONL-backed operational memory</small></div>
+        <div id="knowledge-memory-grid" class="knowledge-memory-grid"></div>
+        <article class="knowledge-card knowledge-activity-card">
+          <div class="knowledge-card-head"><div><span>Lifecycle</span><h2>Recorded Activity</h2></div><small>collected · updated · retrieved · used</small></div>
+          <div id="knowledge-activity-chart" class="knowledge-activity-chart" role="img" aria-label="Recorded knowledge activity by cycle"></div>
+        </article>
+        </details>
+      </section>
+
+      <section class="knowledge-tab-panel" data-knowledge-panel="delivery">
+        <div class="knowledge-section-head"><div><span>Evidence of Agent Context</span><h2>Agent Delivery</h2></div><small>Retrieved ≠ delivered ≠ cited</small></div>
+        <div id="knowledge-delivery-browser"></div>
+      </section>
+
+      <section class="knowledge-tab-panel" data-knowledge-panel="ontology">
+        <div class="knowledge-section-head"><div><span>Semantic Contract</span><h2>Ontology Registry</h2></div><small id="knowledge-ontology-summary">Loading</small></div>
+        <div class="knowledge-ontology-layout">
+          <article class="knowledge-card"><div class="knowledge-card-head"><div><span>Classes</span><h2>Entity Types</h2></div></div><div id="knowledge-ontology-classes" class="knowledge-chip-grid"></div></article>
+          <article class="knowledge-card"><div class="knowledge-card-head"><div><span>Relations</span><h2>Relation Definitions</h2></div></div><div id="knowledge-ontology-relations" class="knowledge-relation-list"></div></article>
+        </div>
+      </section>
+
+      <section class="knowledge-tab-panel" data-knowledge-panel="manuals">
+        <div class="knowledge-section-head"><div><span>Knowledge Agent Module</span><h2>Source Library</h2></div><small>Preserved originals · curated Markdown · scoped retrieval</small></div>
+        <section id="knowledge-manual-status" class="knowledge-manual-status" aria-label="Source Library status">
+          <article><span>Sources</span><strong id="knowledge-manual-sources">0</strong><small>content-addressed records</small></article>
+          <article><span>Ready</span><strong id="knowledge-manual-chunks">0</strong><small>published sources</small></article>
+          <article><span>Worker</span><strong id="knowledge-manual-scope">Disabled</strong><small id="knowledge-source-active">No active source</small></article>
+          <button id="knowledge-manual-ingest" class="knowledge-button primary" type="button">Scan Sources</button>
+        </section>
+        <label class="knowledge-source-enable"><input id="knowledge-source-enable" type="checkbox" /> Automatically curate stable source changes</label>
+        <p id="knowledge-source-inbox" class="knowledge-source-path"></p>
+        <details class="knowledge-card"><summary>Source progress</summary><div id="knowledge-source-progress" aria-live="polite"></div></details>
+        <form id="knowledge-manual-form" class="knowledge-query-bar knowledge-manual-query-bar">
+          <label>Category<input id="knowledge-source-category" type="text" maxlength="100" placeholder="All categories" /></label>
+          <label>Reference query<input id="knowledge-manual-query" type="text" maxlength="2000" placeholder="Search published knowledge" /></label>
+          <label>Evidence<input id="knowledge-manual-top-k" type="number" min="1" max="12" value="6" /></label>
+          <button id="knowledge-manual-run-query" class="knowledge-button primary" type="submit">Retrieve Evidence</button>
+          <label>Tags<input id="knowledge-source-tags" type="text" placeholder="Comma-separated tags" /></label>
+          <label>Applicability<input id="knowledge-source-applicability" type="text" placeholder="Exact JSON conditions (optional)" /></label>
+        </form>
+        <article class="knowledge-card">
+          <div class="knowledge-card-head"><div><span>Grounded Context</span><h2>Source Evidence</h2></div><small id="knowledge-manual-query-summary" aria-live="polite">No query yet</small></div>
+          <div id="knowledge-manual-results" class="knowledge-manual-results" aria-live="polite"><p>Search published sources to inspect curated knowledge and provenance.</p></div>
+        </article>
+        <article id="knowledge-source-detail" class="knowledge-card" aria-live="polite">Select a source note to read its full Markdown and original evidence.</article>
+      </section>
+
+      <footer class="knowledge-footer"><span id="knowledge-runtime-message" role="status">Initializing Knowledge Workspace.</span><time id="knowledge-updated-at">-</time></footer>
+    </main>
+    <script src="/static/vendor/echarts.min.js?v=5.6.0"></script>
+    <script src="/static/knowledge_workspace.js?v=20260915-wiki-reading-1" defer></script>
+    <script src="/static/knowledge.js?v=20260913-wiki-memory-1" defer></script>
+  </body>
+</html>

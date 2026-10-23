@@ -1,0 +1,1030 @@
+graph:
+  id: atr_closed_loop
+  name: AX4LAB Closed-Loop Autonomous Research Graph
+  version: 0.2.0
+  entry_node: dispatch
+  finish_nodes:
+  - step_complete
+  nodes:
+  - id: dispatch
+    label: Runtime Dispatch
+    handler: runtime.dispatch
+    stage: null
+    kind: runtime
+    description: Routes the current OrchestratorState stage to the matching executable
+      node.
+    module_id: null
+    position:
+      x: 48.0
+      y: 208.0
+    metadata:
+      icon: orchestrator
+  - id: idle
+    label: Idle
+    handler: runtime.idle
+    stage: idle
+    kind: runtime
+    description: Starts one closed-loop cycle by entering the design stage.
+    module_id: null
+    position:
+      x: 48.0
+      y: 384.0
+    metadata:
+      icon: play
+  - id: design
+    label: Design Agent
+    handler: agent.design_agent
+    stage: design
+    kind: agent
+    description: ''
+    module_id: modules/design
+    position:
+      x: 368.0
+      y: 240.0
+    metadata:
+      icon: design_agent
+  - id: specimen
+    label: Specimen Making Agent
+    handler: agent.specimen_agent
+    stage: specimen
+    kind: agent
+    description: ''
+    module_id: modules/specimen
+    position:
+      x: 672.0
+      y: 240.0
+    metadata:
+      icon: specimen_maker
+  - id: vision
+    label: Vision Agent
+    handler: agent.vision_agent
+    stage: vision
+    kind: agent
+    description: ''
+    module_id: modules/vision
+    position:
+      x: 992.0
+      y: 240.0
+    metadata:
+      icon: vision_agent
+  - id: manipulation
+    label: Manipulation Agent
+    handler: agent.manipulation_agent
+    stage: manipulation
+    kind: agent
+    description: ''
+    module_id: modules/manipulation
+    position:
+      x: 1296.0
+      y: 240.0
+    metadata:
+      icon: manipulation_agent
+  - id: vision_verify
+    label: Vision Verification Agent
+    handler: agent.vision_agent
+    stage: null
+    kind: sidecar
+    description: Verify specimen placement after manipulation using BRIO/UTM camera evidence.
+    module_id: modules/vision
+    position:
+      x: 1456.0
+      y: 240.0
+    metadata:
+      icon: vision_agent
+      runtime_node: sidecar
+      role: post_manipulation_placement_verification
+      consumes:
+      - robot_task_result.v1
+      produces:
+      - placement_verification.v1
+      - vision_signal.v1
+  - id: equipment
+    label: Lab Equipment Agent
+    handler: agent.equipment_agent
+    stage: equipment
+    kind: agent
+    description: ''
+    module_id: modules/equipment
+    position:
+      x: 1616.0
+      y: 384.0
+    metadata:
+      icon: equipment_agent
+  - id: analysis
+    label: Analysis Agent
+    handler: agent.analysis_agent
+    stage: analysis
+    kind: agent
+    description: ''
+    module_id: modules/analysis
+    position:
+      x: 1296.0
+      y: 560.0
+    metadata:
+      icon: analysis_agent
+  - id: knowledge
+    label: Knowledge Agent
+    handler: agent.knowledge_agent
+    stage: knowledge
+    kind: agent
+    description: ''
+    module_id: modules/knowledge
+    position:
+      x: 992.0
+      y: 560.0
+    metadata:
+      icon: knowledge_agent
+  - id: bo
+    label: BO Agent
+    handler: agent.bo_agent
+    stage: bo
+    kind: agent
+    description: ''
+    module_id: modules/bo
+    position:
+      x: 672.0
+      y: 560.0
+    metadata:
+      icon: bo_agent
+  - id: guardian
+    label: Guardian Agent
+    handler: agent.guardian_agent
+    stage: guardian
+    kind: agent
+    description: ''
+    module_id: modules/guardian
+    position:
+      x: 368.0
+      y: 560.0
+    metadata:
+      icon: guardian_agent
+  - id: complete
+    label: Complete
+    handler: runtime.terminal
+    stage: complete
+    kind: terminal
+    description: ''
+    module_id: null
+    position:
+      x: 48.0
+      y: 560.0
+    metadata:
+      icon: complete
+  - id: error
+    label: Error
+    handler: runtime.terminal
+    stage: error
+    kind: terminal
+    description: ''
+    module_id: null
+    position:
+      x: 48.0
+      y: 736.0
+    metadata:
+      icon: error
+  - id: step_complete
+    label: Step Complete
+    handler: runtime.step_complete
+    stage: null
+    kind: runtime
+    description: ''
+    module_id: null
+    position:
+      x: 368.0
+      y: 736.0
+    metadata:
+      icon: artifact
+  - id: orchestrator_supervisor
+    label: Orchestrator Supervisor
+    handler: agent.orchestrator_agent
+    stage: null
+    kind: sidecar
+    description: Control-plane supervisor that builds mission contracts, orchestration
+      plans, and handoff packets for each executable stage.
+    module_id: modules/orchestrator
+    position:
+      x: 368.0
+      y: 48.0
+    metadata:
+      icon: orchestrator
+      runtime_node: sidecar
+      plane: orchestration_supervisor
+      outputs:
+      - mission_contract.v1
+      - orchestration_plan.v1
+      - handoff_packet.v1
+      - decision_register.v1
+      live_source: orchestrator.supervisor + controller planning_message
+  - id: safety_gate_plane
+    label: Guardian Safety Gate
+    handler: agent.guardian_agent
+    stage: null
+    kind: sidecar
+    description: Graph-wide safety/readiness gate that can hold, stop, retry, or allow
+      continuation.
+    module_id: modules/guardian
+    position:
+      x: 992.0
+      y: 48.0
+    metadata:
+      icon: guardian_agent
+      runtime_node: sidecar
+      plane: guardian_graphwide_gate
+      outputs:
+      - guardian_report.v1
+      - safety_decision.v1
+      live_source: /api/guardian/status
+  - id: device_bridge_plane
+    label: Device Bridge Plane
+    handler: runtime.step_complete
+    stage: null
+    kind: bridge
+    description: Hardware/software bridge boundary for printer, robot, UTM/Windows,
+      and cameras.
+    module_id: null
+    position:
+      x: 1616.0
+      y: 48.0
+    metadata:
+      icon: device_bridges
+      runtime_node: bridge
+      plane: device_bridge_plane
+      bridges:
+      - prusa_bridge
+      - lerobot_bridge
+      - windows_pyautogui_bridge
+      - camera_utm_bridge
+      live_source: /api/devices/state
+  - id: memory_evidence_plane
+    label: Knowledge / Evidence Plane
+    handler: agent.knowledge_agent
+    stage: null
+    kind: evidence_plane
+    description: Persistent evidence memory and graph/RAG layer used by Knowledge
+      and BO candidate selection.
+    module_id: modules/knowledge
+    position:
+      x: 992.0
+      y: 736.0
+    metadata:
+      icon: knowledge_agent
+      runtime_node: evidence
+      plane: knowledge_memory_evolution
+      outputs:
+      - experiment_evidence.v1
+      - bo_observation.v1
+      - evolution_proposal.v1
+      live_source: memory/knowledge + optional Neo4j/Graphify
+  edges:
+  - source: dispatch
+    target: idle
+    condition: idle
+    label: current stage is idle
+    metadata: {}
+  - source: dispatch
+    target: design
+    condition: design
+    label: ''
+    metadata: {}
+  - source: dispatch
+    target: specimen
+    condition: specimen
+    label: ''
+    metadata: {}
+  - source: dispatch
+    target: vision
+    condition: vision
+    label: ''
+    metadata: {}
+  - source: dispatch
+    target: manipulation
+    condition: manipulation
+    label: ''
+    metadata: {}
+  - source: dispatch
+    target: equipment
+    condition: equipment
+    label: ''
+    metadata: {}
+  - source: dispatch
+    target: analysis
+    condition: analysis
+    label: ''
+    metadata: {}
+  - source: dispatch
+    target: knowledge
+    condition: knowledge
+    label: ''
+    metadata: {}
+  - source: dispatch
+    target: bo
+    condition: bo
+    label: ''
+    metadata: {}
+  - source: dispatch
+    target: guardian
+    condition: guardian
+    label: ''
+    metadata: {}
+  - source: dispatch
+    target: complete
+    condition: complete
+    label: ''
+    metadata: {}
+  - source: dispatch
+    target: error
+    condition: error
+    label: ''
+    metadata: {}
+  - source: idle
+    target: step_complete
+    condition: null
+    label: ''
+    metadata: {}
+  - source: design
+    target: step_complete
+    condition: null
+    label: ''
+    metadata: {}
+  - source: specimen
+    target: step_complete
+    condition: null
+    label: ''
+    metadata: {}
+  - source: vision
+    target: step_complete
+    condition: null
+    label: ''
+    metadata: {}
+  - source: manipulation
+    target: step_complete
+    condition: null
+    label: ''
+    metadata: {}
+  - source: equipment
+    target: step_complete
+    condition: null
+    label: ''
+    metadata: {}
+  - source: analysis
+    target: step_complete
+    condition: null
+    label: ''
+    metadata: {}
+  - source: knowledge
+    target: step_complete
+    condition: null
+    label: ''
+    metadata: {}
+  - source: bo
+    target: step_complete
+    condition: null
+    label: ''
+    metadata: {}
+  - source: guardian
+    target: step_complete
+    condition: null
+    label: ''
+    metadata: {}
+  - source: complete
+    target: step_complete
+    condition: null
+    label: ''
+    metadata: {}
+  - source: error
+    target: step_complete
+    condition: null
+    label: ''
+    metadata: {}
+  - source: idle
+    target: design
+    condition: null
+    label: 'default transition: idle -> design'
+    metadata:
+      runtime_edge: logical_transition
+      from_stage: idle
+      to_stage: design
+      condition: default
+      transition_condition: default
+      default_transition: true
+      auto_ports: true
+  - source: design
+    target: specimen
+    condition: null
+    label: 'default transition: design -> specimen'
+    metadata:
+      runtime_edge: logical_transition
+      from_stage: design
+      to_stage: specimen
+      condition: default
+      transition_condition: default
+      default_transition: true
+      auto_ports: true
+  - source: specimen
+    target: vision
+    condition: null
+    label: 'default transition: specimen -> vision'
+    metadata:
+      runtime_edge: logical_transition
+      from_stage: specimen
+      to_stage: vision
+      condition: default
+      transition_condition: default
+      default_transition: true
+      auto_ports: true
+  - source: vision
+    target: analysis
+    metadata:
+      runtime_edge: logical_transition
+      from_stage: vision
+      to_stage: analysis
+      condition_key: utm_clear_next_stage
+      condition_value: analysis
+      default_transition: false
+  - source: vision
+    target: vision
+    metadata:
+      runtime_edge: logical_transition
+      from_stage: vision
+      to_stage: vision
+      condition_key: utm_clear_next_stage
+      condition_value: vision
+      default_transition: false
+  - source: vision
+    target: manipulation
+    condition: next_stage:manipulation
+    label: 'conditional transition: active-cam-approved vision -> manipulation'
+    metadata:
+      runtime_edge: logical_transition
+      from_stage: vision
+      to_stage: manipulation
+      condition: next_stage:manipulation
+      transition_condition: next_stage:manipulation
+      default_transition: false
+      auto_ports: true
+      contracts:
+      - vision_preflight.v1
+      - specimen_pose.v1
+      - transfer_readiness.camera_returned_to_vla
+  - source: vision
+    target: equipment
+    condition: null
+    label: 'default transition: verified vision -> equipment'
+    metadata:
+      runtime_edge: logical_transition
+      from_stage: vision
+      to_stage: equipment
+      condition: default
+      transition_condition: default
+      default_transition: true
+      auto_ports: true
+      contracts:
+      - vision_manipulation_completion.v1
+      - placement_verification.v1
+  - source: vision
+    target: vision
+    condition: next_stage:vision
+    label: 'conditional transition: monitor active rollout in vision'
+    metadata:
+      runtime_edge: logical_transition
+      from_stage: vision
+      to_stage: vision
+      condition: next_stage:vision
+      transition_condition: next_stage:vision
+      default_transition: false
+      auto_ports: true
+      contracts:
+      - robot_task_result.v1
+      - post_place_interlock.v1
+  - source: manipulation
+    target: vision
+    metadata:
+      runtime_edge: logical_transition
+      from_stage: manipulation
+      to_stage: vision
+      condition_key: utm_clear_next_stage
+      condition: utm_clear_scoped
+      condition_value: vision
+      default_transition: false
+  - source: manipulation
+    target: vision_verify
+    condition: null
+    label: 'default transition: manipulation -> vision verification'
+    metadata:
+      runtime_edge: runtime_sidecar
+      from_stage: manipulation
+      to_stage: vision
+      condition: post_place_verification_required
+      transition_condition: post_place_verification_required
+      default_transition: false
+      auto_ports: true
+      contracts:
+      - robot_task_result.v1
+      - placement_verification.v1
+  - source: manipulation
+    target: vision
+    condition: null
+    label: 'default transition: manipulation -> vision verification'
+    metadata:
+      runtime_edge: logical_transition
+      from_stage: manipulation
+      to_stage: vision
+      condition: default
+      transition_condition: default
+      default_transition: true
+      auto_ports: true
+      contracts:
+      - robot_task_result.v1
+      - vision_manipulation_completion.v1
+  - source: manipulation
+    target: equipment
+    condition: next_stage:equipment
+    label: 'conditional transition: no-actuation manipulation preflight -> equipment'
+    metadata:
+      runtime_edge: logical_transition
+      from_stage: manipulation
+      to_stage: equipment
+      condition: next_stage:equipment
+      transition_condition: next_stage:equipment
+      default_transition: false
+      auto_ports: true
+      contracts:
+      - manipulation_preflight.v1
+  - source: vision_verify
+    target: equipment
+    condition: null
+    label: 'default transition: vision verification -> equipment'
+    metadata:
+      runtime_edge: runtime_sidecar
+      from_stage: vision
+      to_stage: equipment
+      condition: placement_verified
+      transition_condition: placement_verified
+      default_transition: false
+      auto_ports: true
+      contracts:
+      - placement_verification.v1
+  - source: equipment
+    target: manipulation
+    metadata:
+      runtime_edge: logical_transition
+      from_stage: equipment
+      to_stage: manipulation
+      condition_key: utm_clear_next_stage
+      condition_value: manipulation
+      default_transition: false
+  - source: equipment
+    target: vision
+    metadata:
+      runtime_edge: logical_transition
+      from_stage: equipment
+      to_stage: vision
+      condition_key: utm_clear_next_stage
+      condition_value: vision
+      default_transition: false
+  - source: equipment
+    target: analysis
+    condition: null
+    label: 'default transition: equipment -> analysis'
+    metadata:
+      runtime_edge: logical_transition
+      from_stage: equipment
+      to_stage: analysis
+      condition: default
+      transition_condition: default
+      default_transition: true
+      auto_ports: true
+  - source: analysis
+    target: knowledge
+    condition: null
+    label: 'default transition: analysis -> knowledge'
+    metadata:
+      runtime_edge: logical_transition
+      from_stage: analysis
+      to_stage: knowledge
+      condition: default
+      transition_condition: default
+      default_transition: true
+      auto_ports: true
+  - source: knowledge
+    target: bo
+    condition: null
+    label: 'default transition: knowledge -> bo'
+    metadata:
+      runtime_edge: logical_transition
+      from_stage: knowledge
+      to_stage: bo
+      condition: default
+      transition_condition: default
+      default_transition: true
+      auto_ports: true
+  - source: bo
+    target: guardian
+    condition: null
+    label: 'default transition: bo -> guardian'
+    metadata:
+      runtime_edge: logical_transition
+      from_stage: bo
+      to_stage: guardian
+      condition: default
+      transition_condition: default
+      default_transition: true
+      auto_ports: true
+  - source: guardian
+    target: design
+    condition: null
+    label: 'default transition: guardian continue -> design'
+    metadata:
+      runtime_edge: logical_transition
+      from_stage: guardian
+      to_stage: design
+      condition: guardian_decision:continue
+      transition_condition: guardian_decision:continue
+      default_transition: true
+      auto_ports: true
+  - source: guardian
+    target: complete
+    condition: guardian_decision:stop
+    label: 'conditional transition: guardian stop -> complete'
+    metadata:
+      runtime_edge: logical_transition
+      from_stage: guardian
+      to_stage: complete
+      condition: guardian_decision:stop
+      transition_condition: guardian_decision:stop
+      default_transition: false
+      auto_ports: true
+  - source: guardian
+    target: error
+    condition: guardian_decision:error
+    label: 'conditional transition: guardian error -> error'
+    metadata:
+      runtime_edge: logical_transition
+      from_stage: guardian
+      to_stage: error
+      condition: guardian_decision:error
+      transition_condition: guardian_decision:error
+      default_transition: false
+      auto_ports: true
+  - source: orchestrator_supervisor
+    target: design
+    condition: null
+    label: orchestrator supervisor context / handoff
+    metadata:
+      runtime_edge: control_overlay
+      overlay_relation: supervises_handoff
+      condition: handoff_packet.v1
+  - source: orchestrator_supervisor
+    target: specimen
+    condition: null
+    label: orchestrator supervisor context / handoff
+    metadata:
+      runtime_edge: control_overlay
+      overlay_relation: supervises_handoff
+      condition: handoff_packet.v1
+  - source: orchestrator_supervisor
+    target: vision
+    condition: null
+    label: orchestrator supervisor context / handoff
+    metadata:
+      runtime_edge: control_overlay
+      overlay_relation: supervises_handoff
+      condition: handoff_packet.v1
+  - source: orchestrator_supervisor
+    target: manipulation
+    condition: null
+    label: orchestrator supervisor context / handoff
+    metadata:
+      runtime_edge: control_overlay
+      overlay_relation: supervises_handoff
+      condition: handoff_packet.v1
+  - source: orchestrator_supervisor
+    target: equipment
+    condition: null
+    label: orchestrator supervisor context / handoff
+    metadata:
+      runtime_edge: control_overlay
+      overlay_relation: supervises_handoff
+      condition: handoff_packet.v1
+  - source: orchestrator_supervisor
+    target: analysis
+    condition: null
+    label: orchestrator supervisor context / handoff
+    metadata:
+      runtime_edge: control_overlay
+      overlay_relation: supervises_handoff
+      condition: handoff_packet.v1
+  - source: orchestrator_supervisor
+    target: knowledge
+    condition: null
+    label: orchestrator supervisor context / handoff
+    metadata:
+      runtime_edge: control_overlay
+      overlay_relation: supervises_handoff
+      condition: handoff_packet.v1
+  - source: orchestrator_supervisor
+    target: bo
+    condition: null
+    label: orchestrator supervisor context / handoff
+    metadata:
+      runtime_edge: control_overlay
+      overlay_relation: supervises_handoff
+      condition: handoff_packet.v1
+  - source: orchestrator_supervisor
+    target: guardian
+    condition: null
+    label: orchestrator supervisor context / handoff
+    metadata:
+      runtime_edge: control_overlay
+      overlay_relation: supervises_handoff
+      condition: handoff_packet.v1
+  - source: safety_gate_plane
+    target: design
+    condition: null
+    label: Guardian readiness gate
+    metadata:
+      runtime_edge: control_overlay
+      overlay_relation: pre_post_guardian_gate
+      condition: safety_decision.v1
+  - source: safety_gate_plane
+    target: specimen
+    condition: null
+    label: Guardian readiness gate
+    metadata:
+      runtime_edge: control_overlay
+      overlay_relation: pre_post_guardian_gate
+      condition: safety_decision.v1
+  - source: safety_gate_plane
+    target: vision
+    condition: null
+    label: Guardian readiness gate
+    metadata:
+      runtime_edge: control_overlay
+      overlay_relation: pre_post_guardian_gate
+      condition: safety_decision.v1
+  - source: safety_gate_plane
+    target: manipulation
+    condition: null
+    label: Guardian readiness gate
+    metadata:
+      runtime_edge: control_overlay
+      overlay_relation: pre_post_guardian_gate
+      condition: safety_decision.v1
+  - source: safety_gate_plane
+    target: equipment
+    condition: null
+    label: Guardian readiness gate
+    metadata:
+      runtime_edge: control_overlay
+      overlay_relation: pre_post_guardian_gate
+      condition: safety_decision.v1
+  - source: safety_gate_plane
+    target: analysis
+    condition: null
+    label: Guardian readiness gate
+    metadata:
+      runtime_edge: control_overlay
+      overlay_relation: pre_post_guardian_gate
+      condition: safety_decision.v1
+  - source: safety_gate_plane
+    target: knowledge
+    condition: null
+    label: Guardian readiness gate
+    metadata:
+      runtime_edge: control_overlay
+      overlay_relation: pre_post_guardian_gate
+      condition: safety_decision.v1
+  - source: safety_gate_plane
+    target: bo
+    condition: null
+    label: Guardian readiness gate
+    metadata:
+      runtime_edge: control_overlay
+      overlay_relation: pre_post_guardian_gate
+      condition: safety_decision.v1
+  - source: device_bridge_plane
+    target: specimen
+    condition: null
+    label: prusa_bridge boundary
+    metadata:
+      runtime_edge: device_bridge
+      overlay_relation: device_tool_boundary
+      bridge: prusa_bridge
+      condition: tool_call_bridge_contract
+  - source: device_bridge_plane
+    target: vision
+    condition: null
+    label: camera_bridge boundary
+    metadata:
+      runtime_edge: device_bridge
+      overlay_relation: device_tool_boundary
+      bridge: camera_bridge
+      condition: tool_call_bridge_contract
+  - source: device_bridge_plane
+    target: manipulation
+    condition: null
+    label: lerobot_bridge boundary
+    metadata:
+      runtime_edge: device_bridge
+      overlay_relation: device_tool_boundary
+      bridge: lerobot_bridge
+      condition: tool_call_bridge_contract
+  - source: device_bridge_plane
+    target: equipment
+    condition: null
+    label: windows_pyautogui_bridge boundary
+    metadata:
+      runtime_edge: device_bridge
+      overlay_relation: device_tool_boundary
+      bridge: windows_pyautogui_bridge
+      condition: tool_call_bridge_contract
+  - source: analysis
+    target: memory_evidence_plane
+    condition: null
+    label: analysis evidence write
+    metadata:
+      runtime_edge: evidence_flow
+      overlay_relation: evidence_memory_flow
+      condition: validated_evidence
+  - source: knowledge
+    target: memory_evidence_plane
+    condition: null
+    label: knowledge memory write
+    metadata:
+      runtime_edge: evidence_flow
+      overlay_relation: evidence_memory_flow
+      condition: validated_evidence
+  - source: memory_evidence_plane
+    target: bo
+    condition: null
+    label: BO reads evidence table
+    metadata:
+      runtime_edge: evidence_flow
+      overlay_relation: evidence_memory_flow
+      condition: validated_evidence
+  - source: memory_evidence_plane
+    target: design
+    condition: null
+    label: Design reads prior loop evidence
+    metadata:
+      runtime_edge: evidence_flow
+      overlay_relation: evidence_memory_flow
+      condition: validated_evidence
+  - source: bo
+    target: orchestrator_supervisor
+    condition: null
+    label: BO candidate returned to supervisor
+    metadata:
+      runtime_edge: runtime_sidecar
+      overlay_relation: next_candidate_control
+      condition: candidate_handoff.v1
+  - source: guardian
+    target: orchestrator_supervisor
+    condition: null
+    label: Guardian route decision returned to supervisor
+    metadata:
+      runtime_edge: runtime_sidecar
+      overlay_relation: route_decision_control
+      condition: guardian_decision.v1
+  stage_dispatch:
+    idle: idle
+    design: design
+    specimen: specimen
+    vision: vision
+    manipulation: manipulation
+    equipment: equipment
+    analysis: analysis
+    knowledge: knowledge
+    bo: bo
+    guardian: guardian
+    complete: complete
+    error: error
+  transitions:
+    idle: design
+    design: specimen
+    specimen: vision
+    vision: equipment
+    manipulation: vision
+    equipment: analysis
+    analysis: knowledge
+    knowledge: bo
+    bo: guardian
+    guardian: design
+  terminal_stages:
+  - complete
+  - error
+  metadata:
+    runtime: langgraph
+    mode_support:
+    - test
+    - live
+    - replay
+    - fault-injection
+    safety:
+      guardian_required: true
+      live_device_dry_run_required_before_execution: true
+    runtime_planes:
+    - id: orchestration_supervisor
+      node_id: orchestrator_supervisor
+      source: agents/core/orchestrator/agent.py + orchestrator/supervisor.py + app/controller.py
+      contract:
+      - mission_contract.v1
+      - orchestration_plan.v1
+      - handoff_packet.v1
+      - decision_register.v1
+    - id: guardian_graphwide_gate
+      node_id: safety_gate_plane
+      source: policies/guardian_gate.py + agents/core/guardian/agent.py
+      contract:
+      - guardian_report.v1
+      - safety_decision.v1
+    - id: device_bridge_plane
+      node_id: device_bridge_plane
+      source: device_bridges/* + mcp_tools/*
+      contract:
+      - printer.prepare
+      - lerobot.rollout.start
+      - lerobot.rollout.stop
+      - equipment.pyautogui.run
+    - id: knowledge_memory_evolution
+      node_id: memory_evidence_plane
+      source: knowledge/* + memory/knowledge
+      contract:
+      - experiment_evidence.v1
+      - bo_observation.v1
+      - evolution_proposal.v1
+    device_bridges:
+    - id: prusa_bridge
+      label: Prusa MK4S / PrusaLink
+      workspace: /printer
+      tools:
+      - printer.prepare
+      config: memory/prusa_connection.json + memory/prusa_print_profile.json
+      live_boundary: upload/start/status/ejection through PrusaLink and PrusaSlicer
+        bridge
+    - id: lerobot_bridge
+      label: LeRobot / Pi0.5 Rollout
+      workspace: /lerobot
+      tools:
+      - lerobot.teleoperate.start
+      - lerobot.record.start
+      - lerobot.rollout.start
+      - lerobot.rollout.stop
+      - lerobot.rollout.status
+      - lerobot.camera.test
+      - lerobot.active_robot_cam.capture
+      config: memory/lerobot/profiles
+      live_boundary: robot policy process and camera capture via LeRobot bridge
+    - id: windows_pyautogui_bridge
+      label: Windows PyAutoGUI / UTM Bridge
+      workspace: /windows-equipment
+      tools:
+      - equipment.pyautogui.health
+      - equipment.pyautogui.run
+      - equipment.pyautogui.screenshot
+      config: memory/windows_pyautogui_connection.json
+      live_boundary: Windows host macro execution with token-gated bridge server
+    - id: camera_utm_bridge
+      label: Camera / UTM Evidence Tools
+      workspace: /lerobot
+      tools:
+      - lerobot.camera.test
+      - lerobot.active_robot_cam.capture
+      - vision.equipment_cross_check
+      - utm.run_protocol
+      config: memory/lerobot + equipment profiles
+      live_boundary: visual verification and UTM result artifact handoff
+    - id: plc_bridge
+      label: Mitsubishi PLC Safety Bridge
+      workspace: /plc
+      tools: []
+      config: configs/plc.yaml
+      live_boundary: D100-D102 safety transport for command, E-STOP source, and
+        recovery acknowledgement; PLC control remains outside executable agent stages
+      health_endpoint: /api/plc/status
+      preflight_endpoint: /api/plc/preflight
+      evidence_contracts:
+      - plc_safety_state.v1
+      - plc_register_snapshot.v1
+      actions:
+      - id: open_workspace
+        label: Open Workspace
+        kind: navigation
+        method: GET
+        endpoint: /plc
+        read_only: true
+      - id: health_check
+        label: Cached Status
+        kind: api
+        method: GET
+        endpoint: /api/plc/status
+        read_only: true
+    runtime_contract_map:
+      actual_runtime_source:
+      - graphs/configs/atr_closed_loop.yaml
+      - graphs/modules/*/module.yaml
+      - /api/state
+      - /api/devices/state
+      - /api/guardian/status
+      ide_rule: Runtime IDE must render executable stages, non-executable control
+        planes, bridge boundaries, and evidence flow from this contract.

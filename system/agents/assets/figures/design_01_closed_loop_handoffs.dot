@@ -1,0 +1,21 @@
+digraph DesignHandoffs {
+ graph [rankdir=LR,bgcolor="white",pad=0.25,nodesep=0.4,ranksep=0.55,label="Design: governed request to checked handoff",labelloc=t,fontname="DejaVu Sans"];
+ node [shape=box,style="rounded,filled",fillcolor="#f1f5f9",fontname="DejaVu Sans",fontsize=11];
+ edge [fontname="DejaVu Sans",fontsize=10,color="#475569"];
+ high [label="HIGH: existing runtime\nGoal / constraints / run + loop identity",fillcolor="#e0f2fe"];
+ bo [label="BO / LHS + operator\nRequested variables remain authoritative"];
+ prep [label="DESIGN: code-owned preparation\nCandidates / checks / estimates"];
+ llm [label="DESIGN: High decision layer\nAccept / inspect / return to owner",fillcolor="#dbeafe"];
+ out [label="Existing experiment_spec\nReport + handoff_packet"];
+ spc [label="SPECIMEN\nExisting fabrication path",fillcolor="#e0f2fe"];
+ history [label="KNOWLEDGE / EVIDENCE\nContext + separate attempt archive",fillcolor="#dcfce7"];
+ safety [label="GUARDIAN / SAFETY\nHard checks cannot be overridden",fillcolor="#fee2e2"];
+ test [label="Explicit non-LLM test only\nLegacy deterministic selection"];
+ high -> prep; bo -> prep [label="fixed inputs"]; prep -> llm;
+ llm -> out [label="accepted + checked"]; out -> spc [label="runtime-owned handoff"];
+ llm -> high [label="return / failure",constraint=false];
+ history -> llm [style=dashed,label="context"];
+ llm -> history [style=dashed,label="decision evidence",constraint=false];
+ safety -> llm [style=dashed,label="constraints"];
+ prep -> test [style=dashed,label="Mode.TEST + force=false"]; test -> out [style=dashed];
+}

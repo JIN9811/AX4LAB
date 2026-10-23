@@ -1,0 +1,141 @@
+"""Run the real chat refresh and accordion handlers without a server or devices."""
+from pathlib import Path
+import subprocess
+import pytest
+
+
+def test_new_chat_opens_and_previous_auto_bubble_closes_without_refresh_flicker():
+    source = (Path(__file__).resolve().parents[2] / "web/static/planning.js").read_text()
+    render = "function syncPlanningChatAutoExpansion(" + source.split(
+        "function syncPlanningChatAutoExpansion(", 1
+    )[1].split("function syncPlanningChatBubbleHeights(", 1)[0]
+    script = """
+const assert = require('node:assert/strict');
+let planningAutoExpandedChatGroup = '', planningLastVisibleChatItemKey = '';
+const planningChatItemRevealKey = item => item.type === 'operator' ? 'operator:'+item.msg.id : 'group:'+item.group.key;
+const planningExpandedChatGroups = new Set();
+const liveLastSession = null;
+const planningLoopArtifactCache = new Map();
+const escapeHtml = x => String(x ?? '');
+const formatTime = () => '12:00';
+const chatMessageSummaryLine = () => 'Greeting';
+const chatGroupAgentDescriptor = () => ({label:'Orchestrator'});
+const renderChatGroupIcon = () => '<img alt="agent">';
+const renderChatGroupProgress = () => '';
+const renderPlanningChatMessageDetail = (m, i, controls) => controls;
+const group = {key:'greeting',role:'orchestrator',messages:[{content:'Hello'}]};
+""" + render + """
+const first={type:'group',group};
+syncPlanningChatAutoExpansion([first]);
+const html = renderPlanningChatGroup(group, 0);
+assert.match(html, /is-expanded/);
+assert.match(html, /planning-agent-chat-hide/);
+assert.match(html, /<img alt="agent">/);
+assert.ok(!html.includes('planning-agent-chat-expanded-tools'));
+planningExpandedChatGroups.delete('greeting');
+syncPlanningChatAutoExpansion([first]);
+assert.match(renderPlanningChatGroup(group, 0), /is-collapsed/);
+const second={type:'group',group:{...group,key:'second'}};
+syncPlanningChatAutoExpansion([first,second]);
+assert.match(renderPlanningChatGroup(second.group, 1), /is-expanded/);
+assert.match(renderPlanningChatGroup(group, 0), /is-collapsed/);
+planningExpandedChatGroups.add('greeting'); // manually reopened historical bubble
+syncPlanningChatAutoExpansion([first,second]);
+assert.deepEqual([...planningExpandedChatGroups],['second','greeting']);
+const third={type:'group',group:{...group,key:'third'}};
+syncPlanningChatAutoExpansion([first,second,third]);
+assert.deepEqual([...planningExpandedChatGroups],['greeting','third']);
+syncPlanningChatAutoExpansion([first,second,third,{type:'operator',msg:{id:4}}]);
+assert.deepEqual([...planningExpandedChatGroups],['greeting']);
+const loop={type:'group',group:{key:'loop:1',kind:'loop_summary'}};
+syncPlanningChatAutoExpansion([loop]);
+assert.ok(!planningExpandedChatGroups.has('loop:1'));
+planningExpandedChatGroups.add('loop:1');
+syncPlanningChatAutoExpansion([loop]);
+assert.ok(planningExpandedChatGroups.has('loop:1'));
+for (let i=2; i<=7; i++) planningExpandedChatGroups.add(`loop:${i}`);
+syncPlanningChatAutoExpansion([loop,{type:'group',group:{...group,key:'after-loops'}}]);
+assert.equal(planningExpandedChatGroups.size,3,'automatic attention preserves the three-open limit');
+"""
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("immediate", [False, True])
+def test_chat_expansion_survives_refresh_and_preserves_accordion_rules(immediate):
+    source = (Path(__file__).resolve().parents[2] / "web/static/planning.js").read_text()
+
+    def function(name, next_name):
+        return "function " + name + source.split("function " + name, 1)[1].split(
+            "function " + next_name, 1
+        )[0]
+
+    refresh = function("updatePlanningDisplayedMessages(", "renderPlanningMessages(")
+    reveal = function("planningChatItemRevealKey(", "flattenPlanningChatItems(")
+    handlers = source.split('  planningChatLog.querySelectorAll(".planning-agent-chat-open', 1)[1]
+    handlers = '  planningChatLog.querySelectorAll(".planning-agent-chat-open' + handlers.split("\n}\n", 1)[0]
+    script = """
+const assert = require('node:assert/strict');
+const item = key => ({type: 'group', group: {key, kind: key.startsWith('loop:') ? 'loop_summary' : 'agent', messages: [key]}});
+const limitPlanningMessageCache = x => x;
+const buildPlanningChatItems = x => x.map(item);
+const flattenPlanningChatItems = xs => xs.flatMap(x => x.group.messages);
+const syncPlanningDisplayedMessageKeys = () => {};
+const schedulePlanningMessageReveal = () => {};
+const compactPlanningRevealBacklog = xs => xs;
+const window = {clearTimeout() {}};
+let planningDisplayInitialized = true, planningHistoryLoading = false;
+let planningDisplayedMessages = ['first', 'second'];
+let planningMessageRevealQueue = [], planningMessageRevealTimer = null;
+const planningDisplayedChatItemKeys = new Set(['group:first', 'group:second']);
+const planningExpandedChatGroups = new Set(['first']);
+""" + reveal + refresh + """
+updatePlanningDisplayedMessages(['first', 'second']);
+assert.deepEqual([...planningExpandedChatGroups], ['first'], 'unchanged refresh must preserve expansion');
+updatePlanningDisplayedMessages(['first', 'second', 'third']);
+assert.deepEqual([...planningExpandedChatGroups], ['first'], 'new messages must not collapse an existing group');
+planningExpandedChatGroups.add('removed');
+updatePlanningDisplayedMessages(['first', 'second']);
+assert.deepEqual([...planningExpandedChatGroups], ['first'], 'removed groups must be pruned');
+const callbacks = {};
+const planningChatLog = {querySelectorAll(selector) {
+  const kind = selector.includes('chat-open') ? 'open' : 'hide';
+  return ['first', 'second', 'third', 'fourth', ...Array.from({length:7},(_,i)=>`loop:${i+1}`)].map(key => ({dataset: {chatGroupKey: key}, disabled: false,
+           addEventListener(event, callback) { callbacks[`${kind}:${key}`] = callback; }}));
+}};
+let planningMessagesCache = ['first', 'second', 'third', 'fourth'];
+const liveLastSession = {};
+const renderPlanningMessages = (messages, options) => updatePlanningDisplayedMessages(messages, options);
+const persistLiveUiState = () => {};
+const persistLivePlanningCache = () => {};
+""" + handlers + """
+const event = {preventDefault() {}, stopPropagation() {}};
+callbacks['open:second'](event);
+callbacks['open:third'](event);
+assert.deepEqual([...planningExpandedChatGroups], ['first', 'second', 'third']);
+callbacks['open:first'](event);
+callbacks['open:fourth'](event);
+assert.deepEqual([...planningExpandedChatGroups], ['second', 'third', 'fourth'], 'fourth closes oldest; clicking an open group does not reorder it');
+callbacks['hide:third'](event);
+assert.deepEqual([...planningExpandedChatGroups], ['second', 'fourth']);
+// Completed-loop grouping replaces its detailed bubbles with a new summary key.
+planningMessagesCache = ['loop:1', 'fourth'];
+updatePlanningDisplayedMessages(planningMessagesCache, {immediate: IMMEDIATE});
+assert.deepEqual([...planningExpandedChatGroups], ['fourth'], 'compression closes only replaced groups, including immediate refresh');
+callbacks['open:loop:1'](event);
+updatePlanningDisplayedMessages(planningMessagesCache);
+updatePlanningDisplayedMessages(planningMessagesCache, {immediate: true});
+assert.deepEqual([...planningExpandedChatGroups], ['fourth', 'loop:1'], 'reopened summary survives repeated completion refresh');
+planningMessagesCache = ['loop:1', 'fourth', 'first', 'second'];
+callbacks['open:first'](event);
+callbacks['open:second'](event);
+assert.deepEqual([...planningExpandedChatGroups], ['loop:1', 'first', 'second'], 'summaries share the three-group expansion limit');
+planningMessagesCache = [...Array.from({length:7},(_,i)=>`loop:${i+1}`),'fourth','first','second'];
+for (let i=2;i<=7;i++) callbacks[`open:loop:${i}`](event);
+assert.deepEqual([...planningExpandedChatGroups],['loop:5','loop:6','loop:7'],'all loops listed, only latest three opened');
+updatePlanningDisplayedMessages(planningMessagesCache,{immediate:IMMEDIATE});
+assert.deepEqual([...planningExpandedChatGroups],['loop:5','loop:6','loop:7'],'refresh preserves three loop expansions');
+"""
+    script = script.replace("IMMEDIATE", str(immediate).lower())
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

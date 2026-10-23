@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<!--
+File purpose:
+- Multi-printer 3D workspace GUI with Bambu Lab X2D as the default device bridge.
+
+Key classes/functions:
+- Consumed by web/static/printer.js
+
+Inputs/outputs:
+- Input: /api/printer/profile, /api/printer/status, /api/printer/connection
+- Output: saved print defaults, selected-printer connection memory, bridge status display
+
+Dependencies:
+- /static/styles.css
+- /static/printer.js
+
+Modification guide:
+- Safe places to edit: labels, explanatory copy, non-critical layout.
+- Risky places to edit: element IDs consumed by printer.js.
+-->
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>3D Printer GUI</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260917-print-start-1" />
+    <link rel="preload" as="image" href="/static/ax4lab-logo-transparent.png">
+    <link rel="stylesheet" href="/static/workspace_boot.css?v=1">
+  </head>
+  <body>
+    {% set workspace_title = "3D Printer Workspace" %}
+    {% include "workspace_boot.html" %}
+    <main class="page equipment-setup-page printer-page bambu-printer-page">
+      <section class="hero panel printer-hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Device Workspace</p>
+          <h1>3D Printer GUI</h1>
+          <p class="subhead">
+            Bambu Lab Device Bridge를 기본 장비로 사용합니다. MQTT 실시간 상태, FTPS 전송 경로,
+            slicing gate, autoejection gate를 같은 화면에서 확인하고 Live GUI handoff에 반영합니다.
+          </p>
+        </div>
+        <article class="status-card">
+          <div class="status-head">
+            <span class="status-title">Printer Fleet</span>
+            <span id="printer-status-dot" class="status-dot idle"></span>
+          </div>
+          <strong id="printer-status-label">Loading</strong>
+          <p id="printer-status-detail">Reading selected printer bridge status.</p>
+        </article>
+      </section>
+
+      <section class="panel bambu-device-console">
+        <div class="bambu-console-head">
+          <div>
+            <p class="eyebrow">Bambu Device Screen</p>
+            <h2 id="printer-device-title">Selected Printer</h2>
+          </div>
+          <div class="button-row compact">
+            <button id="btn-printer-status-test" class="btn">Test Status</button>
+            <button id="btn-printer-status-live" class="btn primary">Live Status</button>
+            <button id="btn-printer-video-status" class="btn">Video Status</button>
+            <button id="btn-printer-upload-path-probe" class="btn">Upload Path Probe</button>
+            <button id="btn-printer-bambu-slice-artifact" class="btn">Slice Bambu Artifact</button>
+            <button id="btn-printer-http-artifact-route" class="btn">Prepare HTTP Artifact</button>
+            <button id="btn-printer-bambu-prestart-check" class="btn primary">Pre-start Check</button>
+            <button id="btn-printer-start-command-draft" class="btn">Print Command Draft</button>
+            <button id="btn-printer-start-gate" class="btn">Start Gate Check</button>
+            <button id="btn-printer-start-publish" class="btn danger">Publish Start</button>
+            <button id="btn-printer-spc-readiness" class="btn primary">SPC Readiness</button>
+            <button id="btn-printer-open-live" class="btn">Open Live GUI</button>
+          </div>
+        </div>
+        <div class="bambu-device-grid">
+          <article class="bambu-camera-panel">
+            <div class="bambu-card-head">
+              <span>Camera / Live View</span>
+              <strong id="printer-camera-summary">unknown</strong>
+            </div>
+            <div class="bambu-camera-placeholder" id="printer-camera-placeholder">
+              <span>Live video proxy is not connected yet.</span>
+            </div>
+            <div class="bambu-mini-grid">
+              <span id="printer-camera-live-state">video: unknown</span>
+              <span id="printer-camera-stream-kind">stream: unknown</span>
+              <span id="printer-camera-proxy-state">proxy: unknown</span>
+            </div>
+            <p id="printer-camera-detail" class="hint">MQTT camera capability will be shown here when available.</p>
+          </article>
+          <article class="bambu-control-panel">
+            <div class="bambu-card-head">
+              <span>Control Gate</span>
+              <strong id="printer-gate-summary">Loading</strong>
+            </div>
+            <div class="bambu-connection-status">
+              <div class="bambu-action-list">
+                <span id="printer-mqtt-pill" class="bridge-pill">MQTT</span>
+                <span id="printer-ftps-pill" class="bridge-pill">FTPS</span>
+                <span id="printer-upload-pill" class="bridge-pill">UPLOAD</span>
+              </div>
+            </div>
+            <div class="bambu-control-state-grid">
+              <span id="printer-control-state">state: unknown</span>
+              <span id="printer-control-queue">queue: --</span>
+              <span id="printer-control-upload">upload: blocked</span>
+              <span id="printer-control-start">start: guarded</span>
+            </div>
+            <p id="printer-gate-detail" class="hint">Reading bridge gates.</p>
+          </article>
+        </div>
+        <div class="bambu-status-strip">
+          <div>
+            <span>Job</span>
+            <strong id="printer-job-summary">No report</strong>
+          </div>
+          <div>
+            <span>Progress</span>
+            <strong id="printer-progress-summary">--</strong>
+          </div>
+          <div>
+            <span>Speed / Queue</span>
+            <strong id="printer-speed-summary">--</strong>
+          </div>
+          <div>
+            <span>Layer</span>
+            <strong id="printer-layer-summary">--</strong>
+          </div>
+          <div>
+            <span>Temperature</span>
+            <strong id="printer-temp-summary">--</strong>
+          </div>
+          <div>
+            <span>Materials</span>
+            <strong id="printer-materials-summary">--</strong>
+          </div>
+          <div>
+            <span>Storage</span>
+            <strong id="printer-storage-summary">--</strong>
+          </div>
+          <div>
+            <span>Tool / Plate</span>
+            <strong id="printer-tool-summary">--</strong>
+          </div>
+          <div>
+            <span>Safety</span>
+            <strong id="printer-safety-summary">--</strong>
+          </div>
+        </div>
+        <div class="bambu-device-detail-grid">
+          <article>
+            <div class="bambu-card-head">
+              <span>AMS / Material Slots</span>
+              <strong id="printer-material-slot-summary">No material report</strong>
+            </div>
+            <div id="printer-material-slot-list" class="bambu-material-slot-list"></div>
+            <div class="button-row">
+              <label><input id="printer-material-priority-enabled" type="checkbox" /> Enable priority</label>
+              <button id="btn-printer-material-priority-save" class="btn" type="button">Save priority</button>
+              <small id="printer-material-priority-state"></small>
+            </div>
+          </article>
+          <article>
+            <div class="bambu-card-head">
+              <span>Bridge Evidence</span>
+              <strong id="printer-evidence-summary">No evidence yet</strong>
+            </div>
+            <div id="printer-evidence-cards" class="bambu-evidence-cards"></div>
+          </article>
+        </div>
+        <div class="printer-status-grid compact printer-spc-readiness-panel">
+          <div>
+            <span class="status-title">Specimen Making Readiness</span>
+            <strong id="printer-spc-readiness-summary">Not checked</strong>
+            <p id="printer-spc-readiness-detail" class="hint">Run SPC Readiness to aggregate printer connection, start gate, and autoejection evidence.</p>
+          </div>
+          <div class="printer-spc-readiness-body">
+            <div id="printer-spc-readiness-levels" class="printer-readiness-levels" aria-live="polite"></div>
+            <div id="printer-spc-readiness-sections" class="printer-readiness-sections" aria-live="polite"></div>
+            <div id="printer-spc-next-actions" class="printer-spc-next-actions" aria-live="polite"></div>
+          </div>
+        </div>
+        <div class="printer-status-grid compact printer-prestart-check-panel">
+          <div>
+            <span class="status-title">Bambu Pre-start Checklist</span>
+            <strong id="printer-prestart-check-summary">Not checked</strong>
+            <p id="printer-prestart-check-detail" class="hint">
+              Runs slicing, HTTP artifact exposure, guarded start gate, and SPC readiness without publishing MQTT.
+            </p>
+          </div>
+          <div id="printer-prestart-check-steps" class="printer-readiness-levels" aria-live="polite"></div>
+        </div>
+      </section>
+
+      <section class="equipment-setup-grid printer-setup-grid bambu-workspace-grid">
+        <article class="panel printer-workspace-part">
+          <h2>Bridge Connection</h2>
+          <p class="hint">
+            Bambu 연결정보는 <code>memory/bambu_connection.json</code>에 저장됩니다. Access code는 표시하지 않고,
+            새 값을 입력한 경우에만 덮어씁니다. Prusa는 별도 profile 선택 시 기존 adapter로 전환됩니다.
+          </p>
+          <div class="printer-subsection">
+            <h3>Printer Fleet Selection</h3>
+            <p class="hint">Bambu Lab X2D가 기본값입니다. 다른 장비는 자동 대체가 아니라 명시 선택으로만 active profile이 됩니다.</p>
+            <div class="lerobot-form-grid">
+              <label>
+                Active Printer Profile
+                <select id="printer-fleet-profile-input" class="text-input"></select>
+              </label>
+            </div>
+            <div class="button-row">
+              <button id="btn-printer-fleet-save" class="btn primary" type="button">Set Active Printer</button>
+            </div>
+          </div>
+          <div class="printer-subsection">
+            <h3>Bambu LAN Connection</h3>
+            <div class="lerobot-form-grid">
+              <label>
+                Host / IP
+                <input id="printer-connection-host-input" class="text-input" value="" placeholder="192.0.2.42" />
+              </label>
+              <label>
+                Serial Number / SN
+                <input id="printer-connection-serial-input" class="text-input" value="" placeholder="20P..." />
+              </label>
+              <label>
+                Printer Name
+                <input id="printer-connection-printer-name-input" class="text-input" value="" placeholder="3DP-20P-425" />
+              </label>
+              <label>
+                Model
+                <input id="printer-connection-model-input" class="text-input" value="Bambu Lab X2D" />
+              </label>
+              <label>
+                Username
+                <input id="printer-connection-username-input" class="text-input" value="bblp" />
+              </label>
+              <label>
+                LAN Access Code
+                <input id="printer-connection-access-code-input" class="text-input" type="password" placeholder="blank = keep saved access code" autocomplete="new-password" />
+              </label>
+            </div>
+            <label class="checkbox-line">
+              <input id="printer-connection-lan-mode-input" type="checkbox" />
+              LAN-only mode was confirmed on the printer
+            </label>
+            <label class="checkbox-line">
+              <input id="printer-connection-developer-mode-input" type="checkbox" />
+              Developer mode was confirmed for local control
+            </label>
+            <div class="legacy-prusa-fields" aria-label="legacy Prusa connection fields">
+              <input id="printer-connection-scheme-input" type="hidden" value="http" />
+              <input id="printer-connection-port-input" type="hidden" value="80" />
+              <input id="printer-connection-storage-input" type="hidden" value="ftps" />
+              <select id="printer-connection-auth-mode-input" class="text-input" hidden>
+                <option value="lan_access_code" selected>lan_access_code</option>
+                <option value="digest">digest</option>
+                <option value="basic">basic</option>
+                <option value="api_key">api_key</option>
+                <option value="none">none</option>
+              </select>
+              <input id="printer-connection-password-input" type="hidden" value="" />
+              <input id="printer-connection-api-key-header-input" type="hidden" value="X-Api-Key" />
+              <input id="printer-connection-api-key-input" type="hidden" value="" />
+            </div>
+            <div class="button-row">
+              <button id="btn-printer-connection-save" class="btn primary">Set Bridge Connection</button>
+              <button id="btn-printer-connection-reload" class="btn">Reload Connection</button>
+            </div>
+            <div class="printer-connection-action-panel" aria-label="Bambu connection action guidance">
+              <div class="bambu-card-head">
+                <span>Connection Confirmation</span>
+                <strong id="printer-connection-action-summary">Waiting for bridge evidence</strong>
+              </div>
+              <p id="printer-connection-action-detail" class="hint">
+                Run Live Status or SPC Readiness to map LAN/Developer/storage blockers to the fields above.
+              </p>
+              <div id="printer-connection-action-list" class="printer-connection-action-list" aria-live="polite"></div>
+            </div>
+          </div>
+          <div class="printer-status-grid">
+            <div>
+              <span class="status-title">Connection Memory</span>
+              <strong id="printer-connection-summary">Loading</strong>
+              <p id="printer-connection-detail" class="hint">Reading connection memory.</p>
+            </div>
+            <div>
+              <span class="status-title">Slicer</span>
+              <strong id="printer-slicer-summary">Loading</strong>
+              <p id="printer-slicer-detail" class="hint">Reading slicer config.</p>
+            </div>
+            <div>
+              <span class="status-title">Selected Profiles</span>
+              <strong id="printer-fleet-summary">Loading</strong>
+              <p id="printer-fleet-detail" class="hint">Bambu is default; Prusa is explicit selection only.</p>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel printer-workspace-part">
+          <h2>Print Defaults</h2>
+          <p class="hint">Live/Test workflow에서 생성한 STL을 slicing하고 출력 직전까지 검증할 기본값입니다.</p>
+          <div class="lerobot-form-grid">
+            <label>
+              Material
+              <input id="printer-material-input" class="text-input" value="PLA" />
+            </label>
+            <label>
+              Printer Model
+              <input id="printer-model-input" class="text-input" value="Bambu Lab X2D" />
+            </label>
+            <label>
+              Printer Profile
+              <input id="printer-profile-input" class="text-input" value="bambulab_x2d_pla_0p4_nozzle" />
+            </label>
+            <label>
+              Slicer Profile Hint
+              <input id="printer-slicer-profile-input" class="text-input" value="0.2mm_quality" />
+            </label>
+            <label>Specimen placement (Bambu X2D)
+              <select id="printer-placement-mode" class="text-input">
+                <option value="auto">Auto — slicer arrangement</option>
+                <option value="bed_center">Bed center — X128 / Y128 mm</option>
+                <option value="custom">Custom center X / Y</option>
+              </select>
+            </label>
+            <label>Specimen center X (mm)
+              <input id="printer-placement-x" class="text-input" type="number" min="0" max="256" step="0.1" value="128" disabled />
+            </label>
+            <label>Specimen center Y (mm)
+              <input id="printer-placement-y" class="text-input" type="number" min="0" max="256" step="0.1" value="128" disabled />
+            </label>
+            <p class="hint">Re-slice the original STL after changing the position.</p>
+            <label>
+              Nozzle Diameter mm
+              <input id="printer-nozzle-input" class="text-input" type="number" min="0.1" max="2" step="0.05" value="0.4" />
+            </label>
+            <label>
+              Layer Height mm
+              <input id="printer-layer-input" class="text-input" type="number" min="0.02" max="1" step="0.01" value="0.2" />
+            </label>
+            <label>
+              Bed Temperature C
+              <input id="printer-bed-temp-input" class="text-input" type="number" min="0" max="120" step="1" value="60" />
+            </label>
+            <label>
+              Storage Target
+              <input id="printer-storage-input" class="text-input" value="ftps" />
+            </label>
+            <label>
+              Bambu Source STL / 3MF Path
+              <input id="printer-bambu-source-path-input" class="text-input" value="" placeholder="~/.../specimen.stl" />
+            </label>
+            <label>
+              Bambu Sliced Artifact Path
+              <input id="printer-bambu-artifact-path-input" class="text-input" value="" placeholder="~/.../specimen.gcode.3mf" />
+            </label>
+            <label>
+              Public Base URL optional
+              <input id="printer-bambu-public-base-url-input" class="text-input" value="" placeholder="auto detect or http://192.168.50.x:8000" />
+            </label>
+            <label>
+              Max Print Time min
+              <input id="printer-max-time-input" class="text-input" type="number" min="1" step="1" value="120" />
+            </label>
+          </div>
+          <label class="checkbox-line">
+            <input id="printer-overwrite-input" type="checkbox" checked />
+            overwrite existing job artifact when the bridge confirms the target path
+          </label>
+          <label class="checkbox-line">
+            <input id="printer-start-input" type="checkbox" />
+            allow live workflow to start print after upload and Guardian approval
+          </label>
+          <label class="checkbox-line">
+            <input id="printer-ejection-input" type="checkbox" />
+            enable configured autoejection routine after print completion
+          </label>
+          <label class="checkbox-line">
+            <input id="printer-skirt-input" type="checkbox" />
+            generate slicer skirt/brim/raft structures
+          </label>
+          <label class="checkbox-line">
+            <input id="printer-bottom-cap-input" type="checkbox" checked />
+            generate bottom cap skin for bed adhesion
+          </label>
+          <label class="checkbox-line">
+            <input id="printer-top-cap-input" type="checkbox" />
+            generate top cap skin for flat compression face
+          </label>
+          <div class="lerobot-form-grid">
+            <label>
+              Cap Skin Thickness mm
+              <input id="printer-skin-input" class="text-input" type="number" min="0.2" max="3" step="0.05" value="0.8" />
+            </label>
+          </div>
+          <section class="printer-subsection" id="printer-print-start-settings" aria-labelledby="printer-print-start-title">
+            <h3 id="printer-print-start-title">Print Start &amp; Early Layers</h3>
+            <p class="hint">Save, then re-slice the original model. Existing artifacts and active prints are unchanged.</p>
+            <label class="checkbox-line">
+              <input id="printer-slow-first-layer-input" type="checkbox" checked />
+              Override first-layer speed for bed adhesion
+            </label>
+            <div class="lerobot-form-grid">
+              <label>First Layer Height (mm)
+                <input id="printer-first-layer-height-input" class="text-input" type="number" min="0.02" max="1" step="0.01" value="0.2" />
+              </label>
+              <label>First Layer Speed (mm/s)
+                <input id="printer-first-layer-speed-input" class="text-input" type="number" min="3" max="60" step="1" value="10" />
+              </label>
+              <label>First Layer Bed Temperature (°C)
+                <input id="printer-first-layer-bed-temp-input" class="text-input" type="number" min="0" max="120" step="1" value="60" />
+              </label>
+            </div>
+            <h4>Bambu X2D — Start-Point Prime &amp; Speed Controls</h4>
+            <div class="lerobot-form-grid">
+              <div>
+                <label for="printer-xy-speed-scale-input">XYZ speed scale (%)</label>
+                <input id="printer-xy-speed-scale-input" class="text-input" type="number" min="1" max="100" step="any" value="100" />
+                <p class="hint">Limit: 1–100% · 100% = original speed · XY + Z travel / Z-hop on the next slice · Early-layer caps and slicer minimums still apply</p>
+              </div>
+              <div>
+                <label class="checkbox-line"><input id="printer-start-point-prime-enabled-input" type="checkbox" checked /> Start-Point Prime</label>
+                <input id="printer-start-point-prime-input" aria-label="Start-Point Prime (mm of filament)" class="text-input" type="number" min="0" step="0.01" value="0.1" />
+                <p class="hint">Limit: ≥ 0 mm of filament · No upper cap</p>
+              </div>
+              <div>
+                <label class="checkbox-line"><input id="printer-early-layer-speed-limit-input" type="checkbox" checked /> Layers 2–5 Speed Cap</label>
+                <input id="printer-early-layer-speed-input" aria-label="Layers 2–5 Speed Cap (mm/s)" class="text-input" type="number" min="0.1" max="1000" step="0.1" value="50" />
+                <p class="hint">Limit: 0.1–1000 mm/s</p>
+              </div>
+              <div>
+                <label class="checkbox-line"><input id="printer-early-layer-z-speed-limit-input" type="checkbox" checked /> Layers 1–5 Z Speed Cap</label>
+                <input id="printer-early-layer-z-speed-input" aria-label="Layers 1–5 Z Speed Cap (mm/s)" class="text-input" type="number" min="0.1" max="20" step="0.1" value="5" />
+                <p class="hint">Limit: 0.1–20 mm/s</p>
+              </div>
+            </div>
+            <label class="checkbox-line">
+              <input id="printer-bed-leveling-input" type="checkbox" checked />
+              Run bed leveling before each real print (Bambu)
+            </label>
+            <label class="checkbox-line">
+              <input id="printer-flow-cali-input" type="checkbox" checked />
+              Run flow dynamics calibration before each real print (Bambu)
+            </label>
+          </section>
+          <label class="planning-message-label">
+            Notes
+            <textarea id="printer-notes-input" class="text-input" rows="4"></textarea>
+          </label>
+          <div class="printer-subsection" id="printer-test-specimen-defaults">
+            <h3>Test Specimen Defaults</h3>
+            <p class="hint">Fallback inputs for test-mode specimen generation, including real-print test routes. Explicit experimental contract values take precedence; these do not change an active run.</p>
+            <div class="lerobot-form-grid">
+              <label>
+                Specimen Size X × Y × Z (mm)
+                <input id="printer-test-size-input" class="text-input" value="30,30,30" placeholder="30,30,30 또는 30 x 30 x 30" />
+              </label>
+              <label>
+                Fallback Cell Size (mm)
+                <input id="printer-test-cell-input" class="text-input" type="number" min="3" max="10" step="0.5" value="10" />
+              </label>
+            </div>
+            <p class="hint">The single cell-size value is a compatibility fallback, not a fixed LHS/BO candidate or a search range. LHS/BO selects cell size and wall thickness from the experimental contract. Current test-mode search defaults: cell size 5–10 mm; wall thickness 0.6–1.2 mm.</p>
+          </div>
+          <div class="button-row">
+            <button id="btn-printer-save" class="btn primary">Save Print Defaults</button>
+            <button id="btn-printer-reset" class="btn">Reset Fields</button>
+          </div>
+        </article>
+
+        <article class="panel printer-workspace-part">
+          <h2>Bambu G-code Autoejection</h2>
+          <p class="hint">
+            Bambu 기본 profile은 sliced artifact를 deterministic G-code patch로 변환한 뒤 validator, HTTP route,
+            start gate 순서로 확인합니다. 실제 MQTT publish는 별도 승인 경로에서만 수행됩니다.
+          </p>
+          <div class="printer-subsection">
+            <h3>Native Patch Gate</h3>
+            <p class="hint">기본 provider는 <code>bambu_gcode_patch</code>입니다. external robot handoff는 recovery path로만 별도 설정합니다.</p>
+            <label class="checkbox-line">
+              <input id="printer-autoejection-enabled-input" type="checkbox" />
+              request Bambu autoejection for autonomous loop
+            </label>
+            <div class="lerobot-form-grid">
+              <label>
+                Native Provider
+                <input id="printer-autoejection-provider-input" class="text-input" value="none" placeholder="bambu_gcode_patch" />
+              </label>
+              <label>
+                Push Direction
+                <select id="printer-autoejection-push-direction-input" class="text-input">
+                  <option value="center">center</option>
+                  <option value="left">left</option>
+                  <option value="right">right</option>
+                </select>
+              </label>
+              <label>
+                Z Push Offset mm
+                <input id="printer-autoejection-z-push-offset-input" class="text-input" type="number" min="0" max="200" step="0.5" value="15" />
+              </label>
+              <label>
+                Push Lane Offset mm
+                <input id="printer-autoejection-push-lane-offset-input" class="text-input" type="number" min="0" max="120" step="0.5" value="30" />
+              </label>
+              <label>
+                Push Speed mm/min
+                <input id="printer-autoejection-push-speed-input" class="text-input" type="number" min="100" max="12000" step="10" value="6000" />
+              </label>
+              <label>
+                Sweep Z mm
+                <input id="printer-autoejection-sweep-z-input" class="text-input" type="number" min="0.5" max="50" step="0.1" value="1" />
+              </label>
+              <label>
+                Sweep Speed mm/min
+                <input id="printer-autoejection-sweep-speed-input" class="text-input" type="number" min="100" max="12000" step="10" value="6000" />
+              </label>
+              <label class="checkbox-line">
+                <input id="printer-autoejection-full-bed-sweep-input" type="checkbox" />
+                Enable full-bed sweep after local push
+              </label>
+              <label>
+                Recovery Routine ID optional
+                <input id="printer-autoejection-routine-input" class="text-input" value="" placeholder="robot-pickoff-v1" />
+              </label>
+              <label>
+                Recovery Pre-eject Vision optional
+                <input id="printer-autoejection-pre-vision-input" class="text-input" value="" placeholder="bambu-bed-occupied-check" />
+              </label>
+              <label>
+                Recovery Post-eject Vision optional
+                <input id="printer-autoejection-post-vision-input" class="text-input" value="" placeholder="bambu-bed-clear-check" />
+              </label>
+            </div>
+            <div class="button-row">
+              <button id="btn-printer-autoejection-fill-native" class="btn" type="button">Fill Native G-code Defaults</button>
+              <button id="btn-printer-autoejection-config-save" class="btn primary" type="button">Save Autoejection Config</button>
+              <button id="btn-printer-autoejection-validate-preview" class="btn" type="button">Validate G-code Preview</button>
+              <button id="btn-printer-autoejection-test-artifact" class="btn" type="button">Generate Ejection Test Artifact</button>
+              <button id="btn-printer-autoejection-sweep-test-artifact" class="btn" type="button">Generate Sweep Test Artifact</button>
+              <button id="btn-printer-autoejection-patch-artifact" class="btn" type="button">Generate Patched Artifact</button>
+            </div>
+          </div>
+          <div class="printer-status-grid compact">
+            <div>
+              <span class="status-title">Autoejection Gate</span>
+              <strong id="printer-autoejection-status-summary">Loading</strong>
+              <p id="printer-autoejection-status-detail" class="hint">Reading native G-code patch evidence.</p>
+              <details id="printer-autoejection-validation-details" class="printer-evidence-details">
+                <summary>Validation Evidence</summary>
+                <pre id="printer-autoejection-validation-body">No validation evidence yet.</pre>
+              </details>
+            </div>
+            <div>
+              <span class="status-title">Bed-clear Evidence</span>
+              <strong id="printer-bed-clear-summary">Loading</strong>
+              <p id="printer-bed-clear-detail" class="hint">Reading post-ejection bed-clear gate.</p>
+            </div>
+          </div>
+          <div class="button-row">
+            <button id="btn-printer-bed-clear-mark" class="btn primary" type="button">Mark Bed Clear</button>
+            <button id="btn-printer-bed-clear-not-clear" class="btn" type="button">Mark Not Clear</button>
+          </div>
+          <div class="printer-subsection">
+            <h3>Physical Proof Package</h3>
+            <p class="hint">
+              실제 Bambu autoejection 완료 판정은 proof package 감사가 통과해야 합니다. Template 생성과 Audit은 프린터를 움직이지 않습니다.
+            </p>
+            <div class="lerobot-form-grid">
+              <label>
+                Proof Package Path
+                <input id="printer-autoejection-proof-path-input" class="text-input" value="" placeholder="artifacts/printer/<run_id>/bambu/bambu_autoejection_physical_validation_*.json" />
+              </label>
+              <label>
+                Completion Status
+                <strong id="printer-autoejection-proof-summary">not audited</strong>
+                <span id="printer-autoejection-proof-detail" class="hint">Create a fail-closed template before supervised physical validation.</span>
+              </label>
+            </div>
+            <div class="button-row">
+              <button id="btn-printer-autoejection-proof-template" class="btn" type="button">Build Fail-Closed Proof Template</button>
+              <button id="btn-printer-autoejection-completion-audit" class="btn" type="button">Run Completion Audit</button>
+            </div>
+          </div>
+          <div class="lerobot-form-grid">
+            <label>
+              Assumed Object Size mm
+              <input id="printer-ejection-object-size-input" class="text-input" value="30,30,30" placeholder="Test Specimen Size 기본값 사용" />
+            </label>
+            <label>
+              Apply Test Option
+              <button id="btn-printer-ejection-apply-test-size" class="btn" type="button">Apply Test Size</button>
+            </label>
+          </div>
+        </article>
+
+        <article class="panel printer-workspace-part">
+          <h2>Bridge Evidence Log</h2>
+          <pre id="printer-result-log" class="equipment-result-log">{}</pre>
+        </article>
+      </section>
+    </main>
+
+    <script src="/static/printer_video_visibility.js?v=20260923-reconnect-1" defer></script>
+    <script src="/static/printer.js?v=20260923-xyz-speed-scale-1" defer></script>
+  </body>
+</html>

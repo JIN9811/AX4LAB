@@ -1,0 +1,119 @@
+Design-to-STL Runtime Reference
+Verified by code inspection on 2026-09-28 against main e70daa1.
+
+Purpose and authority
+- This document explains the implemented path; it is not an executable policy.
+- Current run contracts, operator-approved bounds and fresh owner evidence take precedence.
+- Historical Phase 1 proposals are not default constraints or permission to execute.
+- Sources: agents/design/agent.py, agents/specimen/agent.py, agents/bo/agent.py,
+  learning/bo_parameter_space.py, learning/botorch_backend.py,
+  orchestrator/langgraph_runtime.py, graphs/configs/atr_closed_loop.yaml.
+- Detailed references: docs/agents/design_agent.md, docs/agents/specimen_agent.md,
+  docs/agents/bo_agent.md, docs/runtime/test_mode.md.
+
+Active Gyroid contract
+- Parameterization: wall_cell_v1.
+- Active inputs: cell_size_mm and wall_thickness_mm.
+- Test default continuous bounds: cell size 5.0–10.0 mm; wall thickness 0.6–1.2 mm.
+- A run's approved bounds/fixed values override suggestions. Do not substitute defaults for consent.
+- Preserve decimal coordinates. Do not snap cell size to {5, 6, 7.5, 10}, a=L/N,
+  or rounded integer repeat counts. The periodic field is generated and center-cropped.
+- Relative density and porosity are derived outputs, not independent BO inputs.
+- Nominal wall thickness calibrates the implicit level; it is not an assurance
+  that every mesh location has that exact thickness.
+- The serialized mesh must pass its independent 0.4 mm minimum-wall criterion
+  or a stricter current constraint. Do not replace that check with a density clamp.
+- Cap/skin, material, envelope, orientation and slicer options follow the
+  resolved current specification/profile; do not inject fixed historical settings.
+- Historical density-controlled records retain their original parameterization.
+
+Owner and handoff boundaries
+- Design returns experiment_spec, rationale and candidate/decision evidence.
+- Specimen validates geometry, serialized mesh and manufacturability, creates
+  a run-bound handoff, then calls the existing printer.prepare route.
+- Geometry generation and checking remain registered numerical tools, not
+  arbitrary LLM-generated vertices, shell commands or G-code.
+- BO computes one eligible next proposal through its numeric tool. The model
+  reviews that result; it does not replace the coordinates with a proxy ranking.
+- LHS initialization uses the configured accepted-observation target, followed
+  by SingleTaskGP/acquisition. Failed or ineligible records do not count.
+- The configured experiment limit is not necessarily twenty. At that limit BO
+  preserves the final model/report without requesting another specimen.
+- The Orchestrator forwards the validated parameter domain and fixed constraints
+  through orchestrator_design_contract.v1. Do not freeze the previous specimen
+  as the next cycle's free-variable constraints.
+- The primary graph remains authoritative. Placement/clearance Vision and
+  post-test Manipulation revisits are real conditional paths, not skipped
+  because an earlier visit of the same agent completed.
+- Keep existing AgentResult keys, registered handlers, run/cycle/specimen
+  identities and the existing event pipeline. Geometry substeps are not new stages.
+
+Execution profiles
+- Ordinary experiments require complete reviewed conditions and execution approval.
+- Test input generation uses the same dialogue/admission path. Deterministic
+  fixtures require explicit test settings; a model failure is not permission
+  to silently manufacture an accepted decision.
+- virtual_bridge uses the configured virtual device boundary.
+- installed_printer derives an ejection-only project from the normal sliced
+  artifact, omitting print body/cooling wait. It does not use the obsolete
+  print-start/cancel/standalone-ejection sequence.
+- physical_print retains the complete sliced body and configured cooling/
+  autoejection tail through the selected printer route.
+- The word test alone is not authorization for physical I/O. Saved per-agent
+  execution profiles determine the downstream device boundaries.
+- The shared readiness, identity, safety and completion gates apply. Prior
+  printer success or an MQTT acknowledgement alone cannot complete a new job.
+
+Geometry, preparation and failure
+- Existing tools include geometry.generate_metamaterial_stl,
+  geometry.check_mesh_quality, geometry.check_manufacturability and
+  artifact.create_specimen_handoff; consult their registered contracts for fields.
+- Failed geometry, mesh, wall or handoff checks do not dispatch a print or advance
+  to Vision merely because a result dictionary exists.
+- Retain structured rejection/warning evidence and existing owner retry/recovery
+  routes. A historical failure alone is not a permanent design interlock.
+- A pre-device preparation failure can use the identity-bound SPC resume path
+  when its full attempt history proves no printer operation occurred.
+- Unknown physical effects require job-bound recovery, not a blind reprint.
+- The generator's cleanup and mesh checks are implementation details in
+  docs/gui/serialized_mesh_validation.md; do not equate nominal wall with measured
+  wall or change candidate coordinates silently to make a test pass.
+
+Mass, duration and objective
+- Slicer-reported selected-plate mass follows the sliced artifact through SPC
+  to Analysis and is the physical SEA denominator. It remains an estimate,
+  not a balance measurement, even when the UI label is simply Mass.
+- Printer duration comes from slicer evidence, not a geometry heuristic presented
+  as measured time. Missing data remains unavailable.
+- SEA is force–displacement energy through 50% of the current initial specimen
+  height, converted to joules and divided by mass in grams.
+- Additional measured travel does not extend this objective's integration range.
+- Full-curve energy, energy density, compressive strength and apparent modulus
+  are distinct metrics; compiled objectives preserve their own bound definition.
+- Design performance before a matching experiment can legitimately be unassessed.
+  Historical scores and proxy estimates are not new measured observations.
+
+Artifacts and GUI
+- Preserve original STL and slicer-oriented files as distinct artifacts.
+- Per-loop invocation evidence lives under
+  runs/<run>/runtime/loops/loop-<index>/<agent>/attempt-<index>/.
+- Each attempt retains its result, manifest, tool/evidence records and available
+  file snapshots. Keep failures alongside successful recoveries.
+- Design-result experiment_spec identifies the generated specimen; an incoming
+  Design manifest may still refer to the previous specimen.
+- DSN Generated Specimens/Candidate Comparison, SPC preparation status and
+  ANL/BO evidence views project these owner records. Presentation does not confer
+  execution authority or retrospectively repair missing measurements.
+- Current BO plots expose cell size and wall thickness in 2D/3D; the old
+  anonymous 1D display is not the current design-space contract.
+- Replay is read-only and does not re-execute the loop.
+- See docs/gui/artifact_preservation.md and docs/runtime/loop_artifact_archiving.md.
+
+Verification
+- Main-code inspection and scoped regression results are recorded in
+  docs/maintenance/code_documentation_audit_20260928.md.
+- The separate fifteen-iteration archive audit verifies preserved identities,
+  geometry/curve/metric hashes and recorded SEA normalization, not independent
+  material certification or unattended manufacturing.
+- This reference does not start equipment, alter saved profiles or authorize
+  deployment of the separate report-agent worktree.
