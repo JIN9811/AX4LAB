@@ -337,6 +337,16 @@ def public_release_records(manifest: dict) -> dict[str, dict]:
     return phase['files']
 
 
+def source_maintenance_records(manifest: dict) -> dict[str, dict]:
+    """Post-publication fixes supersede current bytes without rewriting old proofs.
+
+    Use the same pinned-base receipt contract as publication; keep maintenance
+    records separate so the original release remains independently auditable.
+    """
+    phase = manifest.get('source_maintenance')
+    return public_release_records({'public_release': phase}) if phase is not None else {}
+
+
 def document_locations(manifest: dict, *, integrated: bool = True) -> dict[str, str]:
     """Compose explicit phase receipts without relabelling prior evidence."""
     from .move_files import document_move
@@ -358,7 +368,8 @@ def document_locations(manifest: dict, *, integrated: bool = True) -> dict[str, 
                 locations.pop(source)
             else:
                 locations[source] = row['destination']
-        omitted = {path for path, row in public_release_records(manifest).items()
+        current = {**public_release_records(manifest), **source_maintenance_records(manifest)}
+        omitted = {path for path, row in current.items()
                    if row['current_identity'] is None}
         locations = {source: current for source, current in locations.items() if current not in omitted}
     return locations
@@ -515,7 +526,8 @@ def audit_document_references(repository_root: Path, manifest: dict) -> dict:
     result.update(checked=0, external_urls=0, historical_references=[], repository_provenance=[])
     locations = document_locations(manifest)
     integration = latest_main_records(manifest)
-    naming = {**ax4lab_naming_records(manifest), **public_release_records(manifest)}
+    naming = {**ax4lab_naming_records(manifest), **public_release_records(manifest),
+              **source_maintenance_records(manifest)}
     for current, row in naming.items():
         path = root / current
         expected = row['current_identity']

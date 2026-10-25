@@ -47,9 +47,19 @@ if [[ "$*" == *doctor.py* ]]; then exit "${DOCTOR_EXIT:-0}"; fi
 printf 'uv %s\\n' "$*" >> "$CALLS"
 if [[ "$1" == venv ]]; then
   target="${@: -1}"
+  selected=""
+  for ((i=1; i<$#; i++)); do
+    if [[ "${!i}" == --python ]]; then j=$((i+1)); selected="${!j}"; break; fi
+  done
   mkdir -p "$target/bin"
-  cp "$PYTHON_BIN" "$target/bin/python"
-  if [[ -f "$(dirname "$PYTHON_BIN")/.interpreter-id" ]]; then cp "$(dirname "$PYTHON_BIN")/.interpreter-id" "$target/bin/.interpreter-id"; fi
+  if [[ "$selected" != /* ]]; then
+    # A version/name request can select uv's managed interpreter, not PATH's.
+    cp "$FAKE_PYTHON" "$target/bin/python"
+    echo python3.13 > "$target/bin/.interpreter-id"
+  else
+    cp "$selected" "$target/bin/python"
+    if [[ -f "$(dirname "$selected")/.interpreter-id" ]]; then cp "$(dirname "$selected")/.interpreter-id" "$target/bin/.interpreter-id"; fi
+  fi
 fi
 if [[ "$1" == sync && "${FAIL_SYNC:-0}" == 1 ]]; then exit 25; fi
 exit "${UV_EXIT:-0}"
@@ -229,3 +239,39 @@ def test_interpreter_change_requires_preserving_explicit_rebuild(checkout):
     assert (old / 'bin/.interpreter-id').read_text() == 'python3.13\n'
     assert (old / '.atr-prefix').read_text() == str(old) + '\n'
     assert run(checkout, 'run_local.sh').returncode == 0
+
+
+@pytest.mark.parametrize('selection', ['bare', 'relative'])
+def test_bootstrap_preserves_callers_python_instead_of_uv_managed_selection(checkout, selection):
+    root, env = checkout
+    selected = Path(env['FAKE_PYTHON'])
+    requested = selected.name if selection == 'bare' else os.path.relpath(selected, root.parent)
+    for _ in range(2):
+        result = run(checkout, 'bootstrap_linux.sh', PYTHON_BIN=requested)
+        assert result.returncode == 0, result.stdout + result.stderr
+    assert calls(checkout).count('uv venv ') == 1
+    assert f'uv venv --python {selected} {root / ".venv"}' in calls(checkout)
+    assert not (root / '.venv/bin/.interpreter-id').exists(), 'uv chose a different managed Python'
+    assert not list(root.glob('.venv.backup.*'))
+
+
+def test_missing_requested_python_fails_before_preserving_or_installing(checkout):
+    venv = install_venv(checkout)
+    (venv / 'sentinel').write_text('existing environment')
+    result = run(checkout, 'bootstrap_linux.sh', '--rebuild-venv',
+                 PYTHON_BIN='no-such-python-executable')
+    assert result.returncode != 0
+    assert 'Python executable not found' in result.stderr
+    assert (venv / 'sentinel').read_text() == 'existing environment'
+    assert not list(checkout[0].glob('.venv.backup.*'))
+    assert calls(checkout) == ''
+
+
+def test_requested_python_symlink_is_not_dereferenced(checkout):
+    root, env = checkout
+    selected = root.parent / 'selected env/bin/python'
+    selected.parent.mkdir(parents=True)
+    selected.symlink_to(env['FAKE_PYTHON'])
+    result = run(checkout, 'bootstrap_linux.sh', PYTHON_BIN=str(selected))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f'uv venv --python {selected} {root / ".venv"}' in calls(checkout)

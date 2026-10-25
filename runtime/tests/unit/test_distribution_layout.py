@@ -15,6 +15,25 @@ import pytest
 RUNTIME = Path(__file__).resolve().parents[2]
 
 
+def test_source_maintenance_receipts_are_separate_and_validated():
+    from copy import deepcopy
+    from tools.repository_layout.checks import public_release_records, source_maintenance_records
+    identity = {'sha256': 'a' * 64, 'size': 10, 'mode': '100644'}
+    changed = {**identity, 'sha256': 'b' * 64, 'size': 11}
+    original = {'base_revision': '1' * 40, 'files': {
+        'runtime/install/bootstrap_linux.sh': {'previous_identity': None, 'current_identity': identity}}}
+    manifest = {'public_release': deepcopy(original), 'source_maintenance': {
+        'base_revision': '2' * 40, 'files': {
+            'runtime/install/bootstrap_linux.sh': {'previous_identity': identity, 'current_identity': changed}}}}
+    assert source_maintenance_records({}) == {}
+    assert source_maintenance_records(manifest) == manifest['source_maintenance']['files']
+    assert public_release_records(manifest) == original['files']
+    assert manifest['public_release'] == original
+    manifest['source_maintenance']['base_revision'] = 'unpinned'
+    with pytest.raises(ValueError, match='pinned base'):
+        source_maintenance_records(manifest)
+
+
 def test_distribution_uses_positive_per_file_selection():
     selection = RUNTIME / 'distribution-files.json'
     assert selection.is_file(), 'positive code/resource selection is missing'
@@ -54,8 +73,8 @@ def test_runtime_move_targets_match_exact_phase_identities():
     from tools.repository_layout.checks import ax4lab_naming_records
     subsequent.update({path: row['current_identity']
                        for path, row in ax4lab_naming_records(manifest).items()})
-    from tools.repository_layout.checks import public_release_records
-    release = public_release_records(manifest)
+    from tools.repository_layout.checks import public_release_records, source_maintenance_records
+    release = {**public_release_records(manifest), **source_maintenance_records(manifest)}
     omitted = {path for path, row in release.items() if row['current_identity'] is None}
     for path in omitted:
         assert not os.path.lexists(outer / path), path

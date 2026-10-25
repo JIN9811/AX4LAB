@@ -50,6 +50,14 @@ run() {
 }
 source "${SCRIPT_DIR}/venv_guard.sh"
 normalize_installation_profile
+# Resolve before changing directory. A bare name lets uv select a managed
+# interpreter that differs from the one the shell uses for our identity check.
+# Keep symlinks intact so a caller-selected virtualenv keeps its semantics.
+if ! selected_python="$(type -P -- "${PYTHON_BIN}")"; then
+  echo "Python executable not found: ${PYTHON_BIN}. Set PYTHON_BIN to an installed Python executable." >&2
+  exit 1
+fi
+PYTHON_BIN="$(realpath -ms -- "${selected_python}")"
 cd "${REPO_ROOT}"
 unset PYTHONHOME PYTHONPATH VIRTUAL_ENV
 export PYTHONNOUSERSITE=1
