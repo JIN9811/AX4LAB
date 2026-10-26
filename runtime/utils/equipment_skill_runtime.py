@@ -106,6 +106,27 @@ def _read_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def _write_execution_pin(path: Path, payload: dict[str, Any]) -> None:
+    """A resume/mode pin must be durable before any worker lease is acquired."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        with temporary.open("x", encoding="utf-8") as stream:
+            stream.write(canonical_json(payload))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except OSError:
+        raise SkillContractError("execution settings persistence failed") from None
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _printable_recorded_key(key: str) -> str | None:
     if key == "space":
         return " "
@@ -552,6 +573,21 @@ class EquipmentSkillRegistry:
 
     def _package_dir(self, skill_id: str, version: str) -> Path:
         return self.root / _safe_identity(skill_id, "skill_id") / _safe_version(version)
+
+    def freeze_execution_settings(self, *, sequence_id, run_id, target_profile, settings):
+        """Persist non-secret mode/settings once, including across blocked retries."""
+        import fcntl
+        from Pyautogui_server_for_window.bridge.computer_use_contract import normalize_settings
+        key = canonical_sha256([str(sequence_id), str(run_id), str(target_profile)])
+        path = self.execution_root / "settings" / (key + ".json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.with_suffix(".lock").open("a") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            if path.exists():
+                return normalize_settings(_read_json(path))
+            normalized = normalize_settings(settings)
+            _write_execution_pin(path, normalized)
+            return normalized
 
     def create_draft(
         self,
@@ -1051,6 +1087,8 @@ class EquipmentSkillRegistry:
         worker: dict[str, Any] | None = None,
         agentic_task: str = "",
         annotation_context: dict[str, Any] | None = None,
+        execution_settings: dict[str, Any] | None = None,
+        cycle_id: str = "",
     ) -> dict[str, Any]:
         safe_skill_id = _safe_identity(skill_id, "skill_id")
         safe_version = _safe_version(version)
@@ -1064,6 +1102,22 @@ class EquipmentSkillRegistry:
                 raise SkillContractError("Skill version is not validated")
             if package["manifest"].get("target_profile") != safe_profile:
                 raise SkillContractError("target profile mismatch")
+        # The ordinary runtime deliberately permits retries of BLOCKED programs.
+        # Computer-use cannot do that: its private lease may have an unknown effect.
+        cu_key = canonical_sha256([safe_sequence, str(run_id), safe_profile])
+        cu_ref = self.execution_root / "computer_use" / (cu_key + ".json")
+        if (execution_settings or {}).get("execution_mode") == "computer_use" and cu_ref.exists():
+            previous = self.runtime.get(str(_read_json(cu_ref)["execution_id"]))
+            expected_identity = {"sequence_id": safe_sequence, "run_id": str(run_id or safe_sequence),
+                                 "experiment_id": str(experiment_id or safe_sequence), "specimen_id": str(specimen_id or safe_sequence)}
+            expected_ref = {"type": "skill", "skill_id": safe_skill_id, "version": safe_version}
+            if (previous.get("identity") != expected_identity or previous.get("profile_id") != safe_profile
+                    or previous.get("execution_ref") != expected_ref or previous.get("mode") != mode
+                    or previous.get("worker") != (worker or {"worker_id": "equipment-worker", "kind": "windows_pyautogui"})
+                    or previous.get("metadata", {}).get("computer_use_cycle_id", "") != str(cycle_id)):
+                raise SkillContractError("computer-use execution identity cannot be retargeted")
+            previous["idempotent"] = True
+            return self._skill_execution_view(previous)
         try:
             runtime = self.runtime.begin(
                 sequence_id=safe_sequence,
@@ -1078,6 +1132,8 @@ class EquipmentSkillRegistry:
                 metadata={
                     "agentic_task": clean_agentic_task,
                     "annotation_context": clean_annotation_context,
+                    "execution_settings": deepcopy(execution_settings or {}),
+                    "computer_use_cycle_id": str(cycle_id),
                     "skill_execution": {
                         "state": "RUNNING",
                         "completed_segments": [],
@@ -1088,6 +1144,8 @@ class EquipmentSkillRegistry:
             if runtime.get("lifecycle") == "RESOLVING":
                 runtime = self.runtime.transition(runtime["execution_id"], "PREFLIGHT", status="preflight")
                 runtime = self.runtime.transition(runtime["execution_id"], "EXECUTING", status="running")
+            if (execution_settings or {}).get("execution_mode") == "computer_use":
+                _write_execution_pin(cu_ref, {"execution_id": runtime["execution_id"]})
         except EquipmentRuntimeContractError as exc:
             raise SkillContractError(str(exc)) from exc
         return self._skill_execution_view(runtime)
@@ -1199,6 +1257,7 @@ class EquipmentSkillRegistry:
             "model_snapshot": deepcopy(runtime.get("model_snapshot") or {}),
             "agentic_task": str(metadata.get("agentic_task") or ""),
             "annotation_context": deepcopy(metadata.get("annotation_context") or {}),
+            "execution_settings": deepcopy(metadata.get("execution_settings") or {}),
             "completed_segments": deepcopy(skill_execution.get("completed_segments") or []),
             "attempt": int(skill_execution.get("attempt") or 0),
             "idempotent": bool(runtime.get("idempotent")),

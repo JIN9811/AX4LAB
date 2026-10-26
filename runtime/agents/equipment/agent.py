@@ -44,9 +44,12 @@ from utils.equipment_skill_runtime import (
     EquipmentSkillRegistry,
     SkillContractError,
     build_exception_packet,
+    validate_skill_package,
     validate_recovery_decision,
 )
 from utils.equipment_runtime_service import EquipmentRuntimeService
+from utils.equipment_computer_use_settings import load_profile_settings
+from Pyautogui_server_for_window.bridge.computer_use_contract import ComputerUseError, normalize_settings
 from utils.utm_csv import probe_utm_csv
 from utils.equipment_skill_flow import EquipmentSkillFlowError, EquipmentSkillFlowStore
 from utils.equipment_agentic_task import (
@@ -461,7 +464,7 @@ class LabEquipmentAgent(BaseAgent):
         )
 
     async def _call_tool(self, ctx: AgentContext, tool: str, payload: dict[str, Any], *, state: OrchestratorState | None = None) -> dict[str, Any]:
-        if state is not None and tool.startswith(("equipment.pyautogui.", "equipment.runtime.")):
+        if state is not None and tool.startswith(("equipment.pyautogui.", "equipment.runtime.")) and not tool.startswith("equipment.pyautogui.computer_use_"):
             # A model cannot choose a different physical device for an in-flight run.
             paths = getattr(ctx, "paths", None)
             registry = EquipmentProfileRegistry.default(memory_root=paths.memory_root if paths else None)
@@ -2984,6 +2987,13 @@ class LabEquipmentAgent(BaseAgent):
             else:
                 self._write_skill_flow_execution(profile_id, execution)
         profile_id = str(flow.get("profile_id") or "")
+        settings_path = (ctx.paths.memory_root / "equipment_workspace_settings.json"
+                         if getattr(ctx, "paths", None) else self._WORKSPACE_SETTINGS_PATH)
+        flow_settings = deepcopy((checkpoint or {}).get("execution_settings"))
+        if flow_settings is None:
+            flow_settings = normalize_settings(load_profile_settings(settings_path, profile_id))
+        if checkpoint is not None:
+            checkpoint["execution_settings"] = deepcopy(flow_settings)
         agentic_task_id = str(flow.get("agentic_task_id") or "").strip()
         flow_execution_id = (checkpoint or {}).get("flow_execution_id") or f"equipment-flow-{uuid4().hex}"
         if checkpoint is not None:
@@ -3168,6 +3178,7 @@ class LabEquipmentAgent(BaseAgent):
                 "profile_id": profile_id,
                 "run_id": state.run_id,
                 "status": workflow_status,
+                "execution_settings": deepcopy(flow_settings),
                 "state": workflow_status.upper(),
                 "active_block": active_block,
                 "active_phase": active_phase,
@@ -3381,6 +3392,17 @@ class LabEquipmentAgent(BaseAgent):
         if validate_only:
             return AgentResult(success=True, summary="Equipment Flow preconditions verified", data={})
 
+        flow_model_selection = None
+        if flow_settings["execution_mode"] == "computer_use":
+            from agents.equipment.computer_use import pin_model
+            try:
+                _, flow_model_selection = pin_model(ctx, (checkpoint or {}).get("computer_use_model_selection")
+                    or self._skill_execution_model_snapshot(ctx, {}))
+            except ComputerUseError as exc:
+                return AgentResult(success=False, summary="Equipment computer-use endpoint requires attention",
+                    data={"equipment_handoff": {"status": "blocked", "failure_code": exc.code}})
+            if checkpoint is not None:
+                checkpoint["computer_use_model_selection"] = deepcopy(flow_model_selection)
         run_context: dict[str, Any] = deepcopy((checkpoint or {}).get("run_context", {}))
         cancelled = False
         for step, block in enumerate(blocks):
@@ -3451,6 +3473,8 @@ class LabEquipmentAgent(BaseAgent):
                 "workflow_execution_id": (checkpoint or {}).get("workflow_execution_id"),
             }
             request["runtime_context"] = dict(run_context)
+            request["_execution_settings"] = deepcopy(flow_settings)
+            request["_computer_use_model_selection"] = deepcopy(flow_model_selection)
             if checkpoint is not None:
                 # The enclosing workflow owns terminal recovery, not individual Skills.
                 request["auto_recover"] = False
@@ -3854,13 +3878,21 @@ class LabEquipmentAgent(BaseAgent):
                 skill_profile = EquipmentProfileRegistry.default().get(target_profile)
             except ValueError as exc:
                 raise SkillContractError(f"unknown Equipment Profile: {target_profile}") from exc
-            model_snapshot = self._skill_execution_model_snapshot(ctx, manifest)
+            model_snapshot = deepcopy(request.get("_computer_use_model_selection")) or self._skill_execution_model_snapshot(ctx, manifest)
             deployment = manifest.get("deployment") if isinstance(manifest.get("deployment"), dict) else {}
             bridge_id = str(deployment.get("bridge_id") or "equipment-worker")
+            sequence_id = str(request.get("sequence_id") or f"{state.run_id}-{skill_id}-{version}")
+            settings_path = (ctx.paths.memory_root / "equipment_workspace_settings.json"
+                             if getattr(ctx, "paths", None) else self._WORKSPACE_SETTINGS_PATH)
+            execution_settings = registry.freeze_execution_settings(
+                sequence_id=sequence_id, run_id=state.run_id, target_profile=target_profile,
+                settings=request.get("_execution_settings") or load_profile_settings(settings_path, target_profile))
+            if execution_settings["execution_mode"] == "computer_use":
+                package = validate_skill_package(registry.root / skill_id / version)
             execution = registry.begin_execution(
                 skill_id=skill_id,
                 version=version,
-                sequence_id=str(request.get("sequence_id") or f"{state.run_id}-{skill_id}-{version}"),
+                sequence_id=sequence_id,
                 target_profile=target_profile,
                 model_snapshot=model_snapshot,
                 run_id=state.run_id,
@@ -3874,8 +3906,10 @@ class LabEquipmentAgent(BaseAgent):
                 worker={"worker_id": bridge_id, "kind": "windows_pyautogui"},
                 agentic_task=task,
                 annotation_context=annotation_context,
+                execution_settings=execution_settings,
+                cycle_id=str(state.current_experiment_spec.get("cycle_id") or state.loop_count),
             )
-        except SkillContractError as exc:
+        except (SkillContractError, ComputerUseError) as exc:
             return AgentResult(
                 success=False,
                 summary="Equipment Skill contract blocked execution",
@@ -4026,7 +4060,31 @@ class LabEquipmentAgent(BaseAgent):
             or spec.get("confirm_live_execute")
             or spec.get("confirm_execute")
         )
-        for index, program_id in enumerate(package["workflow"].get("program_ids", []), start=1):
+        computer_use_result = None
+        if execution_settings["execution_mode"] == "computer_use":
+            from agents.equipment.computer_use import run_computer_use
+            if execution.get("idempotent"):
+                computer_use_result = {"ok": False, "status": "blocked", "failure_code": "resume_requires_operator"}
+            else:
+                async def cu_tool(name, payload):
+                    return await self._call_tool(ctx, name, payload, state=state)
+                async def cu_progress(progress):
+                    registry.transition_execution(str(execution["execution_id"]), "RUNNING", computer_use=progress)
+                computer_use_result = await run_computer_use(
+                    state=state, ctx=ctx, request={**request, "bridge_id": bridge_id,
+                        "confirm_live_execute": live_execute_confirmed}, package=package, execution=execution,
+                    settings=execution_settings, call_tool=cu_tool, on_progress=cu_progress)
+            tool_results.append({"tool": "equipment.computer_use", "result": computer_use_result})
+            if not computer_use_result.get("ok"):
+                execution = registry.transition_execution(str(execution["execution_id"]), "EXCEPTION",
+                    failure_code=str(computer_use_result.get("failure_code") or "computer_use_failed"),
+                    computer_use=computer_use_result.get("computer_use", {}))
+                return AgentResult(success=False, summary="Equipment computer use requires operator attention",
+                    data={"equipment_skill_execution": execution, "equipment_result": computer_use_result,
+                          "equipment_handoff": {"status": "blocked", "failure_code": computer_use_result["failure_code"]},
+                          "tool_results": tool_results, "hardware_alerts": []})
+        legacy_program_ids = package["workflow"].get("program_ids", []) if computer_use_result is None else []
+        for index, program_id in enumerate(legacy_program_ids, start=1):
             program_id = str(program_id)
             if program_id in completed:
                 continue
@@ -4219,7 +4277,7 @@ class LabEquipmentAgent(BaseAgent):
             completed_segments=sorted(completed),
             completed_at=datetime.now(timezone.utc).isoformat(),
         )
-        final_result = next(
+        final_result = computer_use_result if computer_use_result is not None else next(
             (
                 item.get("result", {})
                 for item in reversed(tool_results)

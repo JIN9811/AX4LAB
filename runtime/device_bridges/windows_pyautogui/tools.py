@@ -22,6 +22,8 @@ Modification guide:
 from __future__ import annotations
 
 from pathlib import Path
+import re
+import threading
 from typing import Any
 
 from device_bridges.windows_pyautogui.bridge import (
@@ -48,6 +50,8 @@ def register_equipment_tools(
     registry.register_resource("equipment.bridge", bridge)
     memory_root = paths.memory_root if paths is not None else (repo_root or Path(__file__).resolve().parents[2]) / "memory"
     bridges = {config.equipment_profile_id: bridge}
+    computer_use_transports = {}
+    computer_use_lock = threading.Lock()
 
     def selected_bridge(payload: dict[str, Any]) -> WindowsPyAutoGUIBridge:
         profile_id = str(payload.get("equipment_profile_id") or scoped_equipment_profile_id()
@@ -76,6 +80,40 @@ def register_equipment_tools(
     def runtime_profile(payload: dict[str, Any]) -> str:
         return str(payload.get("equipment_profile_id") or scoped_equipment_profile_id()
                    or EquipmentProfileStore(memory_root).selected_id())
+
+    def computer_use_call(operation, payload):
+        payload = dict(payload or {})
+        profile_id = runtime_profile(payload)
+        payload["equipment_profile_id"] = profile_id
+        def blocked(code):
+            return {"ok": False, "status": "blocked", "failure_code": code}
+        # Keep the existing virtual/live veto; this path cannot promote a test.
+        if payload.get("virtual_bridge_simulation") is True or not (payload.get("force_live_bridge") or payload.get("runtime_mode") == "live"):
+            return blocked("computer_use_live_required")
+        identity = tuple(payload.get(k) for k in ("execution_id", "run_id", "cycle_id", "specimen_id", "equipment_profile_id"))
+        if not all(isinstance(v, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", v) for v in identity):
+            return blocked("invalid_identity")
+        with computer_use_lock:
+            entry = computer_use_transports.get(identity[0])
+            if entry is not None and entry[0] != identity:
+                return blocked("execution_identity_mismatch")
+            if operation == "acquire":
+                if entry is not None:
+                    return blocked("resume_requires_operator")
+                if len(computer_use_transports) >= 128:
+                    return blocked("transport_capacity_requires_operator")
+                pinned = selected_bridge(payload).pin_computer_use_transport(payload)
+                entry = (identity, pinned, payload.get("bridge_id", ""))
+                # Reserve before HTTP. Uncertain acquire retains its transport;
+                # it must not be evicted and silently retried on another worker.
+                computer_use_transports[identity[0]] = entry
+            elif entry is None:
+                return blocked("resume_requires_operator")
+        result = entry[1].computer_use(operation, {**payload, "bridge_id": entry[2]})
+        if operation == "release" and result.get("ok") is True and result.get("status") == "released":
+            with computer_use_lock:
+                computer_use_transports.pop(identity[0], None)
+        return result
 
     def runtime_current(payload: dict[str, Any]) -> dict[str, Any]:
         execution = runtime.latest(profile_id=runtime_profile(payload))
@@ -114,8 +152,7 @@ def register_equipment_tools(
     registry.register("equipment.pyautogui.utm_profile", lambda payload: selected_bridge(payload or {}).utm_profile_status())
     for operation in ("acquire", "observe", "act", "status", "verify", "release"):
         registry.register(f"equipment.pyautogui.computer_use_{operation}",
-                          lambda payload, operation=operation: selected_bridge(payload or {}).computer_use(
-                              operation, {**dict(payload or {}), "equipment_profile_id": runtime_profile(payload or {})}),
+                          lambda payload, operation=operation: computer_use_call(operation, payload),
                           device="equipment:windows_pyautogui" if operation in {"acquire", "act", "verify", "release"} else None)
     registry.register("equipment.pyautogui.connection_status", lambda payload: selected_bridge(payload or {}).connection_status())
     registry.register("equipment.runtime.current", runtime_current)

@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from typing import Any
 import logging
+import json
+from copy import deepcopy
 
 import httpx
 
@@ -90,7 +92,13 @@ class VLLMBackend(BaseLLMBackend):
         return DEFAULT_MAX_TOKENS_BY_TASK.get(task_type)
 
     @staticmethod
-    def _response_format_for_metadata(metadata: dict[str, Any] | None) -> dict[str, str] | None:
+    def _response_format_for_metadata(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
+        if isinstance(metadata, dict) and metadata.get("task_type") == "equipment_computer_use":
+            value = metadata.get("response_format")
+            if isinstance(value, dict) and value.get("type") == "json_schema":
+                if len(json.dumps(value, allow_nan=False)) > 32768:
+                    raise ValueError("Response schema exceeds metadata limit")
+                return deepcopy(value)
         if isinstance(metadata, dict) and metadata.get("response_format") == "json_object":
             return {"type": "json_object"}
         return None

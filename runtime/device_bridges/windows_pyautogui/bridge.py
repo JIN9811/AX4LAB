@@ -32,6 +32,7 @@ import os
 import re
 import socket
 import time
+from copy import copy, deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -471,6 +472,15 @@ class WindowsPyAutoGUIBridge(BaseBridge):
             message=f"Unknown Windows PyAutoGUI bridge command: {command}",
             step_trace=[{"step": "PRECHECK", "status": "blocked", "detail": "unknown command"}],
         )
+
+    def pin_computer_use_transport(self, payload: dict[str, Any]):
+        """Private per-execution clone; saved alias edits cannot retarget a lease."""
+        pinned = copy(self)
+        pinned.config = deepcopy(self.config)
+        pinned._computer_use_memory = deepcopy(self.load_connection_memory())
+        pinned._computer_use_url = pinned._bridge_url(payload)
+        pinned._computer_use_token = pinned._token(payload)
+        return pinned
 
     def computer_use(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Use the authenticated leased protocol; never fall back to /execute."""
@@ -2392,6 +2402,8 @@ class WindowsPyAutoGUIBridge(BaseBridge):
             return ""
 
     def _bridge_url(self, payload: dict[str, Any] | None = None) -> str:
+        if hasattr(self, "_computer_use_url"):
+            return self._computer_use_url
         memory = self.load_connection_memory()
         requested = self._requested_candidate_id(payload)
         _, selected = self._candidate_for_payload(memory, payload)
@@ -2480,6 +2492,8 @@ class WindowsPyAutoGUIBridge(BaseBridge):
         return headers
 
     def _token(self, payload: dict[str, Any] | None = None) -> str:
+        if hasattr(self, "_computer_use_token"):
+            return self._computer_use_token
         memory = self.load_connection_memory()
         requested = self._requested_candidate_id(payload)
         _, selected = self._candidate_for_payload(memory, payload)
@@ -2528,6 +2542,8 @@ class WindowsPyAutoGUIBridge(BaseBridge):
 
     def load_connection_memory(self) -> dict[str, Any]:
         """Read persisted bridge selection, returning empty dict when absent/invalid."""
+        if hasattr(self, "_computer_use_memory"):
+            return deepcopy(self._computer_use_memory)
         try:
             if not self.config.connection_memory_path.exists():
                 return {}

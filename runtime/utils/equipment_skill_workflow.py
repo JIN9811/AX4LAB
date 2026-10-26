@@ -186,6 +186,12 @@ def validate_editable_workflow(
     del locator_root  # Embedded locator candidates are authoritative in v1.
     normalized = deepcopy(dict(workflow or {}))
     issues: list[dict[str, str]] = []
+    if "computer_use" in normalized:
+        from Pyautogui_server_for_window.bridge.computer_use_contract import ComputerUseError, validate_policy
+        try:
+            normalized["computer_use"] = validate_policy(normalized["computer_use"])
+        except ComputerUseError as exc:
+            issues.append(_issue("", "computer_use", exc.code, str(exc)))
     if normalized.get("schema") != SKILL_SCHEMA:
         issues.append(_issue("", "schema", "SCHEMA_INVALID", f"Schema must be {SKILL_SCHEMA}."))
     steps = normalized.get("steps")
