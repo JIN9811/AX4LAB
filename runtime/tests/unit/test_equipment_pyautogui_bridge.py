@@ -88,6 +88,37 @@ def test_computer_use_live_gate_auth_and_timeout_reconciliation(tmp_path, monkey
     assert effects == ["a"]
 
 
+@pytest.mark.parametrize("http_status", [502, 504])
+def test_computer_use_post_effect_http_failure_requires_same_id_reconciliation(tmp_path, monkeypatch, http_status):
+    bridge = _bridge(tmp_path, mode="live", allow_live=True)
+    monkeypatch.setenv(bridge.config.bridge_url_env, "http://worker.invalid")
+    monkeypatch.setenv(bridge.config.token_env, "secret")
+    effects, reconciled = [], []
+    def endpoint(request):
+        if request.url.path == "/capabilities":
+            return httpx.Response(200, json={"ok": True, "computer_use_v1": True})
+        if request.url.path == "/computer-use/act":
+            effects.append(json.loads(request.content)["action_id"])
+            return httpx.Response(http_status, json={"error": "gateway response failure after worker effect"})
+        if request.url.path == "/computer-use/status":
+            reconciled.append(json.loads(request.content)["action_id"])
+            return httpx.Response(200, json={"ok": True, "status": "completed", "receipt": {"action_id": "a"}})
+        return httpx.Response(http_status, json={"error": "legacy request error"})
+    original = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kw: original(transport=httpx.MockTransport(endpoint), **kw))
+    request = {"runtime_mode": "live", "action_id": "a", "session_id": "s", "lease_token": "t"}
+    result = bridge.computer_use("act", request)
+    assert result["status"] == "effect_unknown"
+    assert result["failure_code"] == "PYAUTOGUI_EFFECT_UNKNOWN"
+    assert result["attempted"] is True and result["retryable"] is False
+    assert result["operator_intervention_required"] is True
+    assert bridge.computer_use("status", request)["status"] == "completed"
+    assert effects == reconciled == ["a"]
+    legacy = bridge._live_post("equipment.pyautogui.run", "/execute", {"program_id": "program1"})
+    assert legacy["status"] == "blocked"
+    assert legacy["failure_code"] == "PYAUTOGUI_BRIDGE_HTTP_ERROR"
+
+
 def test_computer_use_tools_are_profile_scoped_and_declared(tmp_path):
     from device_bridges.windows_pyautogui.module import MODULE
     registry = ToolRegistry()

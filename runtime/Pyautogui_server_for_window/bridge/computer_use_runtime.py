@@ -464,10 +464,20 @@ class NativeDesktopAdapter:
             gui, _ = self.server.get_pyautogui()
             _require(gui is not None, "native_context_unavailable", "Evidence desktop unavailable")
             trace = []
-            result = self.server._execute_protocol_sequence(gui, program_id=check["program_id"],
-                payload={"sequence": deepcopy(sequence), "locators": deepcopy(program.get("locators", {})),
-                         "require_screen_assertions": True, "runtime_values": context.get("runtime_values", {})},
-                run_id=context["run_id"], specimen_id=context["specimen_id"], trace=trace)
+            screen_evidence = any(step["action"] in assertions - {"wait_for_file"} for step in sequence)
+            with self.native_scope() if screen_evidence else nullcontext():
+                if screen_evidence:
+                    native = self.native_context()
+                    _require(native["window_title"] == policy["application"]["window_title"],
+                             "window_mismatch", "Evidence application window is not foreground")
+                result = self.server._execute_protocol_sequence(gui, program_id=check["program_id"],
+                    payload={"sequence": deepcopy(sequence), "locators": deepcopy(program.get("locators", {})),
+                             "require_screen_assertions": True, "runtime_values": context.get("runtime_values", {})},
+                    run_id=context["run_id"], specimen_id=context["specimen_id"], trace=trace)
+                if screen_evidence:
+                    after = self.native_context()
+                    _require(all(native[k] == after[k] for k in ("window_id", "window_title", "window_rect", "desktop_rect", "dpi")),
+                             "window_changed", "Native application context changed during evidence verification")
             checks.append({"type": "program", "program_id": check["program_id"],
                            "ok": result.get("ok") is True and all(step.get("status") == "ok" for step in trace)})
         return {"ok": bool(checks) and all(c["ok"] for c in checks), "checks": checks}

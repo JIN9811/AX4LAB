@@ -176,9 +176,50 @@ def test_evidence_requires_actual_assertion_success():
         get_pyautogui=lambda: (object(), None), _execute_protocol_sequence=execute)
     p = policy()
     p["postconditions"] = [{"type": "program", "program_id": "evidence", "read_only": True}]
-    result = runtime().NativeDesktopAdapter(server).verify(p, IDENTITY)
+    native = dict(window_title="Demo", window_id="1", window_rect=[0, 0, 20, 20], desktop_rect=[0, 0, 20, 20], dpi=96)
+    result = runtime().NativeDesktopAdapter(server, native_context=lambda: dict(native)).verify(p, IDENTITY)
     assert not result["ok"]
     assert observed[0]["require_screen_assertions"] is True
+
+
+@pytest.mark.parametrize("action", ["assert_visible", "assert_text", "pixel_matches_color", "wait_until_image", "wait_until_text"])
+@pytest.mark.parametrize("condition", ["wrong_foreground", "unavailable_dpi", "changed", "valid"])
+def test_screen_evidence_requires_stable_application_and_native_dpi(action, condition):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    native = {"window_title": "Other" if condition == "wrong_foreground" else "Demo", "window_id": "1",
+              "window_rect": [0, 0, 20, 20], "desktop_rect": [0, 0, 20, 20], "dpi": 96}
+    state = {"scoped": False, "checks": 0}
+    @contextmanager
+    def scope():
+        if condition == "unavailable_dpi":
+            raise runtime().ComputerUseError("native_context_unavailable", "DPI unavailable")
+        state["scoped"] = True
+        try:
+            yield
+        finally:
+            state["scoped"] = False
+    def evidence(gui, **kwargs):
+        state["checks"] += 1
+        if condition == "valid":
+            assert state["scoped"], "screen evidence ran outside verified native DPI scope"
+        if condition == "changed":
+            native["window_id"] = "2"
+        return {"ok": True}
+    server = SimpleNamespace(_all_programs=lambda: {"evidence": {"sequence": [{"action": action}]}},
+        get_pyautogui=lambda: (object(), None), _execute_protocol_sequence=evidence)
+    adapter = runtime().NativeDesktopAdapter(server, native_context=lambda: dict(native))
+    adapter.native_scope = scope
+    p = policy()
+    p["postconditions"] = [{"type": "program", "program_id": "evidence", "read_only": True}]
+    if condition == "valid":
+        assert adapter.verify(p, IDENTITY)["ok"]
+    else:
+        with pytest.raises(runtime().ComputerUseError) as error:
+            adapter.verify(p, IDENTITY)
+        assert error.value.code == {"wrong_foreground": "window_mismatch", "unavailable_dpi": "native_context_unavailable", "changed": "window_changed"}[condition]
+    assert state["checks"] == (1 if condition in {"changed", "valid"} else 0)
+    assert not state["scoped"]
 
 
 def test_crash_unresolved_blocks_expiry_and_replay(tmp_path, monkeypatch):

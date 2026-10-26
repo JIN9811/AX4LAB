@@ -2083,6 +2083,13 @@ class WindowsPyAutoGUIBridge(BaseBridge):
                 response.raise_for_status()
                 data = response.json()
         except httpx.HTTPStatusError as exc:
+            if path == "/computer-use/act":
+                # An intermediary HTTP failure is not a worker action receipt.
+                # The request may have reached the desktop before the error.
+                return {**self._failure(tool=tool, mode="live", status="effect_unknown",
+                    failure_code="PYAUTOGUI_EFFECT_UNKNOWN",
+                    message=f"Action response returned HTTP {exc.response.status_code}; reconcile the same action ID with status before any further action."),
+                    "attempted": True, "retryable": False, "operator_intervention_required": True}
             failure_code = "PYAUTOGUI_AUTH_FAILED" if exc.response.status_code in {401, 403} else "PYAUTOGUI_BRIDGE_HTTP_ERROR"
             return self._failure(
                 tool=tool,
