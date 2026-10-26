@@ -468,6 +468,58 @@ def test_workflow_api_load_save_check_and_hash_conflict(monkeypatch, tmp_path: P
     assert conflict.json()["detail"]["failure_code"] == "SKILL_WORKFLOW_REVISION_CONFLICT"
 
 
+def test_workflow_api_validates_and_versions_computer_use_policy(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    package = _annotated_skill(client)
+    workflow = dict(package["workflow"])
+    workflow["computer_use"] = {
+        "schema": "ax4lab.equipment_computer_use.policy.v1",
+        "application": {"window_title": "Capability Lab"},
+        "targets": {},
+        "protected_regions": [],
+        "program_ids": [],
+        "runtime_value_keys": [],
+        "postconditions": [{"type": "image", "region": [0, 0, 10, 10], "sha256": "a" * 64}],
+        "mask_regions": [],
+    }
+    checked = client.post(
+        "/api/equipment/skills/program1_skill/1.0.0/workflow/check",
+        json={"workflow": workflow},
+    )
+    assert checked.status_code == 200
+    assert checked.json()["ok"] is True
+
+    saved = client.put(
+        "/api/equipment/skills/program1_skill/1.0.0/workflow",
+        json={
+            "expected_workflow_sha256": package["manifest"]["workflow_sha256"],
+            "workflow": workflow,
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["workflow"]["computer_use"] == workflow["computer_use"]
+    assert saved.json()["manifest"]["workflow_sha256"] != package["manifest"]["workflow_sha256"]
+
+    invalid = dict(saved.json()["workflow"])
+    invalid["computer_use"] = {**invalid["computer_use"], "postconditions": []}
+    invalid_check = client.post(
+        "/api/equipment/skills/program1_skill/1.0.0/workflow/check",
+        json={"workflow": invalid},
+    )
+    assert invalid_check.status_code == 200
+    assert invalid_check.json()["ok"] is False
+    invalid_save = client.put(
+        "/api/equipment/skills/program1_skill/1.0.0/workflow",
+        json={
+            "expected_workflow_sha256": saved.json()["manifest"]["workflow_sha256"],
+            "workflow": invalid,
+        },
+    )
+    assert invalid_save.status_code == 400
+    reloaded = client.get("/api/equipment/skills/program1_skill/1.0.0/workflow").json()
+    assert reloaded["workflow"]["computer_use"] == workflow["computer_use"]
+
+
 def test_skill_deploy_auto_compiles_and_validates_annotated_workflow(monkeypatch, tmp_path: Path) -> None:
     client = _client(monkeypatch, tmp_path)
     _annotated_skill(client)

@@ -96,6 +96,7 @@ Modification guide:
           <h2 id="equipment-runtime-execution-id">No active execution</h2>
           <p id="equipment-profile-runtime-status" class="hint">No canonical Equipment execution yet.</p>
           <p id="equipment-runtime-reference" class="hint">Profile, Skill/program, worker, and mode are resolved at stage entry.</p>
+          <p id="equipment-computer-use-progress" class="hint" hidden>No computer-use progress.</p>
         </article>
         <article id="equipment-profile-evidence">
           <span class="eyebrow">Handoff</span>
@@ -307,6 +308,35 @@ Modification guide:
       <details id="equipment-profile-specific-controls" class="panel equipment-detail-drawer equipment-profile-specific-controls">
         <summary>Selected Profile settings and diagnostics</summary>
         <div class="equipment-profile-specific-body">
+          <section class="equipment-readiness-card" aria-labelledby="equipment-computer-use-settings-title">
+            <div class="equipment-section-heading compact">
+              <div><span class="eyebrow">Next Execution</span><h3 id="equipment-computer-use-settings-title">Execution Mode</h3></div>
+              <button id="btn-equipment-save-computer-use-settings" class="btn primary" type="button">Save Settings</button>
+            </div>
+            <div class="equipment-form-grid">
+              <label class="planning-message-label">Mode
+                <select id="equipment-execution-mode" class="text-input">
+                  <option value="skill_flow">Skill flow (legacy)</option>
+                  <option value="computer_use">Computer use</option>
+                </select>
+              </label>
+              <label class="planning-message-label">Max turns
+                <input id="equipment-computer-use-max-turns" class="text-input" type="number" min="1" max="256" step="1" value="64" />
+              </label>
+              <label class="planning-message-label">Request timeout (seconds)
+                <input id="equipment-computer-use-request-timeout" class="text-input" type="number" min="1" max="300" step="0.1" value="120" />
+              </label>
+              <label class="planning-message-label">Frame max age (seconds)
+                <input id="equipment-computer-use-frame-max-age" class="text-input" type="number" min="1" max="600" step="0.1" value="150" />
+              </label>
+              <label class="checkbox-line equipment-computer-use-vision-check">
+                <input id="equipment-vision-link-enabled" type="checkbox" />
+                Include Profile Vision link
+              </label>
+            </div>
+            <p id="equipment-computer-use-settings-status" class="hint" role="status">Settings apply to the next execution and never retarget an active execution.</p>
+            <div id="equipment-computer-use-readiness" class="hint" role="status">Select an exact Skill version to inspect passive computer-use readiness.</div>
+          </section>
           <div class="equipment-utm-options">
             <label class="planning-message-label">
               Export Glob

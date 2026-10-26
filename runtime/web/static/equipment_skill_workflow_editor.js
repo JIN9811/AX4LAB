@@ -1,6 +1,29 @@
+function parseComputerUsePolicy(text) {
+  const value = String(text ?? "").trim();
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") throw new Error();
+    return parsed;
+  } catch (_error) {
+    throw new Error("Computer-use policy must be a valid JSON object.");
+  }
+}
+
+function serializeComputerUsePolicy(policy) {
+  return policy && typeof policy === "object" && !Array.isArray(policy)
+    ? JSON.stringify(policy, null, 2)
+    : "";
+}
+
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = { parseComputerUsePolicy, serializeComputerUsePolicy };
+}
+
 (function initializeEquipmentSkillWorkflowEditor() {
   "use strict";
 
+  if (typeof document === "undefined") return;
   const root = document.getElementById("skill-workflow-editor");
   const model = window.EquipmentSkillWorkflowModel;
   if (!root || !model) return;
@@ -22,6 +45,8 @@
     count: document.getElementById("workflow-editor-step-count"),
     status: document.getElementById("workflow-editor-status"),
     worker: document.getElementById("workflow-editor-worker"),
+    computerUsePolicy: document.getElementById("workflow-editor-computer-use-policy"),
+    applyComputerUsePolicy: document.getElementById("workflow-editor-apply-computer-use-policy"),
     cropDialog: document.getElementById("workflow-crop-dialog"),
     cropStage: document.getElementById("workflow-crop-stage"),
     cropSource: document.getElementById("workflow-crop-source"),
@@ -188,6 +213,8 @@
     elements.save.disabled = state.busy || !state.editable || !state.dirty;
     elements.add.disabled = state.busy || !state.editable;
     elements.addAction.disabled = state.busy || !state.editable;
+    if (elements.computerUsePolicy) elements.computerUsePolicy.disabled = state.busy || !state.editable;
+    if (elements.applyComputerUsePolicy) elements.applyComputerUsePolicy.disabled = state.busy || !state.editable;
     if (!state.editable) {
       elements.list.querySelectorAll("input, select").forEach((control) => { control.disabled = true; });
     }
@@ -221,6 +248,9 @@
       state.issues = [];
       state.selectedStepId = state.workflow.steps[0]?.step_id || "";
       state.expandedStepId = state.selectedStepId;
+      if (elements.computerUsePolicy) {
+        elements.computerUsePolicy.value = serializeComputerUsePolicy(state.workflow.computer_use);
+      }
       root.dataset.skillLifecycle = payload.manifest?.lifecycle || root.dataset.skillLifecycle;
       setStatus(state.editable ? "Exact Skill workflow loaded." : "This deployed Skill version is read-only.", state.editable ? "ok" : "warning");
     } catch (error) {
@@ -498,6 +528,19 @@
     const next = model.insertStep(state.workflow, reference, "after", elements.addAction.value);
     const referenceIndex = next.steps.findIndex((step) => step.step_id === reference);
     markDirty(next, next.steps[Math.min(referenceIndex + 1, next.steps.length - 1)].step_id);
+  });
+  elements.applyComputerUsePolicy?.addEventListener("click", () => {
+    if (!state.editable) return;
+    try {
+      const policy = parseComputerUsePolicy(elements.computerUsePolicy?.value || "");
+      const workflow = { ...state.workflow };
+      if (policy) workflow.computer_use = policy;
+      else delete workflow.computer_use;
+      markDirty(workflow);
+      setStatus("Computer-use policy applied to this editable Skill version. Check and Save to persist it.", "warning");
+    } catch (error) {
+      setStatus(error.message, "error");
+    }
   });
   elements.check.addEventListener("click", () => checkWorkflow().catch((error) => setStatus(error.message, "error")));
   elements.save.addEventListener("click", () => saveWorkflow());

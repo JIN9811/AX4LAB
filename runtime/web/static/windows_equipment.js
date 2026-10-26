@@ -96,6 +96,15 @@ const profileApplyStatus = document.getElementById("equipment-profile-apply-stat
 const profileConnectionStatus = document.getElementById("equipment-profile-connection-status");
 const profileEvidenceStatus = document.getElementById("equipment-profile-evidence-status");
 const profileRuntimeStatus = document.getElementById("equipment-profile-runtime-status");
+const computerUseProgressOutput = document.getElementById("equipment-computer-use-progress");
+const computerUseModeInput = document.getElementById("equipment-execution-mode");
+const computerUseMaxTurnsInput = document.getElementById("equipment-computer-use-max-turns");
+const computerUseRequestTimeoutInput = document.getElementById("equipment-computer-use-request-timeout");
+const computerUseFrameMaxAgeInput = document.getElementById("equipment-computer-use-frame-max-age");
+const equipmentVisionLinkInput = document.getElementById("equipment-vision-link-enabled");
+const computerUseSettingsStatus = document.getElementById("equipment-computer-use-settings-status");
+const computerUseReadinessOutput = document.getElementById("equipment-computer-use-readiness");
+const btnSaveComputerUseSettings = document.getElementById("btn-equipment-save-computer-use-settings");
 const btnProfilePreflight = document.getElementById("btn-equipment-profile-preflight");
 const btnProfileTest = document.getElementById("btn-equipment-profile-test");
 const runtimeExecutionId = document.getElementById("equipment-runtime-execution-id");
@@ -323,6 +332,48 @@ function equipmentProgressStage(execution, projection) {
   return "recording";
 }
 
+function computerUseProgressView(execution) {
+  const metadata = execution && typeof execution.metadata === "object" ? execution.metadata : {};
+  const skillExecution = metadata.skill_execution && typeof metadata.skill_execution === "object" ? metadata.skill_execution : {};
+  const progress = skillExecution.computer_use && typeof skillExecution.computer_use === "object" ? skillExecution.computer_use : {};
+  const raw = execution && typeof execution.raw_result === "object" ? execution.raw_result : {};
+  const final = raw.computer_use && typeof raw.computer_use === "object" ? raw.computer_use : {};
+  const artifacts = Array.isArray(raw.output_artifacts) ? raw.output_artifacts : [];
+  const turn = Number(progress.turn ?? final.turns ?? 0);
+  const action = String(progress.kind || final.status || "");
+  const observationId = String(progress.observation_id || "");
+  const evidenceRef = String(raw.request_log_ref || final.request_log_ref || "");
+  const publicArtifacts = artifacts.slice(0, 12).filter((item) => item && typeof item === "object").map((item) => ({
+    kind: String(item.kind || "evidence"),
+    localPath: String(item.local_path || ""),
+    sha256: String(item.sha256 || ""),
+  }));
+  return {
+    visible: Boolean(turn || action || observationId || evidenceRef || publicArtifacts.length),
+    turn,
+    action,
+    observationId,
+    evidenceRef,
+    artifacts: publicArtifacts,
+  };
+}
+
+function renderComputerUseProgress(output, view) {
+  if (!output) return;
+  output.hidden = !view.visible;
+  if (!view.visible) {
+    output.textContent = "No computer-use progress.";
+    return;
+  }
+  const artifactRefs = view.artifacts.map((item) => `${item.kind}:${item.localPath || item.sha256 || "recorded"}`);
+  output.textContent = [
+    `Step ${view.turn || "-"}`,
+    `observation ${view.observationId || "pending"}`,
+    `action ${view.action || "pending"}`,
+    `evidence ${view.evidenceRef || artifactRefs.join(", ") || "pending"}`,
+  ].join(" → ");
+}
+
 function renderEquipmentAgenticProgress(execution, projection) {
   if (!agenticProgressStages) return;
   const activeStage = equipmentProgressStage(execution, projection);
@@ -362,6 +413,7 @@ function renderEquipmentRuntimeOverview(payload) {
       ? `${failureCode} · bounded recovery or operator action required`
       : "Normal execution is deterministic. The selected Live GUI model is reserved for exception recovery.";
   }
+  renderComputerUseProgress(computerUseProgressOutput, computerUseProgressView(execution));
   renderEquipmentAgenticProgress(execution, projection);
 }
 
@@ -404,6 +456,9 @@ function renderEquipmentSkills(payload) {
       if (skillVersionInput) skillVersionInput.value = String(manifest.version || "1.0.0");
       if (skillStatus) skillStatus.textContent = "Exact Skill version selected.";
       if (btnSkillWorkflowEditor) btnSkillWorkflowEditor.disabled = false;
+      refreshComputerUseReadiness().catch((error) => {
+        renderComputerUseReadiness({ready: false, blockers: [{message: error.message}]});
+      });
     });
     skillList.appendChild(button);
   });
@@ -825,6 +880,91 @@ async function deleteEquipmentProfile() {
   }
 }
 
+function computerUseSettingsPayload(values) {
+  const mode = String(values.mode || "");
+  if (!["skill_flow", "computer_use"].includes(mode)) throw new Error("Execution mode is invalid.");
+  const maxTurns = Number(values.maxTurns);
+  const requestTimeout = Number(values.requestTimeout);
+  const frameMaxAge = Number(values.frameMaxAge);
+  if (!Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > 256) throw new Error("Max turns must be an integer from 1 to 256.");
+  if (!Number.isFinite(requestTimeout) || requestTimeout < 1 || requestTimeout > 300) throw new Error("Request timeout must be from 1 to 300 seconds.");
+  if (!Number.isFinite(frameMaxAge) || frameMaxAge < 1 || frameMaxAge > 600) throw new Error("Frame max age must be from 1 to 600 seconds.");
+  return {
+    vision_link_enabled: values.visionLinkEnabled === true,
+    execution_mode: mode,
+    computer_use: {
+      max_turns: maxTurns,
+      request_timeout_s: requestTimeout,
+      frame_max_age_s: frameMaxAge,
+    },
+  };
+}
+
+function renderComputerUseSettings(settings) {
+  const value = settings && typeof settings === "object" ? settings : {};
+  const limits = value.computer_use && typeof value.computer_use === "object" ? value.computer_use : {};
+  if (computerUseModeInput) computerUseModeInput.value = value.execution_mode || "skill_flow";
+  if (computerUseMaxTurnsInput) computerUseMaxTurnsInput.value = String(limits.max_turns ?? 64);
+  if (computerUseRequestTimeoutInput) computerUseRequestTimeoutInput.value = String(limits.request_timeout_s ?? 120);
+  if (computerUseFrameMaxAgeInput) computerUseFrameMaxAgeInput.value = String(limits.frame_max_age_s ?? 150);
+  if (equipmentVisionLinkInput) equipmentVisionLinkInput.checked = value.vision_link_enabled === true;
+}
+
+function renderComputerUseReadiness(readiness) {
+  if (!computerUseReadinessOutput) return;
+  const value = readiness && typeof readiness === "object" ? readiness : {};
+  const blockers = Array.isArray(value.blockers) ? value.blockers : [];
+  const worker = value.worker && typeof value.worker === "object" ? value.worker : {};
+  const endpoint = value.endpoint && typeof value.endpoint === "object" ? value.endpoint : {};
+  const skill = value.skill && typeof value.skill === "object" ? value.skill : {};
+  computerUseReadinessOutput.dataset.tone = value.ready ? "ok" : "error";
+  computerUseReadinessOutput.textContent = value.ready
+    ? `Ready · worker=${worker.worker_id || "selected"} · endpoint=${endpoint.model || "vision"} · policy=${skill.skill_id || "declared"}@${skill.version || "-"}`
+    : `Unavailable · ${blockers.map((item) => String(item.message || item.code || "unknown blocker")).join(" · ") || "readiness is not available"}`;
+}
+
+async function refreshComputerUseReadiness() {
+  const skill = selectedEquipmentSkill && typeof selectedEquipmentSkill === "object" ? selectedEquipmentSkill : {};
+  const query = new URLSearchParams();
+  if (skill.skill_id) query.set("skill_id", String(skill.skill_id));
+  if (skill.version) query.set("version", String(skill.version));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  const readiness = await apiJson(`/api/equipment/profiles/${encodeURIComponent(selectedEquipmentProfileId)}/computer-use-readiness${suffix}`);
+  renderComputerUseReadiness(readiness);
+  return readiness;
+}
+
+async function saveComputerUseSettings() {
+  if (btnSaveComputerUseSettings?.disabled) return;
+  setBusy(btnSaveComputerUseSettings, true);
+  try {
+    const payload = computerUseSettingsPayload({
+      mode: computerUseModeInput?.value,
+      maxTurns: computerUseMaxTurnsInput?.value,
+      requestTimeout: computerUseRequestTimeoutInput?.value,
+      frameMaxAge: computerUseFrameMaxAgeInput?.value,
+      visionLinkEnabled: equipmentVisionLinkInput?.checked,
+    });
+    const result = await apiJson(`/api/equipment/profiles/${encodeURIComponent(selectedEquipmentProfileId)}/settings`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    renderComputerUseSettings(result.workspace_settings);
+    if (computerUseSettingsStatus) {
+      computerUseSettingsStatus.textContent = "Saved for the next execution. Any active execution keeps its frozen settings, endpoint, and worker transport.";
+      computerUseSettingsStatus.dataset.tone = "ok";
+    }
+    await refreshComputerUseReadiness();
+  } catch (error) {
+    if (computerUseSettingsStatus) {
+      computerUseSettingsStatus.textContent = error.message;
+      computerUseSettingsStatus.dataset.tone = "error";
+    }
+  } finally {
+    setBusy(btnSaveComputerUseSettings, false);
+  }
+}
+
 async function loadEquipmentProfileState() {
   const [profiles, state] = await Promise.all([
     apiJson("/api/equipment/profiles"),
@@ -840,6 +980,10 @@ async function loadEquipmentProfileState() {
   if (profileEvidenceStatus) {
     profileEvidenceStatus.textContent = evidence.analysis_handoff?.status || evidence.status || "No profile test result yet.";
   }
+  renderComputerUseSettings(state.workspace_settings);
+  await refreshComputerUseReadiness().catch((error) => {
+    renderComputerUseReadiness({ready: false, blockers: [{message: error.message}]});
+  });
   return state;
 }
 
@@ -1108,7 +1252,7 @@ function setBusy(button, busy) {
 }
 
 function rememberButtonLabels() {
-  [btnNewProfile, btnApplyProfile, btnDeleteProfile, btnScan, btnRefresh, btnTest, btnProgram1, btnUtm, btnAbort, btnScreenshot, btnListLocators, btnCaptureLocator, btnLoadUtmProfile, btnSaveUtmProfile, btnOpenBridgeGui, btnLocalStart, btnLocalStop, btnLocalHealth, btnLocalSelect, btnReadiness, btnLivePreflight, btnLiveValidation, btnVisionProofDraft, btnLivePhysicalValidation, btnEvidenceAudit, btnProofPackage, btnVerifyProofPackage, btnCompletionAudit, btnRequestLog, btnAgenticRun, btnAgenticStop].forEach((button) => {
+  [btnNewProfile, btnApplyProfile, btnDeleteProfile, btnScan, btnRefresh, btnTest, btnProgram1, btnUtm, btnAbort, btnScreenshot, btnListLocators, btnCaptureLocator, btnLoadUtmProfile, btnSaveUtmProfile, btnOpenBridgeGui, btnLocalStart, btnLocalStop, btnLocalHealth, btnLocalSelect, btnReadiness, btnLivePreflight, btnLiveValidation, btnVisionProofDraft, btnLivePhysicalValidation, btnEvidenceAudit, btnProofPackage, btnVerifyProofPackage, btnCompletionAudit, btnRequestLog, btnAgenticRun, btnAgenticStop, btnSaveComputerUseSettings].forEach((button) => {
     if (button && !button.dataset.originalText) {
       button.dataset.originalText = button.textContent;
     }
@@ -2234,6 +2378,7 @@ if (profileNameInput) profileNameInput.addEventListener("keydown", (event) => {
 });
 if (btnApplyProfile) btnApplyProfile.addEventListener("click", applyEquipmentProfile);
 if (btnDeleteProfile) btnDeleteProfile.addEventListener("click", deleteEquipmentProfile);
+if (btnSaveComputerUseSettings) btnSaveComputerUseSettings.addEventListener("click", saveComputerUseSettings);
 document.querySelectorAll("[data-equipment-proxy]").forEach((proxy) => {
   proxy.addEventListener("click", () => {
     const targetId = proxy.getAttribute("data-equipment-proxy");

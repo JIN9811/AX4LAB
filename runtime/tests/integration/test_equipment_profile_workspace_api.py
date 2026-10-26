@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from app import main
 from utils import runtime_paths
+from utils.equipment_computer_use_settings import load_profile_settings, save_profile_settings
 
 
 @pytest.fixture
@@ -228,3 +229,229 @@ def test_direct_profile_state_uses_requested_device(client):
     main._equipment_bridge().save_utm_profile({"target_window": "Old instrument"})
     profile = create(client)
     assert main._equipment_profile_state(profile)["utm_profile"]["profile"].get("target_window") != "Old instrument"
+
+
+def test_computer_use_settings_default_to_legacy_and_merge_without_losing_preferences(client):
+    settings_path = main.RUNTIME_PATHS.memory_root / "equipment_workspace_settings.json"
+    save_profile_settings(
+        settings_path,
+        "windows_desktop_v1",
+        {"vision_link_enabled": True, "future_preference": {"theme": "dim"}},
+    )
+
+    initial = client.get("/api/equipment/profiles/windows_desktop_v1/state").json()["workspace_settings"]
+    assert initial == {
+        "vision_link_enabled": True,
+        "future_preference": {"theme": "dim"},
+        "execution_mode": "skill_flow",
+        "computer_use": {"max_turns": 64, "request_timeout_s": 120.0, "frame_max_age_s": 150.0},
+        "vision_link_source": "stored",
+    }
+
+    saved = client.post(
+        "/api/equipment/profiles/windows_desktop_v1/settings",
+        json={
+            "execution_mode": "computer_use",
+            "computer_use": {"max_turns": 12, "request_timeout_s": 45, "frame_max_age_s": 30},
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["workspace_settings"] == {
+        "vision_link_enabled": True,
+        "future_preference": {"theme": "dim"},
+        "execution_mode": "computer_use",
+        "computer_use": {"max_turns": 12, "request_timeout_s": 45.0, "frame_max_age_s": 30.0},
+        "vision_link_source": "stored",
+    }
+    assert load_profile_settings(settings_path, "windows_desktop_v1")["future_preference"] == {"theme": "dim"}
+    assert TestClient(main.app).get(
+        "/api/equipment/profiles/windows_desktop_v1/state"
+    ).json()["workspace_settings"]["execution_mode"] == "computer_use"
+
+
+def test_computer_use_settings_are_profile_isolated_and_invalid_patch_is_atomic(client):
+    other = create(client, "Computer-use desktop")
+    settings_path = main.RUNTIME_PATHS.memory_root / "equipment_workspace_settings.json"
+    save_profile_settings(settings_path, "windows_desktop_v1", {"vision_link_enabled": True, "sentinel": "keep"})
+
+    changed = client.post(
+        f"/api/equipment/profiles/{other}/settings",
+        json={"vision_link_enabled": False, "execution_mode": "computer_use", "computer_use": {"max_turns": 7}},
+    )
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["workspace_settings"]["computer_use"] == {
+        "max_turns": 7,
+        "request_timeout_s": 120.0,
+        "frame_max_age_s": 150.0,
+    }
+    assert client.get("/api/equipment/profiles/windows_desktop_v1/state").json()["workspace_settings"] == {
+        "vision_link_enabled": True,
+        "sentinel": "keep",
+        "execution_mode": "skill_flow",
+        "computer_use": {"max_turns": 64, "request_timeout_s": 120.0, "frame_max_age_s": 150.0},
+        "vision_link_source": "stored",
+    }
+
+    before = settings_path.read_bytes()
+    for patch in (
+        {"execution_mode": "automatic"},
+        {"execution_mode": None},
+        {"computer_use": None},
+        {"computer_use": {"max_turns": 0}},
+        {"computer_use": {"request_timeout_s": True}},
+        {"computer_use": {"frame_max_age_s": 601}},
+        {"computer_use": {"unknown": 1}},
+        {"unknown_preference": True},
+    ):
+        response = client.post(f"/api/equipment/profiles/{other}/settings", json=patch)
+        assert response.status_code == 422, (patch, response.text)
+        assert settings_path.read_bytes() == before
+
+
+def test_settings_save_never_retargets_or_launches_an_active_execution(client, monkeypatch):
+    service = main._equipment_runtime_service()
+    active = service.begin(
+        sequence_id="settings-freeze-sequence",
+        run_id="settings-freeze-run",
+        experiment_id="settings-freeze-experiment",
+        specimen_id="settings-freeze-specimen",
+        profile_id="windows_desktop_v1",
+        mode="live",
+        worker={"worker_id": "worker-original", "kind": "windows_pyautogui"},
+        execution_ref={"type": "skill", "skill_id": "demo", "version": "1.0.0"},
+        metadata={
+            "execution_settings": {
+                "execution_mode": "computer_use",
+                "computer_use": {"max_turns": 64, "request_timeout_s": 120.0, "frame_max_age_s": 150.0},
+            }
+        },
+    )
+    monkeypatch.setattr(
+        main,
+        "_equipment_bridge_for_profile",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("settings save contacted a worker")),
+    )
+    monkeypatch.setattr(
+        main,
+        "_equipment_computer_use_endpoint_status",
+        lambda: (_ for _ in ()).throw(AssertionError("settings save inspected or launched a model")),
+    )
+
+    response = client.post(
+        "/api/equipment/profiles/windows_desktop_v1/settings",
+        json={"execution_mode": "skill_flow", "computer_use": {"max_turns": 3}},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["non_actuating"] is True
+    reloaded = service.get(active["execution_id"])
+    assert reloaded["worker"]["worker_id"] == "worker-original"
+    assert reloaded["metadata"]["execution_settings"]["execution_mode"] == "computer_use"
+    assert reloaded["metadata"]["execution_settings"]["computer_use"]["max_turns"] == 64
+
+
+def test_computer_use_readiness_is_passive_and_reports_concrete_program_binding_blocker(client, monkeypatch):
+    calls = []
+
+    class Bridge:
+        def connection_status(self):
+            return {"selected": True, "token_configured": True, "selected_candidate": "worker-1"}
+
+        def _live_get(self, tool, path, payload):
+            calls.append((tool, path, dict(payload)))
+            return {
+                "ok": True,
+                "computer_use_v1": True,
+                "computer_use_limits": {"program_hash_binding": False},
+            }
+
+    policy = {
+        "schema": "ax4lab.equipment_computer_use.policy.v1",
+        "application": {"window_title": "Demo"},
+        "targets": {},
+        "protected_regions": [],
+        "program_ids": [],
+        "runtime_value_keys": [],
+        "postconditions": [{"type": "program", "program_id": "read_meter", "read_only": True}],
+        "mask_regions": [],
+    }
+
+    class Registry:
+        def get(self, skill_id, version):
+            assert (skill_id, version) == ("computer_use_demo_v1", "1.0.0")
+            return {
+                "manifest": {"skill_id": skill_id, "version": version, "lifecycle": "deployed", "enabled": True,
+                             "target_profile": "windows_desktop_v1"},
+                "workflow": {"computer_use": policy},
+            }
+
+    monkeypatch.setattr(main, "_equipment_bridge_for_profile", lambda profile_id: Bridge())
+    monkeypatch.setattr(main, "_equipment_skill_registry", lambda: Registry())
+    monkeypatch.setattr(main, "_equipment_computer_use_endpoint_status", lambda: {
+        "ready": True, "vision_declared": True, "provider": "vllm", "model": "endpoint:vision"
+    })
+    saved = client.post(
+        "/api/equipment/profiles/windows_desktop_v1/settings",
+        json={"execution_mode": "computer_use"},
+    )
+    assert saved.status_code == 200
+
+    response = client.get(
+        "/api/equipment/profiles/windows_desktop_v1/computer-use-readiness",
+        params={"skill_id": "computer_use_demo_v1", "version": "1.0.0"},
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["non_actuating"] is True
+    assert payload["ready"] is False
+    assert payload["gates"] == {
+        "execution_mode_selected": True,
+        "worker_computer_use_v1": True,
+        "worker_program_hash_binding": False,
+        "endpoint_vision": True,
+        "skill_policy": True,
+        "skill_postconditions": True,
+    }
+    assert payload["blockers"] == [{
+        "code": "program_hash_binding_unavailable",
+        "message": "Selected worker must advertise computer_use_limits.program_hash_binding for this Skill policy.",
+    }]
+    assert calls == [("equipment.pyautogui.computer_use_readiness", "/capabilities", {"runtime_mode": "live"})]
+
+
+def test_computer_use_readiness_rejects_invalid_policy_without_model_or_action(client, monkeypatch):
+    class Bridge:
+        def connection_status(self):
+            return {"selected": True, "token_configured": True, "selected_candidate": "worker-1"}
+
+        def _live_get(self, *_args):
+            return {"ok": True, "computer_use_v1": True,
+                    "computer_use_limits": {"program_hash_binding": True}}
+
+    class Registry:
+        def get(self, skill_id, version):
+            return {
+                "manifest": {"skill_id": skill_id, "version": version, "lifecycle": "draft", "enabled": True,
+                             "target_profile": "windows_desktop_v1"},
+                "workflow": {"computer_use": {"schema": "ax4lab.equipment_computer_use.policy.v1",
+                                                "application": {"window_title": "Demo"},
+                                                "targets": {}, "protected_regions": [], "program_ids": [],
+                                                "runtime_value_keys": [], "postconditions": [], "mask_regions": []}},
+            }
+
+    monkeypatch.setattr(main, "_equipment_bridge_for_profile", lambda _profile_id: Bridge())
+    monkeypatch.setattr(main, "_equipment_skill_registry", lambda: Registry())
+    monkeypatch.setattr(main, "_equipment_computer_use_endpoint_status", lambda: {
+        "ready": False, "vision_declared": False, "failure_code": "endpoint_vision_required",
+        "message": "Selected endpoint must explicitly support image input",
+    })
+    response = client.get(
+        "/api/equipment/profiles/windows_desktop_v1/computer-use-readiness",
+        params={"skill_id": "bad", "version": "1.0.0"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    codes = [item["code"] for item in payload["blockers"]]
+    assert codes == ["execution_mode_required", "endpoint_vision_required", "skill_not_deployed", "postconditions_invalid"]
+    assert payload["skill"]["policy_valid"] is False
+    assert payload["skill"]["postconditions_valid"] is False

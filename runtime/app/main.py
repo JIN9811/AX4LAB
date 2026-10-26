@@ -67,7 +67,7 @@ from fastapi.responses import (
 from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from mcp_tools.lerobot_schemas import IsaacLabSyntheticRequest
 
 from agents.manipulation.agent import ManipulationAgent
@@ -147,6 +147,8 @@ from utils.equipment_skill_flow import EquipmentSkillFlowError, EquipmentSkillFl
 from utils.equipment_agentic_task import build_utm_compression_flow_template, list_equipment_agentic_tasks
 from utils.equipment_vision_tasks import get_equipment_vision_task, list_equipment_vision_tasks
 from utils.equipment_skill_workflow import validate_editable_workflow
+from utils.equipment_computer_use_settings import load_profile_settings, save_profile_settings
+from Pyautogui_server_for_window.bridge.computer_use_contract import ComputerUseError, validate_policy
 from utils.equipment_skill_authoring_jobs import EquipmentSkillAuthoringJobManager, TERMINAL_STATUSES
 from utils.equipment_skill_vision import (
     SkillVisionEvidence,
@@ -1516,7 +1518,10 @@ class EquipmentAgenticRunRequest(BaseModel):
 class EquipmentProfileSettingsRequest(BaseModel):
     """Persist operator preferences for one registered equipment Profile."""
 
-    vision_link_enabled: bool
+    model_config = ConfigDict(extra="forbid")
+    vision_link_enabled: bool | None = None
+    execution_mode: str | None = None
+    computer_use: dict[str, Any] | None = None
 
 
 class EquipmentProfileCreateRequest(BaseModel):
@@ -13275,12 +13280,14 @@ def _equipment_skill_flow_payload(
 
 def _equipment_profile_workspace_settings(profile: EquipmentProfile) -> dict[str, object]:
     """Return the persisted Profile preferences, falling back to Profile defaults."""
-    stored = _read_workspace_settings(EQUIPMENT_WORKSPACE_SETTINGS_PATH)
-    profiles = stored.get("profiles") if isinstance(stored.get("profiles"), dict) else {}
-    profile_settings = profiles.get(profile.profile_id) if isinstance(profiles.get(profile.profile_id), dict) else {}
+    profile_settings = load_profile_settings(
+        RUNTIME_PATHS.memory_root / "equipment_workspace_settings.json",
+        profile.profile_id,
+    )
     vision_link = profile.vision_link if isinstance(profile.vision_link, dict) else {}
     has_stored_selection = "vision_link_enabled" in profile_settings
     return {
+        **profile_settings,
         "vision_link_enabled": (
             bool(profile_settings.get("vision_link_enabled"))
             if has_stored_selection
@@ -13293,22 +13300,170 @@ def _equipment_profile_workspace_settings(profile: EquipmentProfile) -> dict[str
 def _write_equipment_profile_workspace_settings(
     profile: EquipmentProfile,
     *,
-    vision_link_enabled: bool,
+    patch: dict[str, object],
 ) -> dict[str, object]:
     """Persist one Profile's operator preferences without changing its safety contract."""
-    stored = _read_workspace_settings(EQUIPMENT_WORKSPACE_SETTINGS_PATH)
-    profiles = stored.get("profiles") if isinstance(stored.get("profiles"), dict) else {}
-    profiles = dict(profiles)
-    profiles[profile.profile_id] = {"vision_link_enabled": bool(vision_link_enabled)}
-    _write_workspace_settings(
-        EQUIPMENT_WORKSPACE_SETTINGS_PATH,
-        {
-            "schema": "atr.equipment_workspace_settings.v1",
-            "profiles": profiles,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        },
+    save_profile_settings(
+        RUNTIME_PATHS.memory_root / "equipment_workspace_settings.json",
+        profile.profile_id,
+        patch,
     )
     return _equipment_profile_workspace_settings(profile)
+
+
+def _equipment_computer_use_endpoint_status() -> dict[str, object]:
+    """Inspect the selected route declaration without starting or querying a model."""
+    snapshot = _equipment_skill_model_snapshot()
+    try:
+        from agents.equipment.computer_use import pin_model
+
+        _adapter, selection = pin_model(controller._deps.agent_context, snapshot)
+    except ComputerUseError as exc:
+        return {
+            "ready": False,
+            "vision_declared": False,
+            "failure_code": exc.code,
+            "message": str(exc),
+            "provider": str(snapshot.get("provider") or ""),
+            "model": str(snapshot.get("model") or ""),
+        }
+    return {
+        "ready": True,
+        "vision_declared": True,
+        "provider": str(selection.get("provider") or ""),
+        "model": str(selection.get("model") or ""),
+        "endpoint_sha256": str(selection.get("endpoint_sha256") or ""),
+    }
+
+
+def _equipment_computer_use_readiness(profile: EquipmentProfile, *, skill_id: str, version: str) -> dict[str, object]:
+    """Return passive worker/endpoint/policy gates for the next execution only."""
+    settings = _equipment_profile_workspace_settings(profile)
+    blockers: list[dict[str, str]] = []
+    gates = {
+        "execution_mode_selected": settings.get("execution_mode") == "computer_use",
+        "worker_computer_use_v1": False,
+        "worker_program_hash_binding": True,
+        "endpoint_vision": False,
+        "skill_policy": False,
+        "skill_postconditions": False,
+    }
+    if not gates["execution_mode_selected"]:
+        blockers.append({
+            "code": "execution_mode_required",
+            "message": "Select Computer use for the next execution in this Profile's settings.",
+        })
+
+    bridge = _equipment_bridge_for_profile(profile.profile_id)
+    connection = bridge.connection_status()
+    worker: dict[str, object] = {
+        "selected": bool(connection.get("selected")),
+        "worker_id": str(connection.get("selected_candidate") or ""),
+        "computer_use_v1": False,
+        "program_hash_binding": False,
+    }
+    capability: dict[str, object] = {}
+    if not connection.get("selected") or not connection.get("token_configured"):
+        blockers.append({
+            "code": "computer_use_unavailable",
+            "message": "Select and pair a Windows worker before checking computer-use capability.",
+        })
+    else:
+        capability = bridge._live_get(
+            "equipment.pyautogui.computer_use_readiness",
+            "/capabilities",
+            {"runtime_mode": "live"},
+        )
+        worker["computer_use_v1"] = capability.get("computer_use_v1") is True
+        limits = capability.get("computer_use_limits") if isinstance(capability.get("computer_use_limits"), dict) else {}
+        worker["program_hash_binding"] = limits.get("program_hash_binding") is True
+        gates["worker_computer_use_v1"] = bool(worker["computer_use_v1"])
+        if not gates["worker_computer_use_v1"]:
+            blockers.append({
+                "code": str(capability.get("failure_code") or "computer_use_unavailable"),
+                "message": str(capability.get("message") or "Selected worker does not advertise computer_use_v1."),
+            })
+
+    endpoint = _equipment_computer_use_endpoint_status()
+    gates["endpoint_vision"] = endpoint.get("ready") is True and endpoint.get("vision_declared") is True
+    if not gates["endpoint_vision"]:
+        blockers.append({
+            "code": str(endpoint.get("failure_code") or "endpoint_vision_required"),
+            "message": str(endpoint.get("message") or "Selected endpoint must explicitly declare vision input support."),
+        })
+
+    skill: dict[str, object] = {
+        "skill_id": skill_id,
+        "version": version,
+        "lifecycle": "",
+        "policy_declared": False,
+        "policy_valid": False,
+        "postconditions_valid": False,
+        "program_hash_binding_required": False,
+    }
+    policy: dict[str, object] | None = None
+    if not skill_id or not version:
+        blockers.append({"code": "missing_policy", "message": "Select an exact Skill version with a computer-use policy."})
+    else:
+        try:
+            package = _equipment_skill_registry().get(skill_id, version)
+            manifest = package.get("manifest") if isinstance(package.get("manifest"), dict) else {}
+            workflow = package.get("workflow") if isinstance(package.get("workflow"), dict) else {}
+            raw_policy = workflow.get("computer_use")
+            skill["lifecycle"] = str(manifest.get("lifecycle") or "")
+            skill["policy_declared"] = isinstance(raw_policy, dict)
+            if manifest.get("target_profile") != profile.profile_id:
+                blockers.append({"code": "profile_mismatch", "message": "Selected Skill belongs to another Equipment Profile."})
+            if manifest.get("lifecycle") != "deployed" or manifest.get("enabled") is False:
+                blockers.append({"code": "skill_not_deployed", "message": "Computer use requires an enabled deployed Skill version."})
+            if isinstance(raw_policy, dict):
+                try:
+                    policy = validate_policy(raw_policy)
+                    skill["policy_valid"] = True
+                    skill["postconditions_valid"] = bool(policy.get("postconditions"))
+                except ComputerUseError as exc:
+                    if not isinstance(raw_policy.get("postconditions"), list) or not raw_policy.get("postconditions"):
+                        blockers.append({
+                            "code": "postconditions_invalid",
+                            "message": "Computer-use policy requires at least one valid postcondition.",
+                        })
+                    else:
+                        blockers.append({"code": exc.code, "message": str(exc)})
+            else:
+                blockers.append({"code": "missing_policy", "message": "Selected Skill does not declare workflow.computer_use."})
+        except SkillContractError as exc:
+            blockers.append({"code": "missing_policy", "message": str(exc)})
+
+    gates["skill_policy"] = bool(skill["policy_valid"])
+    gates["skill_postconditions"] = bool(skill["postconditions_valid"])
+    if policy is not None:
+        program_postconditions = [
+            item for item in policy.get("postconditions", [])
+            if isinstance(item, dict) and item.get("type") == "program"
+        ]
+        binding_required = bool(policy.get("program_ids") or program_postconditions)
+        skill["program_hash_binding_required"] = binding_required
+        gates["worker_program_hash_binding"] = not binding_required or bool(worker["program_hash_binding"])
+        if binding_required and not gates["worker_program_hash_binding"]:
+            blockers.append({
+                "code": "program_hash_binding_unavailable",
+                "message": "Selected worker must advertise computer_use_limits.program_hash_binding for this Skill policy.",
+            })
+
+    return {
+        "ok": not blockers,
+        "ready": not blockers,
+        "status": "ready" if not blockers else "blocked",
+        "schema": "ax4lab.equipment_computer_use.readiness.v1",
+        "profile_id": profile.profile_id,
+        "non_actuating": True,
+        "settings": settings,
+        "worker": worker,
+        "endpoint": endpoint,
+        "skill": skill,
+        "gates": gates,
+        "blockers": blockers,
+    }
 
 
 def _equipment_profile_state(profile_id: str) -> dict[str, object]:
@@ -13440,14 +13595,37 @@ async def post_equipment_profile_settings(
         profile = _equipment_profile_registry().get(profile_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    patch = {field: getattr(req, field) for field in req.model_fields_set}
+    if "vision_link_enabled" in patch and patch["vision_link_enabled"] is None:
+        raise HTTPException(status_code=422, detail="vision_link_enabled must be a boolean")
+    try:
+        workspace_settings = _write_equipment_profile_workspace_settings(profile, patch=patch)
+    except ComputerUseError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"ok": False, "failure_code": exc.code, "message": str(exc)},
+        ) from exc
     return {
         "ok": True,
         "profile_id": profile.profile_id,
-        "workspace_settings": _write_equipment_profile_workspace_settings(
-            profile,
-            vision_link_enabled=req.vision_link_enabled,
-        ),
+        "workspace_settings": workspace_settings,
+        "non_actuating": True,
+        "applies_to": "next_execution",
     }
+
+
+@app.get("/api/equipment/profiles/{profile_id}/computer-use-readiness")
+async def get_equipment_profile_computer_use_readiness(
+    profile_id: str,
+    skill_id: str = "",
+    version: str = "",
+) -> dict[str, object]:
+    """Inspect next-execution computer-use gates without inference or actuation."""
+    try:
+        profile = _equipment_profile_registry().get(profile_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _equipment_computer_use_readiness(profile, skill_id=skill_id.strip(), version=version.strip())
 
 
 @app.get("/api/equipment/profiles/{profile_id}/skill-flow")

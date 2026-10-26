@@ -3685,6 +3685,44 @@ async function openModuleGraphTab(moduleId) {
   log(`Opened ${moduleId} internal graph tab. Save Module Version to activate changes.`, "ok");
 }
 
+function runtimeComputerUseSettingsPayload(values) {
+  const mode = String(values.mode || "");
+  if (!["skill_flow", "computer_use"].includes(mode)) throw new Error("Execution mode is invalid.");
+  const maxTurns = Number(values.maxTurns);
+  const requestTimeout = Number(values.requestTimeout);
+  const frameMaxAge = Number(values.frameMaxAge);
+  if (!Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > 256) throw new Error("Max turns must be an integer from 1 to 256.");
+  if (!Number.isFinite(requestTimeout) || requestTimeout < 1 || requestTimeout > 300) throw new Error("Request timeout must be from 1 to 300 seconds.");
+  if (!Number.isFinite(frameMaxAge) || frameMaxAge < 1 || frameMaxAge > 600) throw new Error("Frame max age must be from 1 to 600 seconds.");
+  return {
+    vision_link_enabled: values.visionLinkEnabled === true,
+    execution_mode: mode,
+    computer_use: {max_turns: maxTurns, request_timeout_s: requestTimeout, frame_max_age_s: frameMaxAge},
+  };
+}
+
+async function saveRuntimeComputerUseSettings() {
+  const status = document.getElementById("ide-computer-use-settings-status");
+  try {
+    const payload = runtimeComputerUseSettingsPayload({
+      mode: document.getElementById("ide-equipment-execution-mode")?.value,
+      maxTurns: document.getElementById("ide-computer-use-max-turns")?.value,
+      requestTimeout: document.getElementById("ide-computer-use-request-timeout")?.value,
+      frameMaxAge: document.getElementById("ide-computer-use-frame-max-age")?.value,
+      visionLinkEnabled: document.getElementById("ide-equipment-vision-link")?.checked,
+    });
+    await requestJson(`/api/equipment/profiles/${encodeURIComponent(runtimeEquipmentFlowProfileId)}/settings`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    await loadRuntimeEquipmentSkillFlow(runtimeEquipmentFlowProfileId);
+    const refreshedStatus = document.getElementById("ide-computer-use-settings-status");
+    if (refreshedStatus) refreshedStatus.textContent = "Saved for the next execution. Active execution pins remain unchanged.";
+  } catch (error) {
+    if (status) status.textContent = error.message;
+  }
+}
+
 function renderRuntimeEquipmentSkillFlow() {
   if (!equipmentFlowOutput) return;
   const payload = runtimeEquipmentFlowPayload || {};
@@ -3697,6 +3735,10 @@ function renderRuntimeEquipmentSkillFlow() {
   const visionTasks = Array.isArray(payload.vision_tasks) ? payload.vision_tasks : [];
   const visionTaskById = new Map(visionTasks.map((item) => [String(item.task_id || ""), item]));
   const activeNode = String(execution.active_node || "");
+  const settings = payload.workspace_settings && typeof payload.workspace_settings === "object" ? payload.workspace_settings : {};
+  const limits = settings.computer_use && typeof settings.computer_use === "object" ? settings.computer_use : {};
+  const cuReadiness = payload.computer_use_readiness && typeof payload.computer_use_readiness === "object" ? payload.computer_use_readiness : {};
+  const cuBlockers = Array.isArray(cuReadiness.blockers) ? cuReadiness.blockers : [];
   const profileOptions = runtimeEquipmentProfiles.map((profile) => `<option value="${escapeHtml(profile.profile_id)}" ${profile.profile_id === runtimeEquipmentFlowProfileId ? "selected" : ""}>${escapeHtml(profile.label || profile.profile_id)}</option>`).join("");
   equipmentFlowOutput.innerHTML = `
     <section class="runtime-equipment-skill-flow" data-runtime-projection="equipment-skill-flow">
@@ -3724,9 +3766,20 @@ function renderRuntimeEquipmentSkillFlow() {
           </article>`;
         }).join("") : `<div class="runtime-module-empty">No bound flow. Open Agent Manager to add a Skill block.</div>`}
       </div>
+      <section class="runtime-module-step" aria-label="Computer-use next execution settings">
+        <strong>Computer-use settings · next execution only</strong>
+        <label>Mode <select id="ide-equipment-execution-mode" class="text-input"><option value="skill_flow" ${settings.execution_mode !== "computer_use" ? "selected" : ""}>Skill flow (legacy)</option><option value="computer_use" ${settings.execution_mode === "computer_use" ? "selected" : ""}>Computer use</option></select></label>
+        <label>Max turns <input id="ide-computer-use-max-turns" class="text-input" type="number" min="1" max="256" step="1" value="${escapeHtml(limits.max_turns ?? 64)}"></label>
+        <label>Request timeout (seconds) <input id="ide-computer-use-request-timeout" class="text-input" type="number" min="1" max="300" step="0.1" value="${escapeHtml(limits.request_timeout_s ?? 120)}"></label>
+        <label>Frame max age (seconds) <input id="ide-computer-use-frame-max-age" class="text-input" type="number" min="1" max="600" step="0.1" value="${escapeHtml(limits.frame_max_age_s ?? 150)}"></label>
+        <label class="checkbox-line"><input id="ide-equipment-vision-link" type="checkbox" ${settings.vision_link_enabled ? "checked" : ""}> Include Profile Vision link</label>
+        <button id="ide-save-computer-use-settings" class="btn tiny primary" type="button">Save Settings</button>
+        <p id="ide-computer-use-settings-status" class="hint">${cuReadiness.ready ? "Ready · worker, endpoint vision, Skill policy, and postconditions are available." : `Unavailable · ${escapeHtml(cuBlockers.map((item) => item.message || item.code).join(" · ") || "select an exact deployed Skill")}`}</p>
+      </section>
       <p id="ide-equipment-flow-status" class="hint">${payload.readiness?.ready ? "Ready for Agent execution." : "Draft requires at least one exact deployed Skill."}</p>
     </section>`;
   document.getElementById("ide-equipment-flow-profile")?.addEventListener("change", (event) => loadRuntimeEquipmentSkillFlow(event.target.value).catch((err) => log(String(err), "error")));
+  document.getElementById("ide-save-computer-use-settings")?.addEventListener("click", saveRuntimeComputerUseSettings);
 }
 
 async function loadRuntimeEquipmentSkillFlow(profileId = "utm_windows_v1") {
@@ -3735,6 +3788,13 @@ async function loadRuntimeEquipmentSkillFlow(profileId = "utm_windows_v1") {
     requestJson("/api/equipment/profiles"),
     requestJson(`/api/modules/equipment/equipment-skill-flow?profile_id=${encodeURIComponent(runtimeEquipmentFlowProfileId)}`),
   ]);
+  const firstBlock = Array.isArray(flowPayload.flow?.blocks) ? flowPayload.flow.blocks[0] : null;
+  const skill = firstBlock?.skill && typeof firstBlock.skill === "object" ? firstBlock.skill : {};
+  const readinessQuery = new URLSearchParams();
+  if (skill.skill_id) readinessQuery.set("skill_id", String(skill.skill_id));
+  if (skill.skill_version) readinessQuery.set("version", String(skill.skill_version));
+  const readinessSuffix = readinessQuery.toString() ? `?${readinessQuery.toString()}` : "";
+  flowPayload.computer_use_readiness = await requestJson(`/api/equipment/profiles/${encodeURIComponent(runtimeEquipmentFlowProfileId)}/computer-use-readiness${readinessSuffix}`);
   runtimeEquipmentProfiles = Array.isArray(profilesPayload.profiles) ? profilesPayload.profiles : [];
   runtimeEquipmentFlowPayload = flowPayload;
   renderRuntimeEquipmentSkillFlow();
