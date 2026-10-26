@@ -313,6 +313,7 @@ let runtimeEquipmentFlowPayload = null;
 let runtimeEquipmentFlowProfileId = "utm_windows_v1";
 let runtimeEquipmentProfiles = [];
 let runtimeComputerUseDraft = null;
+let runtimeComputerUseSettingsStatus = null;
 let modulePayloadFetches = new Set();
 let activeModuleId = "";
 let availableHandlers = [];
@@ -3701,6 +3702,7 @@ function runtimeComputerUseFormValues() {
 function captureRuntimeComputerUseDraft(dirty = false) {
   const values = runtimeComputerUseFormValues();
   if (!values) return;
+  if (dirty) runtimeComputerUseSettingsStatus = null;
   const fieldIds = new Set([
     "ide-equipment-execution-mode",
     "ide-computer-use-max-turns",
@@ -3781,9 +3783,11 @@ async function saveRuntimeComputerUseSettings() {
       body: JSON.stringify(payload),
     });
     resetRuntimeComputerUseDraft();
+    runtimeComputerUseSettingsStatus = {
+      profileId: runtimeEquipmentFlowProfileId,
+      message: "Saved for the next execution. Active execution pins remain unchanged.",
+    };
     await loadRuntimeEquipmentSkillFlow(runtimeEquipmentFlowProfileId, {preserveComputerUseDraft: false});
-    const refreshedStatus = document.getElementById("ide-computer-use-settings-status");
-    if (refreshedStatus) refreshedStatus.textContent = "Saved for the next execution. Active execution pins remain unchanged.";
   } catch (error) {
     const status = document.getElementById("ide-computer-use-settings-status");
     if (status) status.textContent = error.message;
@@ -3806,6 +3810,9 @@ function renderRuntimeEquipmentSkillFlow() {
   const formValues = runtimeComputerUseValuesForRender(settings);
   const cuReadiness = payload.computer_use_readiness && typeof payload.computer_use_readiness === "object" ? payload.computer_use_readiness : {};
   const cuBlockers = Array.isArray(cuReadiness.blockers) ? cuReadiness.blockers : [];
+  const computerUseSettingsStatus = runtimeComputerUseSettingsStatus?.profileId === runtimeEquipmentFlowProfileId
+    ? runtimeComputerUseSettingsStatus.message
+    : "Settings are unchanged.";
   const profileOptions = runtimeEquipmentProfiles.map((profile) => `<option value="${escapeHtml(profile.profile_id)}" ${profile.profile_id === runtimeEquipmentFlowProfileId ? "selected" : ""}>${escapeHtml(profile.label || profile.profile_id)}</option>`).join("");
   equipmentFlowOutput.innerHTML = `
     <section class="runtime-equipment-skill-flow" data-runtime-projection="equipment-skill-flow">
@@ -3841,7 +3848,7 @@ function renderRuntimeEquipmentSkillFlow() {
         <label>Frame max age (seconds) <input id="ide-computer-use-frame-max-age" class="text-input" type="number" min="1" max="600" step="0.1" value="${escapeHtml(formValues.frameMaxAge)}"></label>
         <label class="checkbox-line"><input id="ide-equipment-vision-link" type="checkbox" ${formValues.visionLinkEnabled ? "checked" : ""}> Include Profile Vision link</label>
         <button id="ide-save-computer-use-settings" class="btn tiny primary" type="button">Save Settings</button>
-        <p id="ide-computer-use-settings-status" class="hint" role="status">Settings are unchanged.</p>
+        <p id="ide-computer-use-settings-status" class="hint" role="status">${escapeHtml(computerUseSettingsStatus)}</p>
         <p id="ide-computer-use-readiness" class="hint" role="status">${cuReadiness.ready ? "Ready · worker, endpoint vision, Skill policy, and postconditions are available." : `Unavailable · ${escapeHtml(cuBlockers.map((item) => item.message || item.code).join(" · ") || "select an exact deployed Skill")}`}</p>
       </section>
       <p id="ide-equipment-flow-status" class="hint">${payload.readiness?.ready ? "Ready for Agent execution." : "Draft requires at least one exact deployed Skill."}</p>
@@ -3855,7 +3862,10 @@ async function loadRuntimeEquipmentSkillFlow(profileId = "utm_windows_v1", optio
   const nextProfileId = profileId || "utm_windows_v1";
   const profileChanged = nextProfileId !== runtimeEquipmentFlowProfileId;
   const preserveComputerUseDraft = options.preserveComputerUseDraft !== false;
-  if (profileChanged || !preserveComputerUseDraft) resetRuntimeComputerUseDraft();
+  if (profileChanged || !preserveComputerUseDraft) {
+    resetRuntimeComputerUseDraft();
+    if (profileChanged) runtimeComputerUseSettingsStatus = null;
+  }
   else captureRuntimeComputerUseDraft(false);
   runtimeEquipmentFlowProfileId = nextProfileId;
   const [profilesPayload, flowPayload] = await Promise.all([

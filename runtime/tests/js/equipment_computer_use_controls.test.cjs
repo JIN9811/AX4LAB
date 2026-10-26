@@ -183,6 +183,7 @@ test("Runtime IDE serializes through the shared profile settings contract", asyn
   let posted = null;
   const context = vm.createContext({
     runtimeEquipmentFlowProfileId: "profile-a",
+    runtimeComputerUseSettingsStatus: null,
     document: {getElementById: id => elements[id]},
     requestJson: async (_url, options) => { posted = JSON.parse(options.body); },
     loadRuntimeEquipmentSkillFlow: async () => {},
@@ -213,7 +214,7 @@ test("Runtime IDE serializes through the shared profile settings contract", asyn
   assert.equal(localPayloadCalls, 0);
 });
 
-test("Runtime IDE preserves both next-execution confirmation and readiness blockers after save", async () => {
+test("Runtime IDE preserves save confirmation and readiness through the next same-profile passive poll", async () => {
   const elements = {
     "ide-computer-use-settings-status": {textContent: ""},
     "ide-computer-use-readiness": {textContent: "Unavailable · initial"},
@@ -223,28 +224,50 @@ test("Runtime IDE preserves both next-execution confirmation and readiness block
     "ide-computer-use-frame-max-age": {value: "35"},
     "ide-equipment-vision-link": {checked: true},
   };
+  const equipmentFlowOutput = {innerHTML: ""};
   const context = vm.createContext({
+    equipmentFlowOutput,
+    runtimeEquipmentFlowPayload: {
+      flow: {blocks: []}, execution: {}, vision_tasks: [],
+      workspace_settings: {execution_mode: "computer_use", computer_use: {max_turns: 18, request_timeout_s: 75, frame_max_age_s: 35}},
+      computer_use_readiness: {ready: false, blockers: [{message: "Worker capability missing"}]},
+      readiness: {ready: false},
+    },
+    runtimeEquipmentProfiles: [{profile_id: "profile-a", label: "Profile A"}],
     runtimeEquipmentFlowProfileId: "profile-a",
+    runtimeComputerUseSettingsStatus: null,
     document: {getElementById: id => elements[id]},
     requestJson: async () => ({ok: true}),
     resetRuntimeComputerUseDraft() {},
     loadRuntimeEquipmentSkillFlow: async () => {
       elements["ide-computer-use-settings-status"] = {textContent: ""};
       elements["ide-computer-use-readiness"] = {textContent: "Unavailable · worker capability missing"};
+      context.renderRuntimeEquipmentSkillFlow();
     },
+    escapeHtml(value) { return String(value); },
+    runtimeComputerUseValuesForRender: () => ({
+      mode: "computer_use", maxTurns: "18", requestTimeout: "75", frameMaxAge: "35", visionLinkEnabled: true,
+    }),
+    bindRuntimeComputerUseDraftControls() {},
     encodeURIComponent,
     JSON,
     Number,
     Error,
     window: {AX4LABEquipmentComputerUseSettings: {payload: expectedSettingsPayload}},
   });
-  vm.runInContext(block("runtime_ide.js", "async function saveRuntimeComputerUseSettings", "function renderRuntimeEquipmentSkillFlow"), context);
+  vm.runInContext(block("runtime_ide.js", "async function saveRuntimeComputerUseSettings", "async function loadRuntimeEquipmentSkillFlow"), context);
 
   await context.saveRuntimeComputerUseSettings();
 
-  assert.match(elements["ide-computer-use-settings-status"].textContent, /next execution/i);
-  assert.match(elements["ide-computer-use-settings-status"].textContent, /pins remain unchanged/i);
-  assert.match(elements["ide-computer-use-readiness"].textContent, /worker capability missing/i);
+  const firstSaveStatus = equipmentFlowOutput.innerHTML.match(/id="ide-computer-use-settings-status"[^>]*>([^<]*)<\/p>/);
+  assert.match(firstSaveStatus[1], /next execution/i);
+  assert.match(firstSaveStatus[1], /pins remain unchanged/i);
+  context.renderRuntimeEquipmentSkillFlow();
+  const saveStatus = equipmentFlowOutput.innerHTML.match(/id="ide-computer-use-settings-status"[^>]*>([^<]*)<\/p>/);
+  const readiness = equipmentFlowOutput.innerHTML.match(/id="ide-computer-use-readiness"[^>]*>([^<]*)<\/p>/);
+  assert.match(saveStatus[1], /next execution/i);
+  assert.match(saveStatus[1], /pins remain unchanged/i);
+  assert.match(readiness[1], /worker capability missing/i);
 });
 
 test("Runtime IDE renders readiness independently from transient save status", () => {
@@ -259,6 +282,7 @@ test("Runtime IDE renders readiness independently from transient save status", (
     },
     runtimeEquipmentProfiles: [{profile_id: "profile-a", label: "Profile A"}],
     runtimeEquipmentFlowProfileId: "profile-a",
+    runtimeComputerUseSettingsStatus: null,
     document: {getElementById: () => null},
     escapeHtml(value) { return String(value); },
     runtimeComputerUseValuesForRender: () => ({
@@ -292,10 +316,16 @@ test("Runtime IDE same-profile polling preserves dirty values and focused field 
     activeElement: elements["ide-computer-use-max-turns"],
     getElementById(id) { return elements[id] || null; },
   };
-  const context = vm.createContext({runtimeEquipmentFlowProfileId: "profile-a", runtimeComputerUseDraft: null, document});
+  const context = vm.createContext({
+    runtimeEquipmentFlowProfileId: "profile-a",
+    runtimeComputerUseDraft: null,
+    runtimeComputerUseSettingsStatus: {profileId: "profile-a", message: "Saved for the next execution."},
+    document,
+  });
   vm.runInContext(block("runtime_ide.js", "function runtimeComputerUseFormValues", "async function saveRuntimeComputerUseSettings"), context);
 
   context.captureRuntimeComputerUseDraft(true);
+  assert.equal(context.runtimeComputerUseSettingsStatus, null, "an intentional settings edit clears the prior save confirmation");
   const values = context.runtimeComputerUseValuesForRender({
     execution_mode: "skill_flow",
     computer_use: {max_turns: 64, request_timeout_s: 120, frame_max_age_s: 150},
@@ -333,6 +363,36 @@ test("Runtime IDE same-profile polling preserves dirty values and focused field 
   });
   assert.equal(reset.mode, "skill_flow");
   assert.equal(reset.maxTurns, "64");
+});
+
+test("Runtime IDE intentional profile change clears the prior save confirmation", async () => {
+  const context = vm.createContext({
+    runtimeEquipmentFlowProfileId: "profile-a",
+    runtimeComputerUseSettingsStatus: {profileId: "profile-a", message: "Saved for the next execution."},
+    runtimeEquipmentProfiles: [],
+    runtimeEquipmentFlowPayload: null,
+    resetRuntimeComputerUseDraft() {},
+    captureRuntimeComputerUseDraft() {},
+    requestJson: async (url) => {
+      if (url === "/api/equipment/profiles") return {profiles: [{profile_id: "profile-b", label: "Profile B"}]};
+      if (url.includes("computer-use-readiness")) return {ready: false, blockers: []};
+      return {flow: {blocks: []}, graph: {nodes: [], edges: []}};
+    },
+    renderRuntimeEquipmentSkillFlow() {},
+    graphTabs: [],
+    activeGraphTabId: "",
+    MODULE_TAB_PREFIX: "module:",
+    cloneConfig(value) { return value; },
+    renderGraph() {},
+    encodeURIComponent,
+    URLSearchParams,
+    String,
+  });
+  vm.runInContext(block("runtime_ide.js", "async function loadRuntimeEquipmentSkillFlow", "function focusModuleForNode"), context);
+
+  await context.loadRuntimeEquipmentSkillFlow("profile-b");
+
+  assert.equal(context.runtimeComputerUseSettingsStatus, null);
 });
 
 test("Equipment Workspace passive polling does not rehydrate the settings form", () => {
