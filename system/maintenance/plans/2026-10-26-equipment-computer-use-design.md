@@ -1,6 +1,6 @@
 # Equipment computer-use execution
 
-Status: design for approval; implementation has not started.
+Status: approved by the user on 2026-10-26; implementation requested with subagents.
 Baseline: `9ac1812` on `main` (2026-10-26).
 
 ## Intent
