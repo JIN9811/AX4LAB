@@ -26,6 +26,7 @@ from Pyautogui_server_for_window.bridge.computer_use_contract import (
     parse_decision, validate_action, validate_policy, validate_program_hashes,
 )
 from Pyautogui_server_for_window.bridge.computer_use_runtime import action_payload_sha256
+from utils.equipment_skill_runtime import canonical_sha256
 
 
 def _json(value):
@@ -213,7 +214,17 @@ async def run_computer_use(*, state, ctx, request, package, execution, settings,
         policy = validate_policy(deepcopy(raw_policy))
         declared = set(policy["program_ids"]) | {check["program_id"] for check in policy["postconditions"] if check["type"] == "program"}
         manifest_hashes = package["manifest"].get("program_sha256", {})
-        program_hashes = validate_program_hashes(policy, {key: manifest_hashes[key] for key in declared if key in manifest_hashes})
+        # The package validator loads only workflow-listed bodies. Extra manifest
+        # entries are not validated executable authority, even with a real hash.
+        workflow_ids = set(package["workflow"].get("program_ids", []))
+        validated_hashes = {}
+        for program in package.get("programs", []):
+            program_id = program.get("program_id")
+            if program_id in declared and program_id in workflow_ids:
+                digest = canonical_sha256(program)
+                if manifest_hashes.get(program_id) == digest:
+                    validated_hashes[program_id] = digest
+        program_hashes = validate_program_hashes(policy, validated_hashes)
         if not connection["confirm_live_execute"]:
             raise ComputerUseError("live_confirmation_required", "Computer use requires explicit live execution confirmation")
         runtime_values = {key: deepcopy(frozen_request.get("runtime_context", {}).get(key))

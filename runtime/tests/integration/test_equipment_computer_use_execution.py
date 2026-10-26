@@ -139,6 +139,45 @@ async def test_tampered_deployed_policy_never_reaches_runner(tmp_path, monkeypat
     assert h.prompts == []
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("evidence", [False, True])
+@pytest.mark.parametrize("forged_extra", [False, True])
+async def test_real_package_boundary_rejects_extra_manifest_program(tmp_path, monkeypatch, evidence, forged_extra):
+    h, registry, state, request, _ = setup(tmp_path, monkeypatch)
+    root = registry.root / "computer_use_demo_v1/1.0.0"
+    package = validate_skill_package(root)
+    workflow, manifest = package["workflow"], package["manifest"]
+    original_id = workflow["program_ids"][0]
+    program_id = "forged_extra" if forged_extra else original_id
+    if evidence:
+        workflow["computer_use"]["postconditions"] = [{"type": "program", "program_id": program_id, "read_only": True}]
+    else:
+        workflow["computer_use"]["program_ids"] = [program_id]
+    if forged_extra:
+        manifest["program_sha256"][program_id] = "a" * 64
+    manifest["workflow_sha256"] = canonical_sha256(workflow)
+    (root / "workflow.json").write_text(json.dumps(workflow))
+    (root / "manifest.json").write_text(json.dumps(manifest))
+    validated = validate_skill_package(root)
+    if forged_extra:
+        assert program_id not in validated["workflow"]["program_ids"]
+        assert all(p["program_id"] != program_id for p in validated["programs"])
+        assert not (root / "programs" / f"{program_id}.json").exists()
+    acquired = []
+    def acquire(payload):
+        acquired.append(payload)
+        return h.worker.handle("acquire", payload, "principal")
+    h.ctx.tools.register("equipment.pyautogui.computer_use_acquire", acquire)
+    result = await LabEquipmentAgent()._run_equipment_skill(state, h.ctx, request)
+    if forged_extra:
+        assert not result.success
+        assert result.data["equipment_result"]["failure_code"] == "program_hash_binding_missing"
+        assert not acquired and not h.prompts and h.desktop.effects == 0
+    else:
+        assert result.success, result.data
+        assert acquired[0]["program_hashes"] == {program_id: manifest["program_sha256"][program_id]}
+
+
 def test_registered_transport_keeps_original_alias_credentials_and_releases_cache(tmp_path, monkeypatch):
     import httpx
     from device_bridges.windows_pyautogui.tools import register_equipment_tools

@@ -459,3 +459,31 @@ async def test_policy_program_without_validated_package_hash_never_acquires(tmp_
     result = await runner().run_computer_use(**h.args)
     assert result.get("failure_code") == "program_hash_binding_missing"
     assert not h.calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("evidence", [False, True])
+@pytest.mark.parametrize("binding", ["manifest_only", "workflow_without_body", "body_without_workflow", "wrong_body_hash", "valid"])
+async def test_program_binding_requires_validated_package_body(tmp_path, monkeypatch, evidence, binding):
+    from utils.equipment_skill_runtime import canonical_sha256
+    h = harness(tmp_path, monkeypatch)
+    program = {"schema": "atr.pyautogui_program.v1", "program_id": "bound", "name": "Unicode 검증",
+               "sequence": [{"action": "wait_for_file", "pattern": "synthetic.csv"}]}
+    digest = canonical_sha256(program)
+    h.package["manifest"]["program_sha256"] = {"bound": digest}
+    h.package["workflow"]["program_ids"] = ["bound"] if binding in {"workflow_without_body", "wrong_body_hash", "valid"} else []
+    h.package["programs"] = [deepcopy(program)] if binding in {"body_without_workflow", "wrong_body_hash", "valid"} else []
+    if binding == "wrong_body_hash":
+        h.package["programs"][0]["sequence"] = [{"action": "press", "key": "escape"}]
+    if evidence:
+        h.package["workflow"]["computer_use"]["postconditions"] = [{"type": "program", "program_id": "bound", "read_only": True}]
+    else:
+        h.package["workflow"]["computer_use"]["program_ids"] = ["bound"]
+    result = await runner().run_computer_use(**h.args)
+    if binding == "valid":
+        assert result["ok"]
+        assert h.calls[0][0] == "acquire"
+        assert h.calls[0][1]["program_hashes"] == {"bound": digest}
+    else:
+        assert result.get("failure_code") == "program_hash_binding_missing"
+        assert not h.calls and not h.prompts
