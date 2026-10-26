@@ -632,6 +632,58 @@ Guardian/operator stop paths remain authoritative.
 
 ## Current Verification and Known Limits
 
+### Opt-in computer-use execution (2026-10-26)
+
+The existing Equipment agent now has a bounded `computer_use` branch after its
+normal package/Profile and Vision preflight checks. `skill_flow` remains the
+default and existing registered-program execution is unchanged. The branch is
+`runtime/agents/equipment/computer_use.py`; portable decisions/permissions are
+owned by `runtime/Pyautogui_server_for_window/bridge/computer_use_contract.py`.
+No separate agent, frontend application or model dependency was introduced.
+
+Select the Profile in Equipment Workspace, set Execution mode and limits, then
+save. The Runtime IDE Equipment projection edits the same settings. Values are
+frozen at execution/flow start; subsequent saves affect the next execution only.
+The exact editable Skill version owns `workflow.computer_use`; open its Workflow
+Editor from the Workspace's selected Skill, apply the policy JSON, then use the
+existing Check/Save/compile/validate/deploy lifecycle. Deployed versions remain
+immutable. The Agent Manager owns flow bindings, not policy editing.
+
+The passive Profile readiness API checks worker capability, conditional program
+hash binding, selected vision endpoint metadata and the exact Skill's policy
+and postconditions. It does not acquire a lease, infer, start a model or execute.
+Defaults are 64 turns, 120-second requests and 150-second frame age; valid bounds
+are 1–256, 1–300 and 1–600 respectively. One enclosing runtime deadline still
+limits the whole loop. Two format attempts are allowed for each latest image;
+there is no endpoint/provider fallback or screenshot-history accumulation.
+
+The model proposes one typed action, bounded wait, completion verification or
+operator handoff. Only the host supplies identity, runtime text, action IDs and
+hashes. Strict local validation and worker permissions precede input; `complete`
+cannot itself mark a Skill successful. Worker postconditions and confirmed
+release are required, and existing flow/Vision/current-cycle CSV/clearance checks
+still govern downstream readiness. GUI permission authoring, protected/masked
+regions, program binding and Windows update prerequisites are detailed in the
+[bridge reference](../device_bridges/windows_pyautogui_bridge.md#optional-computer-use-protocol).
+
+Inspect `equipment_skill_execution`, progress `{turn,kind,observation_id}` and
+the final result's `computer_use`, `request_log_ref` and `output_artifacts`.
+Artifacts hash-link observations, model decisions, intent, receipts, evidence
+and release without publishing lease/endpoint secrets. A lost response is
+reconciled by status for the same action ID; never redispatched under a new ID.
+Unknown/ambiguous actions, lost private lease state after restart and failed
+release require operator reconciliation. Changing settings to `skill_flow`
+does not reroute a blocked resume. Do not delete ledgers or create replacement
+execution IDs to force recovery; no automatic reset API is provided.
+
+This is an original Python integration informed by the pinned UI-TARS Desktop
+references in the bridge document, not a dependency on a UI-TARS model.
+`computer_use_demo_v1` is compiled only in isolated tests from public synthetic
+pixels and a persisted result file; it is never auto-installed. Actual model
+quality, Windows focus/DPI, real UTM mapping and hardware remain unvalidated.
+Rollback disables the mode for new executions; deployment/merge and worker
+updates remain separately authorized operations.
+
 ### Installed package verification (2026-09-13)
 
 Guarded owner/module/bridge/API coverage passed 285 tests; guarded Runtime and

@@ -238,3 +238,14 @@ def test_truncated_png_with_matching_hash_rejected(contract):
     obs.update(image_base64=base64.b64encode(png).decode(), image_sha256=hashlib.sha256(png).hexdigest())
     with pytest.raises(contract.ComputerUseError):
         contract.validate_action({"type": "invoke_program", "program_id": "demo_start"}, policy(), obs, {})
+@pytest.mark.parametrize('field', ['observation_id', 'target_id', 'key'])
+def test_emitted_schema_rejects_terminal_newline_identifiers(field):
+    import jsonschema
+    from Pyautogui_server_for_window.bridge.computer_use_contract import decision_json_schema
+    value = {'schema': 'ax4lab.equipment_computer_use.decision.v1',
+             'observation_id': 'observation1', 'kind': 'act', 'reason': '',
+             'action': {'type': 'press', 'target_id': 'button', 'key': 'enter'}}
+    owner = value if field == 'observation_id' else value['action']
+    owner[field] += '\n'
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(value, decision_json_schema())

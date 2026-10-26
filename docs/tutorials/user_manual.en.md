@@ -297,6 +297,49 @@ permissions. See [Runtime IDE](../../system/runtime/runtime_ide.md),
 
 ## Completion checklist and further reference
 
+### Optional Equipment computer use — synthetic acceptance only
+
+The default remains **Skill flow** (`skill_flow`). To prepare the opt-in mode,
+select the correct Profile in Equipment Workspace (or the Runtime IDE Equipment
+projection), choose **Computer use**, and save the limits. Defaults are 64 turns,
+120 seconds per request and 150 seconds maximum frame age; bounds are 1–256,
+1–300 and 1–600. Saves apply to the next execution, never an active one. Vision
+Link is independent and retains its existing checks. Saving/readiness does not
+launch an execution or start/load a model.
+
+Before enabling a real run, separately update the Windows worker and check
+`computer_use_v1` readiness; registered programs additionally need
+`computer_use_limits.program_hash_binding`. An old single-file worker may still
+support legacy execution without supporting computer use. Select an already
+configured vision-capable OpenAI-compatible/vLLM endpoint; there is no silent
+model/provider fallback. Readiness is metadata-only, not a quality test.
+
+Select an exact editable Skill version in Equipment Workspace and open its
+**Workflow Editor**. Author `workflow.computer_use` permissions: exact window
+title, allowed targets/actions and pixel-hash anchors, protected/masked regions,
+allowed keys/chords/runtime values, declared programs and real postconditions.
+Use **Apply**, **Check**, **Save**, then the existing compile/validate/deploy
+workflow. Deployed versions cannot be edited. Never copy synthetic coordinates
+into equipment permissions; physical actions belong in registered programs and
+evidence programs must be read-only. See the
+[permission and worker reference](../../system/device_bridges/windows_pyautogui_bridge.md#optional-computer-use-protocol).
+
+Completion requires worker evidence and confirmed lease release, not the model
+saying done. Inspect the execution's turn/observation, receipts, verification and
+hash-linked `output_artifacts` / `request_log_ref`. Preserve these and the worker
+ledger on failure. Unknown/ambiguous effects, interrupted actions or a lost lease
+after restart require trained operator reconciliation: do not retry under a new
+ID, clear records, or assume a timeout means nothing happened. There is no
+automatic reset API. A release failure is not success.
+
+To disable the feature, save **Skill flow** for future executions. This does not
+unlock or convert an active/uncertain execution. The public
+`computer_use_demo_v1` package fixture uses only synthetic images and a result
+file in test temporary storage; it is never installed automatically. Actual
+model inference, Windows focus/DPI and UTM hardware acceptance are not claimed.
+The implementation is original Python code, not a UI-TARS model dependency;
+pinned design references are listed in the bridge reference above.
+
 - You can select the physical boundary before starting a new run.
 - You know which save button owns printer, rollout and task settings.
 - You can locate one candidate's source evidence and retained files.

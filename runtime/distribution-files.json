@@ -46,6 +46,10 @@
     "utils"
   ],
   "wheel": [
+    "agents/equipment/computer_use.py",
+    "utils/equipment_computer_use_settings.py",
+    "Pyautogui_server_for_window/bridge/computer_use_contract.py",
+    "Pyautogui_server_for_window/bridge/computer_use_runtime.py",
     "agents/__init__.py",
     "agents/analysis/__init__.py",
     "agents/analysis/agent.py",
@@ -531,6 +535,7 @@
     "backends/endpoint_routes.py"
   ],
   "bound_resources": [
+    "web/static/equipment_computer_use_settings.js",
     "agents/analysis/frontend/live_report.js",
     "agents/bo/frontend/live_report.js",
     "agents/core/guardian/frontend/live_report.js",
@@ -745,6 +750,11 @@
     "web/templates/partials/llm_control.html"
   ],
   "sdist": [
+    "agents/equipment/computer_use.py",
+    "utils/equipment_computer_use_settings.py",
+    "Pyautogui_server_for_window/bridge/computer_use_contract.py",
+    "Pyautogui_server_for_window/bridge/computer_use_runtime.py",
+    "web/static/equipment_computer_use_settings.js",
     "LICENSE",
     "Pyautogui_server_for_window/INSTALL_WINDOWS_BRIDGE.cmd",
     "Pyautogui_server_for_window/README.md",

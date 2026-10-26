@@ -1,0 +1,34 @@
+{
+  "skill_id": "computer_use_demo_v1",
+  "version": "1.0.0",
+  "recording": {
+    "schema": "atr.equipment_recording.v1",
+    "recording_id": "synthetic-computer-use-demo",
+    "name": "Synthetic desktop demo",
+    "target_app": "Synthetic demo",
+    "target_window": "Synthetic demo",
+    "status": "saved",
+    "events": [{"kind": "key_press", "at_ms": 10, "key": "enter"}],
+    "checkpoints": []
+  },
+  "policy": {
+    "schema": "ax4lab.equipment_computer_use.policy.v1",
+    "application": {"window_title": "Synthetic demo"},
+    "targets": {
+      "button": {
+        "region": [0, 0, 2, 2], "actions": ["click"],
+        "anchor": {"region": [0, 0, 2, 2], "sha256": "15ec7bf0b50732b49f8228e07d24365338f9e3ab994b00af08e5a3bffe55fd8b"}
+      },
+      "field": {
+        "region": [2, 0, 2, 2], "actions": ["write"],
+        "anchor": {"region": [2, 0, 2, 2], "sha256": "15ec7bf0b50732b49f8228e07d24365338f9e3ab994b00af08e5a3bffe55fd8b"}
+      },
+      "submit": {
+        "region": [0, 2, 2, 2], "actions": ["click"],
+        "anchor": {"region": [0, 2, 2, 2], "sha256": "15ec7bf0b50732b49f8228e07d24365338f9e3ab994b00af08e5a3bffe55fd8b"}
+      }
+    },
+    "protected_regions": [], "mask_regions": [], "program_ids": [], "runtime_value_keys": ["specimen_label"],
+    "postconditions": [{"type": "image", "region": [2, 2, 2, 2], "sha256": "6c8f6d772829d493618e079a099cf4f20d8524ed3656f49db234f5bbf60a4e65"}]
+  }
+}

@@ -53172,8 +53172,8 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "2d90efe50c5f88e0155744452c0e0a172fa6447773cf5d09f8f8414d63506bfc",
-          "size": 11734,
+          "sha256": "7668c7a6529676f1bba99a540e4f851ed6882c5f1360a2225e5c9dd136d8d984",
+          "size": 13497,
           "mode": "100644"
         }
       },
@@ -53268,8 +53268,8 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "107241f34c489d972a1a7ad968b0857eb8a22a1ef7df62dfc05a1ae65f74c76d",
-          "size": 1750,
+          "sha256": "b1d65042dd28c84857ee4a82631ddbc23a156448df59c94e636204cf98b07bc2",
+          "size": 1773,
           "mode": "100644"
         }
       },
@@ -53316,8 +53316,8 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "672194015b44768c9ba3e522842d27215fa4d61a6270a47073e596fafe8b5916",
-          "size": 782078,
+          "sha256": "d78bd85901c2a9c65f13ee32d6b1d39fb03c11c15bdd5efe02f1b7c2616c4ff1",
+          "size": 826395,
           "mode": "100644"
         }
       },
@@ -53396,8 +53396,8 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "eda4aebc8e1b31b71ced58a7cfd6f0cdb3cb34112899cf7c3f3edb6a8c2a5381",
-          "size": 88766,
+          "sha256": "3e7b8f7f1b1e55a5ab54f664c41d14cdac187563eb8066b91be0fde40c01139a",
+          "size": 89314,
           "mode": "100644"
         }
       },
@@ -53520,8 +53520,8 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "65f00bc6a36550e5ec6c038980d0e5adccecae98280d3d18637349df5c6e2135",
-          "size": 887128,
+          "sha256": "7cf39a8b577174a4c8f18e399b512f68fe4d2967d2494763339afc5b64296c1d",
+          "size": 906247,
           "mode": "100644"
         }
       },
@@ -53620,8 +53620,8 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "11e92d07d868b208e2ab2c33d6f24556332f02e16a906e76b11c4d6aee3901fe",
-          "size": 16239,
+          "sha256": "c1bcd3400aed82045bf4d6d5f0123abe65baa389b3e2981238b593417506daa3",
+          "size": 19666,
           "mode": "100644"
         }
       },
@@ -53632,8 +53632,8 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "0e534c9cbf0f538056840c0a682e8a008e1d25905d71a5c3c105b6ba06d1114d",
-          "size": 18034,
+          "sha256": "3b67cb89a50e682170030811bbb66758176c4eefba6d9d874ff5316e6783431f",
+          "size": 22072,
           "mode": "100644"
         }
       },
@@ -53644,8 +53644,8 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "64e3cd2a133acd01c9aa8ba06d38d03942ab8b34664fb5e4c00f56a3d9e4a881",
-          "size": 10817,
+          "sha256": "ecd5f664b3051467665cbe46bcb4ecfe0bd570148896d1be31ade9ceb9f5f000",
+          "size": 11269,
           "mode": "100644"
         }
       },
@@ -53700,8 +53700,8 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "79d15140fec0a83c0e869d2ccecfdbb53544cfb04f0a8371c9f17bf8fa763ddf",
-          "size": 6342,
+          "sha256": "d93030290b9f3c4aa509a7e3f7bb6a2b367a11cbf1ed821cc1a6536baf11a6d2",
+          "size": 6794,
           "mode": "100644"
         }
       },
@@ -53848,8 +53848,8 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "fde7229fb235eb1158183dac247bcd6623446b1d8fc276be6f3fcfc2c74e99cf",
-          "size": 444305,
+          "sha256": "5fc5be46023d3b9906ea0ac1290ed03f314d43ddfc803af0088957566a0c2899",
+          "size": 453096,
           "mode": "100644"
         }
       },
@@ -53872,8 +53872,8 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "ac7a8b9a83f4b1fd4dd28db80a55b881032293439d309e08031ca2382c25d70e",
-          "size": 25199,
+          "sha256": "2e5e155751d3c60deb3f321ca83ad851b1fccedfa4235b536a1f6d4e44228bd9",
+          "size": 25290,
           "mode": "100644"
         }
       },
@@ -53882,6 +53882,406 @@
         "current_identity": {
           "sha256": "e0743e1be5bdad70ed75d706c59064c6f8054ac288aab303271a992861d2a1e6",
           "size": 6720,
+          "mode": "100644"
+        }
+      },
+      "runtime/Pyautogui_server_for_window/README.md": {
+        "previous_identity": {
+          "sha256": "607a019c7e8ed78e473bed15896eab234eaf295f8bc0dcae828b149534317586",
+          "size": 13509,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "90e479314133689bd835e9e6dcbc64b342e579b730fe5f789d5e8455fb4c6cd8",
+          "size": 16358,
+          "mode": "100644"
+        }
+      },
+      "runtime/Pyautogui_server_for_window/bridge/computer_use_contract.py": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "393a2a3be539b64e5cb10413773c69e4276cf375ce06f1c0b7632082d0b2169c",
+          "size": 18090,
+          "mode": "100644"
+        }
+      },
+      "runtime/Pyautogui_server_for_window/bridge/computer_use_runtime.py": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "c714951aa195a8b2ff0aa2ead39f9e22c3ea69b8a93a64c854c3f4ca4138c560",
+          "size": 29645,
+          "mode": "100644"
+        }
+      },
+      "runtime/Pyautogui_server_for_window/bridge/windows_pyautogui_bridge_server.py": {
+        "previous_identity": {
+          "sha256": "2e77af1976f4f5c3c830424a5f1f65d7305c635ea5f0daf007a2b43f8d73b164",
+          "size": 345457,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "1eaee36c6e425ae322215b3683dad61240e1eaa2cea88f1591cc70ec3a974ae0",
+          "size": 349969,
+          "mode": "100644"
+        }
+      },
+      "runtime/Pyautogui_server_for_window/release_manifest.json": {
+        "previous_identity": {
+          "sha256": "8e3ac020c62ff0b83e16e30cb49c32261c67bb7a90c69e2ac0fc9de8b412cefa",
+          "size": 411,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "2b34d57ca2c3b04ffddd2249755642970745639b3480ea1b842e8b09f595f3ed",
+          "size": 488,
+          "mode": "100644"
+        }
+      },
+      "runtime/Pyautogui_server_for_window/scripts/build_exe.ps1": {
+        "previous_identity": {
+          "sha256": "36f57dff9ed5c5ad64193331ff0daccc8a188ffbb0a2495739b12254ecd1b14c",
+          "size": 2485,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "1fc39cb64d7c44dee4ce942d811c57e0cafdf26abe5e32ea563e50df2acaffdf",
+          "size": 2622,
+          "mode": "100644"
+        }
+      },
+      "runtime/agents/equipment/agent.py": {
+        "previous_identity": {
+          "sha256": "efea185d74ff3616a1dc4865408e4a7399d771fb2efbebaec80eac5a16939792",
+          "size": 255724,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "5887120a5b6b891b2b8771b591176775b23617a26e02dab8fb267dc9179cb161",
+          "size": 262158,
+          "mode": "100644"
+        }
+      },
+      "runtime/agents/equipment/computer_use.py": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "e36b8f3cd2a4643f082a9100bda0c425f06ed34be6108ae6dd5279731d2a7cb2",
+          "size": 23147,
+          "mode": "100644"
+        }
+      },
+      "runtime/device_bridges/windows_pyautogui/bridge.py": {
+        "previous_identity": {
+          "sha256": "51d63fbf61d7397bedf935d290ef02531eeba172ef42374ee0e9e4a0e83f76f7",
+          "size": 137870,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "db0e384e157edf5fdc84da512bb0f045235c5913ba378413d70140029d566622",
+          "size": 143795,
+          "mode": "100644"
+        }
+      },
+      "runtime/device_bridges/windows_pyautogui/module.py": {
+        "previous_identity": {
+          "sha256": "02e4f7d8b308314efadf2a2afbb84632979ddbfed5b7481aca97081b24e8d279",
+          "size": 3627,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "094ca11c269b4d59821944cc088c4f1f50e7bdf8f9e7a999c532717f76d59ce1",
+          "size": 3933,
+          "mode": "100644"
+        }
+      },
+      "runtime/device_bridges/windows_pyautogui/tools.py": {
+        "previous_identity": {
+          "sha256": "7060ad375915f2fe36dada5a3f5a2aaeaeb4ecff005445220d78e97ec90bef8a",
+          "size": 4769,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "202d3bef303394babf83d972e9eb6014995f12f545cb8844229f36af9dc63462",
+          "size": 9011,
+          "mode": "100644"
+        }
+      },
+      "runtime/install/windows_pyautogui_bridge_server.py": {
+        "previous_identity": {
+          "sha256": "2e77af1976f4f5c3c830424a5f1f65d7305c635ea5f0daf007a2b43f8d73b164",
+          "size": 345457,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "1eaee36c6e425ae322215b3683dad61240e1eaa2cea88f1591cc70ec3a974ae0",
+          "size": 349969,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/integration/test_equipment_computer_use_execution.py": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "f007e0daaeb9bd70f3336978a76d576a18084e5b815f158a835c64c80c2a8314",
+          "size": 16049,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/integration/test_equipment_profile_workspace_api.py": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "db745fbf7228eefc23a6e747c80ae8592d4f491dedd5610abaa097c6d3acbf78",
+          "size": 22743,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/integration/test_equipment_skill_api.py": {
+        "previous_identity": {
+          "sha256": "863aa0f6e0386fcfda3d1c71f8f8c817f9f964c151987e39b7a9e8ac32efe373",
+          "size": 72702,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "52b4c2992949bc9f02a89179f0d0ba5e236d8e5dbac5988625c86d8c1e062618",
+          "size": 74816,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/js/equipment_computer_use_controls.test.cjs": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "21afeb69c9f79ec9cd76d5f74314b376361afb38c8920a46e04bae89e81b48e8",
+          "size": 24269,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/unit/test_equipment_computer_use_contract.py": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "25216f04e9a05b134d20038a6643ddc4c7a23e19dedec0790b8e85a42d75637d",
+          "size": 13128,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/unit/test_equipment_computer_use_runner.py": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "d53d24f7b9398ea8e477283519920a231d9667e26e84bfad7218566700de3b70",
+          "size": 23612,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/unit/test_equipment_computer_use_settings.py": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "5327dd277d9bde5e8dda08046b96e5c234a22b8545a44ddbd4b267a45a062f9f",
+          "size": 3302,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/unit/test_equipment_computer_use_worker.py": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "76a149b7552984891c908dc68510d8f9f949b960b2c41c49f2aebea934923935",
+          "size": 25089,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/unit/test_equipment_pyautogui_bridge.py": {
+        "previous_identity": {
+          "sha256": "be84e1c4763ce4f8b1f346f648437002b3decf66f9add80ff885fe252e907cd3",
+          "size": 71253,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "750c4689739edfc71bf6823010f7f7e345bda36b398a4febdb9bf41d22bde46a",
+          "size": 76627,
+          "mode": "100644"
+        }
+      },
+      "runtime/utils/equipment_computer_use_settings.py": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "3b7f97d3c275f22339525bd977da6aafdbcda3f0da47c92fffbbbe645f2fac63",
+          "size": 3653,
+          "mode": "100644"
+        }
+      },
+      "runtime/utils/equipment_skill_runtime.py": {
+        "previous_identity": {
+          "sha256": "ece67c9af3f656c23663c204623ea5e7426fe03e57888671881d629e88c73bac",
+          "size": 56168,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "7f9f294cb7fc937009546f533179a9a5423eabdb085e652afec4873c38f1ea19",
+          "size": 59759,
+          "mode": "100644"
+        }
+      },
+      "runtime/utils/equipment_skill_workflow.py": {
+        "previous_identity": {
+          "sha256": "e82431df92b0fc32c734dce5d26b17bd2e0275c4810ca4ddea27163ca46555df",
+          "size": 11099,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "cdf44a879883ae9979a1dc12ba6893d585030b45259eff6a89207439d7bc1a36",
+          "size": 11459,
+          "mode": "100644"
+        }
+      },
+      "runtime/web/static/equipment_computer_use_settings.js": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "f120ae80ee03b7c2d1ce7bcef281382881ad3c190558db06af943a44e4694d6e",
+          "size": 1371,
+          "mode": "100644"
+        }
+      },
+      "runtime/web/static/equipment_skill_workflow_editor.js": {
+        "previous_identity": {
+          "sha256": "32890af2941f161db955a542856289d0bce61d533cdda5b80751277cf1a228bf",
+          "size": 28513,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "1dbb82fcd2f4c0d5882d16e83433afd2708d999a40f95b9f71375352f0b3957c",
+          "size": 30573,
+          "mode": "100644"
+        }
+      },
+      "runtime/web/static/windows_equipment.js": {
+        "previous_identity": {
+          "sha256": "1679aa0d593a0a4ba5258d6f6e33eeb7754fd04c295998cbc86b93b3c7de6dad",
+          "size": 111252,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "452a9d794be7837d017521871e61968d5e24a039bbff74576956b76590660dd4",
+          "size": 122856,
+          "mode": "100644"
+        }
+      },
+      "runtime/web/templates/equipment_skill_workflow_editor.html": {
+        "previous_identity": {
+          "sha256": "9085d9dd1c76243fb92e96d06940ae0bd891f517d2f58fd0bd642b15e0874be9",
+          "size": 6529,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "52e6af36d8c769763c4afe29a1f88b13bcd6778d8abd90c9bba4ce366aa6e506",
+          "size": 6921,
+          "mode": "100644"
+        }
+      },
+      "runtime/web/templates/windows_equipment.html": {
+        "previous_identity": {
+          "sha256": "971cf8f662510837347211c26b8f06f51b4f5288d1eee67c33d39f18ebd6d5b9",
+          "size": 28715,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "aed3aad52aa815c72bc5f0edc64e0450306d4ff714d6228e7243ad5d0802afb0",
+          "size": 31831,
+          "mode": "100644"
+        }
+      },
+      "system/agents/equipment_agent.md": {
+        "previous_identity": {
+          "sha256": "2ca8e0c1ac8a767530dd1bdc96ec6b9790d41751ea75d70f3a03995eda159e00",
+          "size": 42973,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "fe5de4b2313a048aa757c479b3b51fa69469c4ac9cabef097d361bd2c44cf69d",
+          "size": 46450,
+          "mode": "100644"
+        }
+      },
+      "system/device_bridges/windows_pyautogui_bridge.md": {
+        "previous_identity": {
+          "sha256": "19c2824835a98d80b88a494bf3511dbe485c48efddd7fbe34a450dc088f908aa",
+          "size": 22345,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "6c9edacc3eb572b8f9c8f969f51ab05995a8839cae2a202ec89408c6c667d717",
+          "size": 27440,
+          "mode": "100644"
+        }
+      },
+      "system/maintenance/plans/2026-10-26-equipment-computer-use-design.md": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "21e6655bb0e8ab5c7f4ca026c7c8c222e8671ee9b677174a7a17c3bf0535f5c1",
+          "size": 18030,
+          "mode": "100644"
+        }
+      },
+      "system/maintenance/plans/2026-10-26-equipment-computer-use-implementation.md": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "2d469900e4c247662cc7363f0846fa05c17070c9b69ac587fb279ec51ecb3a87",
+          "size": 20138,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/fixtures/equipment_computer_use/README.md": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "ef2462a73f637d253b031f63437d5807d1ab7735b4dfe7f4a41dbf50d866789e",
+          "size": 1209,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/fixtures/equipment_computer_use/adapter.py": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "6e77d4c8a57d7ac01254f37fea3dbdf27ec9876c5a607bad8448cb1c960678b8",
+          "size": 2979,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/fixtures/equipment_computer_use/after.ppm": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "2bb9f1cd95bc2a90e5764f809ef8f571b6c7808cdfe33bc5f2490797f009f897",
+          "size": 127,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/fixtures/equipment_computer_use/before.ppm": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "8e4281644a30bd1fe71c8447be48efe99d53e5123a5f566248e0715e1bb2fa05",
+          "size": 119,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/fixtures/equipment_computer_use/computer_use_demo_v1.json": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "011ac44996f9620a5ee86c05c09f44801685ece4e6167a6fd246477b2045bcc8",
+          "size": 1419,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/integration/test_equipment_computer_use_e2e.py": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "c40134e20eb4229dfb17967e809bd26031d51cadf44090c078f5d76c8647d05e",
+          "size": 13513,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/js/module_execution_editor.test.cjs": {
+        "previous_identity": {
+          "sha256": "164e8ecdbd3978c0387c2cab8784d6513f240b3b519f42f3aaf445f5da2c2037",
+          "size": 33545,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "2badd4b1a0c53f565a7b0a221e6813e474bb0f7dd108617d7473b084669eb557",
+          "size": 33795,
           "mode": "100644"
         }
       }

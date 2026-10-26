@@ -419,6 +419,82 @@ not hard-coded agent or worker logic.
 
 ## Current Verification
 
+### Optional computer-use protocol
+
+Added 2026-10-26; this section describes synthetic-tested behavior, not a new
+Windows/UTM deployment claim. Existing legacy `/execute` and Profile defaults
+are unchanged. `computer_use` is explicitly selected in a Profile's Equipment
+Workspace or Runtime IDE. Saving settings changes the next execution only.
+
+The worker must ship the canonical portable contract and runtime beside the
+server (`runtime/Pyautogui_server_for_window/bridge/computer_use_{contract,runtime}.py`).
+Older single-file workers can retain legacy functionality but report computer
+use unavailable. Follow the separately authorized Saved Worker update procedure;
+do not assume a host wheel update updates Windows. `/capabilities` must advertise
+`computer_use_v1`, and `computer_use_limits.program_hash_binding` for any policy
+using registered action/evidence programs. The host never silently falls back
+to `/execute` or to another worker.
+
+Registered tools `equipment.pyautogui.computer_use_{acquire,observe,act,status,verify,release}`
+call authenticated `/computer-use/<operation>` routes. The selected transport
+and credentials are privately pinned per execution. Run, cycle, specimen,
+Profile, Skill/version, worker and endpoint identity cannot drift during a run.
+The durable worker ledger records intent before native input; `status` is
+read-only reconciliation for the same action ID. A new ID is never a retry.
+
+Permissions are owned by the exact Skill's hashed `workflow.computer_use`
+policy (`ax4lab.equipment_computer_use.policy.v1`). Authors declare the exact
+application title, window-relative target/anchor rectangles and RGB SHA-256,
+action allowlists, optional allowed keys/chords, protected/masked rectangles,
+host-provided runtime-value keys and nonempty image/evidence postconditions.
+Target/anchor/evidence overlap with masks and protected target overlap fail
+closed. Model text cannot supply an export destination or executable code.
+Registered physical-action and read-only evidence programs are bound to the
+validated deployed bodies; a changed body or undeclared program is refused.
+Masked legacy programs remain unsupported. See the synthetic fixture under
+`runtime/tests/fixtures/equipment_computer_use/` for a non-equipment example.
+
+The host's already configured OpenAI-compatible/vLLM endpoint must explicitly
+declare vision and accept image input. Readiness inspects metadata/capability
+only: it neither starts/loads a model nor proves model quality. Strict JSON
+Schema output is requested where supported; only an explicit schema-unsupported
+400/422 allows JSON-object fallback on the same endpoint, with the same local
+strict parser. No provider/model fallback is allowed for screenshots.
+
+Limits: default 64 turns (1–256), 120-second request timeout (1–300),
+150-second maximum observation age (1–600); two format attempts per observation.
+Each inference receives one latest masked image and bounded receipt summaries;
+each mutating decision needs a fresh observation. The existing enclosing runtime
+deadline is not renewed per turn. Images over 8 MiB are rejected, not resized.
+`complete` is only a request to verify actual postconditions and release ownership.
+The existing Skill/flow lifecycle, Vision Link, current-cycle CSV and clearance
+gates retain ownership of handoff.
+
+Artifacts include masked observations, decisions, pre-dispatch intent, receipts,
+timing/usage, verification and release in a hash-linked JSON chain. Follow the
+execution's `request_log_ref` / `output_artifacts`; preserve worker
+`computer_use` ledger files too. Public artifacts redact lease tokens and
+endpoint credentials, but screenshots may still contain authorized visible data.
+An uncertain effect (`action_requires_operator`), lost private lease after
+restart (`resume_requires_operator`) or unconfirmed release
+(`release_requires_operator`) must not be retried, expired away or fixed by
+deleting the ledger. Reconcile the actual desktop/equipment and receipts with
+a trained operator; there is no automatic operator-reset API.
+
+Rollback is to save `skill_flow` for future executions, retaining the validated
+legacy programs and package. It does not convert or unlock an active/uncertain
+computer-use execution. No fixture installs itself into an operator Profile.
+Actual endpoint inference, Windows focus/DPI and real UTM hardware acceptance
+remain unrun in this delivery.
+
+Upstream design reference (no source copied or model dependency): UI-TARS
+Desktop commit `3ac2cb8d946d78d5ff92ad17b318eaafa18c178c`, Apache-2.0,
+[GUIAgent](https://github.com/bytedance/UI-TARS-desktop/blob/3ac2cb8d946d78d5ff92ad17b318eaafa18c178c/multimodal/gui-agent/agent-sdk/src/GUIAgent.ts)
+and [ActionParserHelper](https://github.com/bytedance/UI-TARS-desktop/blob/3ac2cb8d946d78d5ff92ad17b318eaafa18c178c/multimodal/gui-agent/action-parser/src/ActionParserHelper.ts).
+The observe-after-action/operator separation and explicit coordinate transform
+ideas inform this original Python integration; the permissive text parser,
+shell tools and TypeScript desktop stack are not vendored.
+
 The 2026-09-13 package migration passed the guarded Equipment owner/module/bridge
 selection (285 tests) and the focused frontend/API/control-view selections. The
 checks observed zero physical calls and no denied effects. An unchanged second

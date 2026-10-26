@@ -208,6 +208,50 @@ Remote execution, screenshot, and artifact routes require the exchanged internal
 
 ## Safety boundaries
 
+### Optional bounded computer use (2026-10-26)
+
+Computer use is opt-in per Linux Equipment Profile; the default remains
+`skill_flow`. It is an original Python integration, not a UI-TARS model/runtime
+dependency. A separately authorized worker update must include
+`bridge/computer_use_contract.py` and `bridge/computer_use_runtime.py` together
+with the server. Copying only the old single-file installer preserves legacy
+operation but does not provide this capability. Check `/capabilities` for
+`computer_use_v1`; policies using registered programs additionally require
+`computer_use_limits.program_hash_binding`. Do not update/restart an active
+worker merely to follow this document. Frozen workers must be rebuilt with the
+packaged modules; the existing build script includes them.
+
+Authenticated POST `/computer-use/{acquire,observe,act,status,verify,release}`
+uses a private desktop lease plus execution/run/cycle/specimen/Profile identity.
+Only the Linux host generates action IDs and payload hashes. A repeated ID
+returns its receipt, not a second effect. Legacy mutations are excluded while
+the desktop is owned. A timeout is not evidence that an input did not happen.
+
+The versioned Skill's `workflow.computer_use` policy declares the exact window,
+window-relative targets and RGB-pixel SHA-256 anchors, allowed actions/keys/chords,
+protected regions, masked regions, host runtime-value keys, registered program
+IDs and nonempty postconditions. Physical operations belong in registered
+programs, not unrestricted GUI sequences. Action/evidence program bodies must
+match the host's validated package hashes; evidence programs are read-only.
+Masking is applied before images leave the worker. Mask overlap with targets,
+anchors or postconditions is rejected; masked legacy programs are unsupported
+(`masking_program_unsupported`). Never put secrets into visible unmasked regions.
+
+Worker receipts and ownership live under the worker artifact root's `computer_use`
+directory; host hash-linked observation/decision/intent/receipt/verification
+artifacts are referenced by the Skill execution. Preserve both on failure.
+`ambiguous`, `in_progress`, an unknown action receipt, or lost private lease
+context requires an operator to reconcile the physical/UI state and durable
+records. Do not clear the ledger, replace execution IDs, or retry the mutation.
+There is no automatic reset/recovery API. Confirmed release is required for
+success; `release_requires_operator` is not a completed Skill.
+
+The first acceptance fixture is test-only `computer_use_demo_v1`, never
+automatically installed in a Profile. Synthetic tests do not validate real
+Windows focus/DPI, UTM mapping, hardware or model performance. See the
+[bridge reference](../../system/device_bridges/windows_pyautogui_bridge.md#optional-computer-use-protocol)
+for host setup and rollback.
+
 - Keep `pyautogui.FAILSAFE` enabled.
 - Programs must contain only allowed, bounded actions.
 - Do not put passwords, API keys, pairing codes, or internal keys in program payloads.

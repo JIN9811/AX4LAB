@@ -296,6 +296,48 @@ Resume은 복구 가능한 단계를 반복할 수 있으므로 물리 동작의
 
 ## 완료 체크와 추가 문서
 
+### 선택 기능: Equipment computer use — 합성 검증만 완료
+
+기본값은 **Skill flow**(`skill_flow`)입니다. Equipment Workspace 또는 Runtime
+IDE의 Equipment 화면에서 올바른 Profile을 선택한 뒤 **Computer use**와 제한을
+저장합니다. 기본값은 64턴, 요청 제한 120초, 화면 최대 나이 150초이며 허용 범위는
+각각 1–256, 1–300, 1–600입니다. 저장은 다음 실행에만 적용되고 실행 중 설정은
+고정됩니다. Vision Link와 기존 검증은 독립적으로 유지됩니다. 설정 저장과 준비
+상태 확인은 실행이나 모델 시작·로드를 수행하지 않습니다.
+
+실행 전 별도 승인된 Windows worker 업데이트가 필요합니다. 준비 상태에서
+`computer_use_v1`을 확인하고, 등록 프로그램을 쓰면
+`computer_use_limits.program_hash_binding`도 확인합니다. 예전 단일 파일 worker는
+기존 실행만 지원할 수 있습니다. 이미 구성된 vision 지원 OpenAI 호환/vLLM
+endpoint를 선택합니다. 다른 모델/provider로 자동 전환하지 않으며 준비 상태는
+메타데이터 확인이지 모델 품질 검증이 아닙니다.
+
+Workspace에서 정확한 편집 가능 Skill 버전을 선택하여 **Workflow Editor**를
+엽니다. `workflow.computer_use`에 정확한 창 제목, 대상·동작과 픽셀 해시 앵커,
+보호·마스킹 영역, 허용 키·키 조합·런타임 값, 등록 프로그램과 실제 완료 조건을
+작성합니다. **Apply → Check → Save** 후 기존 compile/validate/deploy 절차를
+따릅니다. 배포 버전은 수정할 수 없습니다. 합성 좌표를 실제 장비에 복사하지
+마세요. 물리 동작은 등록 프로그램으로, 근거 검사는 읽기 전용 프로그램으로
+선언합니다. 자세한 권한·worker 조건은
+[브리지 참조](../../system/device_bridges/windows_pyautogui_bridge.md#optional-computer-use-protocol)를 확인합니다.
+
+모델의 완료 응답만으로 성공하지 않습니다. worker 완료 조건과 lease 해제 확인이
+필요하며 기존 Vision·현재 cycle CSV·clearance 검증도 유지됩니다. 실행의
+턴/observation, receipt, verification과 해시로 연결된 `output_artifacts` /
+`request_log_ref`를 확인합니다. 실패 시 이 자료와 worker ledger를 보존합니다.
+효과가 불명확한 동작, 중단된 요청, 재시작으로 잃은 lease는 숙련 운영자가 실제
+화면·장비·기록을 대조해야 합니다. 새 ID로 재시도하거나 기록을 삭제하지 말고,
+timeout을 미실행 근거로 보지 마세요. 자동 reset API는 없고 해제 실패도 성공이
+아닙니다.
+
+중지하려면 다음 실행용 설정을 **Skill flow**로 저장합니다. 진행 중이거나 효과가
+불명확한 실행의 잠금 해제·기존 모드 전환은 하지 않습니다. 공개
+`computer_use_demo_v1` fixture는 테스트 임시 경로의 합성 이미지와 결과 파일만
+사용하고 운영 Profile에 자동 설치하지 않습니다. 실제 모델 추론, Windows
+focus/DPI, 실제 UTM 하드웨어 검증은 수행하지 않았습니다. 이 코드는 UI-TARS
+모델 의존성이 없는 독자 Python 통합이며 고정 upstream 설계 참조는 위 브리지
+문서에 있습니다.
+
 - 새 런 전에 물리 실행 범위를 선택할 수 있습니다.
 - 프린터·단독 롤아웃·에이전트 태스크별 저장 버튼을 구분합니다.
 - 한 후보의 원본 근거와 보관 파일을 찾을 수 있습니다.

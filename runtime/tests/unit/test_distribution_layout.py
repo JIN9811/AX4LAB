@@ -15,6 +15,17 @@ import pytest
 RUNTIME = Path(__file__).resolve().parents[2]
 
 
+def test_computer_use_distribution_contains_host_imports_and_browser_helper():
+    contract = json.loads((RUNTIME / 'distribution-files.json').read_text())
+    modules = {'agents/equipment/computer_use.py', 'utils/equipment_computer_use_settings.py',
+               'Pyautogui_server_for_window/bridge/computer_use_contract.py',
+               'Pyautogui_server_for_window/bridge/computer_use_runtime.py'}
+    assert modules <= set(contract['wheel'])
+    assert modules <= set(contract['sdist'])
+    assert 'web/static/equipment_computer_use_settings.js' in contract['bound_resources']
+    assert 'web/static/equipment_computer_use_settings.js' in contract['sdist']
+
+
 def test_source_maintenance_receipts_are_separate_and_validated():
     from copy import deepcopy
     from tools.repository_layout.checks import public_release_records, source_maintenance_records
@@ -178,6 +189,24 @@ def test_built_archives_match_positive_manifest_and_reject_injected_files(tmp_pa
             mode = archive.getinfo(name).external_attr >> 16
             assert mode & 0o777 == (RUNTIME / source).stat().st_mode & 0o777, name
             assert not mode & 0o170000 == 0o120000
+        extracted = tmp_path / 'installed-wheel'
+        archive.extractall(extracted)
+    # -I removes cwd/PYTHONPATH: these must really import from the wheel, never
+    # the source checkout or an editable-install fallback. Dependencies remain
+    # the existing interpreter's public site-packages.
+    check = subprocess.run([sys.executable, '-I', '-c', '''
+import importlib, pathlib, sys
+root = pathlib.Path(sys.argv[1]).resolve()
+sys.path.insert(0, str(root))
+for name in ('Pyautogui_server_for_window.bridge.computer_use_contract',
+             'Pyautogui_server_for_window.bridge.computer_use_runtime',
+             'utils.equipment_computer_use_settings', 'agents.equipment.computer_use'):
+    module = importlib.import_module(name)
+    assert pathlib.Path(module.__file__).resolve().is_relative_to(root), module.__file__
+from utils.equipment_computer_use_settings import normalize_settings
+assert normalize_settings(None)['execution_mode'] == 'skill_flow'
+''', str(extracted)], cwd=tmp_path, capture_output=True, text=True)
+    assert check.returncode == 0, check.stdout + check.stderr
     with tarfile.open(sdist) as archive:
         members = [m for m in archive.getmembers() if not m.isdir()]
         names = [m.name.split('/', 1)[1] for m in members]

@@ -359,10 +359,14 @@ test('Equipment Skill Flow refresh cannot overwrite a catalog-backed module tab 
  const tab={id:'module:equipment',moduleId:'equipment',modulePayload:{module:{id:'equipment',execution_graph:{entry:'task'}}},graph:executionGraph,baselineGraph:structuredClone(executionGraph),dirty:false};
  let rendered=0,workspaceRendered=0;
  const context={MODULE_TAB_PREFIX:'module:',runtimeEquipmentFlowProfileId:'utm_windows_v1',runtimeEquipmentProfiles:[],runtimeEquipmentFlowPayload:{},
+   document:{getElementById:()=>null},URLSearchParams,
    graphTabs:[tab],activeGraphTabId:'module:equipment',cloneConfig:structuredClone,
    requestJson:async url=>url==='/api/equipment/profiles'?{profiles:[{profile_id:'utm_windows_v1'}]}:{graph:{id:'equipment-skill-flow'}},
    renderRuntimeEquipmentSkillFlow:()=>{workspaceRendered+=1;},renderGraph:()=>{rendered+=1;},
  };
+ // Keep the real draft capture path; this fixture has no computer-use form.
+ runtimeFunction('runtimeComputerUseFormValues',context);
+ runtimeFunction('captureRuntimeComputerUseDraft',context);
  const refresh=runtimeFunction('loadRuntimeEquipmentSkillFlow',context);
  await refresh('utm_windows_v1');
  assert.equal(tab.graph.id,'module:equipment');

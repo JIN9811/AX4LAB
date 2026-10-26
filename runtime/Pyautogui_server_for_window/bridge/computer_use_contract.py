@@ -246,8 +246,8 @@ def parse_decision(text: str, observation_id: str) -> dict:
 
 def decision_json_schema() -> dict:
     """Provider guidance only: local strict parsing is always authoritative."""
-    identifier = {"type": "string", "pattern": "^[A-Za-z0-9_.:-]{1,128}$"}
-    key = {"type": "string", "pattern": "^[a-z0-9_]{1,32}$"}
+    identifier = {"type": "string", "pattern": "^[A-Za-z0-9_.:-]{1,128}(?![\\s\\S])"}
+    key = {"type": "string", "pattern": "^[a-z0-9_]{1,32}(?![\\s\\S])"}
     variants = []
     for kind in sorted(_GUI_ACTIONS | {"invoke_program"}):
         properties = {"type": {"const": kind}}
