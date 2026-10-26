@@ -54292,8 +54292,44 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "2badd4b1a0c53f565a7b0a221e6813e474bb0f7dd108617d7473b084669eb557",
-          "size": 33795,
+          "sha256": "15f88e856323ec86ec7d360d52034ac12dcdf6664dd83ed2c4ba08c60dfc91ff",
+          "size": 33908,
+          "mode": "100644"
+        }
+      },
+      "system/knowledge/wiki/equipment-role.md": {
+        "previous_identity": {
+          "sha256": "72012a0ea3b41a1f29fadd0af26375f0be9d9afeb5d1e87b31af496239c675eb",
+          "size": 2302,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "65327e3c9c274d462a762aabd52ee6dfada6c1936251068c6586242c4e3ead67",
+          "size": 2302,
+          "mode": "100644"
+        }
+      },
+      "system/knowledge/wiki/closed-loop.md": {
+        "previous_identity": {
+          "sha256": "1c2c91bc8cea5eba2ea4c369129b7b277b019598472ab6ac98fa3d3af509d948",
+          "size": 2680,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "f2b2918f45293367fd0f86a74e46681c4da21dd37ebc82611303a92183913751",
+          "size": 2680,
+          "mode": "100644"
+        }
+      },
+      "system/knowledge/wiki/recovery.md": {
+        "previous_identity": {
+          "sha256": "e42e78c3bc0a6688cf07dfeec43cf1256037a9e66dd3f5a7747e7b5979a9297b",
+          "size": 2578,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "87dd1f253ea8bcc109df0fe425469a3f63570783217dd1ee1c399fbb16e2e05f",
+          "size": 2578,
           "mode": "100644"
         }
       }
