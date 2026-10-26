@@ -42,6 +42,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO, StringIO
 from dataclasses import dataclass
 import hashlib
+import importlib
 import importlib.util
 import ipaddress
 import json
@@ -65,6 +66,33 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import HTTPRedirectHandler, Request as URLRequest, build_opener, urlopen
 from uuid import uuid4
+
+
+# Optional canonical package: legacy standalone installers remain importable.
+try:
+    COMPUTER_USE = importlib.import_module("computer_use_runtime")
+except ImportError:
+    try:
+        COMPUTER_USE = importlib.import_module("Pyautogui_server_for_window.bridge.computer_use_runtime")
+    except Exception:
+        COMPUTER_USE = None
+except Exception:
+    COMPUTER_USE = None
+_COMPUTER_USE_CONTROLLER = None
+_COMPUTER_USE_INIT_LOCK = threading.Lock()
+
+
+def _computer_use_controller():
+    global _COMPUTER_USE_CONTROLLER
+    if COMPUTER_USE is None:
+        return None
+    with _COMPUTER_USE_INIT_LOCK:
+        root = ARTIFACT_ROOT / "computer_use"
+        if _COMPUTER_USE_CONTROLLER is None or _COMPUTER_USE_CONTROLLER.root != root:
+            worker_id = "desktop-" + hashlib.sha256((socket.gethostname() + str(root.resolve())).encode()).hexdigest()[:24]
+            _COMPUTER_USE_CONTROLLER = COMPUTER_USE.ComputerUseController(
+                root, COMPUTER_USE.NativeDesktopAdapter(sys.modules[__name__]), worker_id)
+        return _COMPUTER_USE_CONTROLLER
 
 
 def _normalize_bridge_platform(value: str, *, system_name: str | None = None) -> str:
@@ -3276,6 +3304,8 @@ def _capability_catalog() -> dict[str, Any]:
         "action_count": len({action for actions in families.values() for action in actions}),
         "excluded": ["shell", "arbitrary_python", "file_delete", "password_entry", "window_close", "process_terminate"],
         "failsafe_required": True,
+        "computer_use_v1": COMPUTER_USE is not None,
+        "computer_use_limits": {"masked_registered_programs": False, "native_context": "windows_per_monitor_dpi_and_focus"},
     }
 
 
@@ -7074,6 +7104,40 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
+        if path.startswith("/computer-use/"):
+            # No localhost/setup bypass: this route is always authenticated.
+            if not self._require_auth(path, "POST") or not self._require_json_content_type():
+                return
+            body_ok, payload = self._read_json_body(max_bytes=2 * 1024 * 1024)
+            if not body_ok:
+                return
+            try:
+                controller = _computer_use_controller()
+                if controller is None:
+                    self._send(200, {"ok": False, "status": "blocked", "failure_code": "computer_use_unavailable"})
+                    return
+                principal = hashlib.sha256(self.headers.get(TOKEN_HEADER, "").encode()).hexdigest()
+                result = controller.handle(path.removeprefix("/computer-use/"), payload, principal)
+                self._send(200, result)
+            except Exception:
+                self._send(200, {"ok": False, "status": "blocked", "failure_code": "computer_use_unavailable"})
+            return
+        self._legacy_owned_request(self._legacy_POST)
+
+    def _legacy_owned_request(self, callback) -> None:
+        try:
+            controller = _computer_use_controller()
+            if controller is None:
+                callback()
+            else:
+                with controller.legacy_mutation():
+                    callback()
+        except Exception as error:
+            code = getattr(error, "code", "computer_use_unavailable")
+            self._send(409, {"ok": False, "status": "blocked", "failure_code": code})
+
+    def _legacy_POST(self) -> None:
+        path = urlparse(self.path).path
         if path != "/pairing/complete" and not self._require_auth(path, "POST"):
             return
         if not self._require_json_content_type():
@@ -7193,6 +7257,9 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, result)
 
     def do_DELETE(self) -> None:
+        self._legacy_owned_request(self._legacy_DELETE)
+
+    def _legacy_DELETE(self) -> None:
         path = urlparse(self.path).path
         if not self._require_auth(path, "DELETE"):
             return

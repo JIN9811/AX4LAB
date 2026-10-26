@@ -472,6 +472,34 @@ class WindowsPyAutoGUIBridge(BaseBridge):
             step_trace=[{"step": "PRECHECK", "status": "blocked", "detail": "unknown command"}],
         )
 
+    def computer_use(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Use the authenticated leased protocol; never fall back to /execute."""
+        tool = f"equipment.pyautogui.computer_use_{operation}"
+        def blocked(code, message):
+            return self._failure(tool=tool, mode="live", status="blocked", failure_code=code, message=message)
+        if operation not in {"acquire", "observe", "act", "status", "verify", "release"}:
+            return blocked("invalid_request", "Unknown computer-use operation")
+        if not self._should_use_live(payload, for_execution=True):
+            return blocked("computer_use_live_required", "Computer use requires an explicitly selected live worker")
+        precheck = self._live_precheck(require_execute=operation in {"acquire", "act"}, payload=payload)
+        if precheck:
+            return {**precheck, "tool": tool}
+        if not self._token(payload):
+            return blocked("PYAUTOGUI_TOKEN_REQUIRED", "Computer use requires worker authentication")
+        profile = str(payload.get("equipment_profile_id") or self.config.equipment_profile_id)
+        if profile != self.config.equipment_profile_id and not {profile, self.config.equipment_profile_id} <= {"utm_windows_v1", "windows_desktop_v1"}:
+            return blocked("profile_mismatch", "Worker client belongs to another equipment profile")
+        capability = self._live_get(tool, "/capabilities", payload)
+        if not capability.get("ok"):
+            return capability
+        if capability.get("computer_use_v1") is not True:
+            return blocked("computer_use_unavailable", "Selected worker does not support computer_use_v1")
+        fields = {"execution_id", "run_id", "cycle_id", "specimen_id", "equipment_profile_id", "session_id", "lease_token",
+                  "policy", "runtime_values", "frame_max_age_s", "lease_seconds", "action_id", "observation_id", "action", "payload_sha256"}
+        request = {key: value for key, value in payload.items() if key in fields}
+        request["equipment_profile_id"] = profile
+        return self._live_post(tool, f"/computer-use/{operation}", request, payload)
+
     def health(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """Return Windows bridge health or simulator health."""
         payload = payload or {}
@@ -2065,7 +2093,7 @@ class WindowsPyAutoGUIBridge(BaseBridge):
                 step_trace=[{"step": "CONNECT", "status": "blocked", "detail": str(exc.response.status_code)}],
             )
         except httpx.ReadTimeout as exc:
-            if path == "/execute":
+            if path in {"/execute", "/computer-use/act"}:
                 result = self._failure(
                     tool=tool,
                     mode="live",
@@ -2091,6 +2119,10 @@ class WindowsPyAutoGUIBridge(BaseBridge):
                 step_trace=[{"step": "CONNECT", "status": "failed", "detail": exc.__class__.__name__}],
             )
         except Exception as exc:
+            if path == "/computer-use/act":
+                return {**self._failure(tool=tool, mode="live", status="effect_unknown",
+                    failure_code="PYAUTOGUI_EFFECT_UNKNOWN", message="Action transport failed; reconcile the same action ID with status."),
+                    "attempted": True, "retryable": False, "operator_intervention_required": True}
             return self._failure(
                 tool=tool,
                 mode="live",

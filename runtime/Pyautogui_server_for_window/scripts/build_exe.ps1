@@ -41,6 +41,8 @@ try {
 }
 
 $hiddenImports = @(
+    "--hidden-import=computer_use_runtime",
+    "--hidden-import=computer_use_contract",
     "--hidden-import=pyautogui",
     "--hidden-import=pyscreeze",
     "--hidden-import=mouseinfo",
@@ -65,6 +67,7 @@ $demoData = "$projectRoot\demo;demo"
     --workpath (Join-Path $projectRoot "build\pyinstaller") `
     --specpath (Join-Path $projectRoot "build") `
     --add-data $demoData `
+    --paths (Join-Path $projectRoot "bridge") `
     $hiddenImports `
     (Join-Path $projectRoot "bridge\windows_pyautogui_bridge_server.py")
 

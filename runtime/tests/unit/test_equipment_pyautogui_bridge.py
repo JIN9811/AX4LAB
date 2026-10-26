@@ -40,6 +40,65 @@ def _bridge(tmp_path: Path, *, mode: str = "simulator", allow_live: bool = False
     return WindowsPyAutoGUIBridge(cfg)
 
 
+def test_computer_use_negotiates_capability_and_never_falls_back(tmp_path, monkeypatch):
+    bridge = _bridge(tmp_path, mode="live", allow_live=True)
+    monkeypatch.setenv(bridge.config.bridge_url_env, "http://worker.invalid")
+    monkeypatch.setenv(bridge.config.token_env, "secret")
+    requests = []
+    supported = False
+    def endpoint(request):
+        requests.append(request)
+        if request.url.path == "/capabilities":
+            return httpx.Response(200, json={"ok": True, "computer_use_v1": supported})
+        return httpx.Response(200, json={"ok": True, "status": "acquired", "session_id": "s", "lease_token": "t"})
+    original = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kw: original(transport=httpx.MockTransport(endpoint), **kw))
+    result = bridge.computer_use("acquire", {"runtime_mode": "live", "equipment_profile_id": "utm_windows_v1"})
+    assert result["failure_code"] == "computer_use_unavailable"
+    assert [r.url.path for r in requests] == ["/capabilities"]
+    supported = True
+    result = bridge.computer_use("acquire", {"runtime_mode": "live", "equipment_profile_id": "utm_windows_v1"})
+    assert result["session_id"] == "s"
+    assert requests[-1].url.path == "/computer-use/acquire"
+    assert requests[-1].headers[bridge.config.token_header] == "secret"
+    assert "runtime_mode" not in json.loads(requests[-1].content)
+
+
+def test_computer_use_live_gate_auth_and_timeout_reconciliation(tmp_path, monkeypatch):
+    bridge = _bridge(tmp_path, mode="live", allow_live=False)
+    assert not bridge.computer_use("acquire", {"runtime_mode": "live"})["ok"]
+    bridge.config.allow_live_execute = True
+    monkeypatch.setenv(bridge.config.bridge_url_env, "http://worker.invalid")
+    assert bridge.computer_use("acquire", {"runtime_mode": "live"})["failure_code"] == "PYAUTOGUI_TOKEN_REQUIRED"
+    monkeypatch.setenv(bridge.config.token_env, "secret")
+    effects = []
+    def endpoint(request):
+        if request.url.path == "/capabilities":
+            return httpx.Response(200, json={"ok": True, "computer_use_v1": True})
+        if request.url.path == "/computer-use/act":
+            effects.append(json.loads(request.content)["action_id"])
+            raise httpx.ReadTimeout("response lost")
+        return httpx.Response(200, json={"ok": True, "status": "completed", "receipt": {"action_id": "a"}})
+    original = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kw: original(transport=httpx.MockTransport(endpoint), **kw))
+    request = {"runtime_mode": "live", "action_id": "a", "session_id": "s", "lease_token": "t"}
+    result = bridge.computer_use("act", request)
+    assert result["status"] == "effect_unknown" and result["retryable"] is False
+    assert bridge.computer_use("status", request)["status"] == "completed"
+    assert effects == ["a"]
+
+
+def test_computer_use_tools_are_profile_scoped_and_declared(tmp_path):
+    from device_bridges.windows_pyautogui.module import MODULE
+    registry = ToolRegistry()
+    register_equipment_tools(registry, repo_root=tmp_path)
+    for operation in ("acquire", "observe", "act", "status", "verify", "release"):
+        name = f"equipment.pyautogui.computer_use_{operation}"
+        assert name in registry.list_tools()
+        assert name in MODULE.describe()["tools"]
+        assert registry.call(name, {"runtime_mode": "test"})["failure_code"] == "computer_use_live_required"
+
+
 def test_simulator_program1_returns_completion_log(tmp_path: Path) -> None:
     bridge = _bridge(tmp_path)
 

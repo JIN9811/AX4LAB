@@ -11,6 +11,12 @@ MODULE = BridgeModule("windows_pyautogui", "1.0.0", json.dumps({
     "registration": "device_bridges.windows_pyautogui.tools.register_equipment_tools",
     "runtime_bridge_ids": ["windows_pyautogui_bridge"],
     "tools": [
+        "equipment.pyautogui.computer_use_acquire",
+        "equipment.pyautogui.computer_use_observe",
+        "equipment.pyautogui.computer_use_act",
+        "equipment.pyautogui.computer_use_status",
+        "equipment.pyautogui.computer_use_verify",
+        "equipment.pyautogui.computer_use_release",
         "equipment.pyautogui.capture_locator",
         "equipment.pyautogui.connection_status",
         "equipment.pyautogui.delete_candidate",

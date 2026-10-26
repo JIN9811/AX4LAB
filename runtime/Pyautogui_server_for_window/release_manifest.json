@@ -5,6 +5,8 @@
     "release_manifest.json",
     "START_WINDOWS_BRIDGE.cmd",
     "bridge/windows_pyautogui_bridge_server.py",
+    "bridge/computer_use_contract.py",
+    "bridge/computer_use_runtime.py",
     "scripts/bridge_self_updater.py",
     "scripts/bridge_supervisor.py",
     "scripts/install_bridge.ps1",

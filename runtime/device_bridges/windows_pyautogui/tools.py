@@ -112,6 +112,11 @@ def register_equipment_tools(
                           lambda payload, method=name: getattr(selected_bridge(payload or {}), method)(dict(payload or {})),
                           device="equipment:windows_pyautogui" if name in {"run", "capture_locator"} else None)
     registry.register("equipment.pyautogui.utm_profile", lambda payload: selected_bridge(payload or {}).utm_profile_status())
+    for operation in ("acquire", "observe", "act", "status", "verify", "release"):
+        registry.register(f"equipment.pyautogui.computer_use_{operation}",
+                          lambda payload, operation=operation: selected_bridge(payload or {}).computer_use(
+                              operation, {**dict(payload or {}), "equipment_profile_id": runtime_profile(payload or {})}),
+                          device="equipment:windows_pyautogui" if operation in {"acquire", "act", "verify", "release"} else None)
     registry.register("equipment.pyautogui.connection_status", lambda payload: selected_bridge(payload or {}).connection_status())
     registry.register("equipment.runtime.current", runtime_current)
     registry.register("equipment.runtime.list", runtime_list)
