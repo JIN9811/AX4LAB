@@ -1111,8 +1111,10 @@ def test_equipment_profile_preflight_preserves_frontend_vision_link_selection() 
 
 
 def test_equipment_profile_vision_link_selection_persists_per_profile(tmp_path: Path, monkeypatch) -> None:
+    from dataclasses import replace
+    from app import main
     settings_path = tmp_path / "equipment_workspace_settings.json"
-    monkeypatch.setattr("app.main.EQUIPMENT_WORKSPACE_SETTINGS_PATH", settings_path)
+    monkeypatch.setattr(main, "RUNTIME_PATHS", replace(main.RUNTIME_PATHS, memory_root=tmp_path))
     client = TestClient(app)
 
     disabled = client.post(
@@ -1125,14 +1127,20 @@ def test_equipment_profile_vision_link_selection_persists_per_profile(tmp_path: 
     assert disabled.json()["workspace_settings"] == {
         "vision_link_enabled": False,
         "vision_link_source": "stored",
+        "execution_mode": "skill_flow",
+        "computer_use": {"max_turns": 64, "request_timeout_s": 120.0, "frame_max_age_s": 150.0},
     }
     assert reloaded.status_code == 200
     assert reloaded.json()["workspace_settings"] == {
         "vision_link_enabled": False,
         "vision_link_source": "stored",
+        "execution_mode": "skill_flow",
+        "computer_use": {"max_turns": 64, "request_timeout_s": 120.0, "frame_max_age_s": 150.0},
     }
     assert json.loads(settings_path.read_text(encoding="utf-8"))["profiles"]["utm_windows_v1"] == {
         "vision_link_enabled": False,
+        "execution_mode": "skill_flow",
+        "computer_use": {"max_turns": 64, "request_timeout_s": 120.0, "frame_max_age_s": 150.0},
     }
 
 

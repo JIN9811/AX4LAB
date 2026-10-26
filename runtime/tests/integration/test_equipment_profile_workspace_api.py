@@ -379,10 +379,12 @@ def test_computer_use_readiness_is_passive_and_reports_concrete_program_binding_
     class Registry:
         def get(self, skill_id, version):
             assert (skill_id, version) == ("computer_use_demo_v1", "1.0.0")
+            from utils.equipment_skill_runtime import canonical_sha256
+            program = {"program_id": "read_meter", "steps": []}
             return {
                 "manifest": {"skill_id": skill_id, "version": version, "lifecycle": "deployed", "enabled": True,
-                             "target_profile": "windows_desktop_v1"},
-                "workflow": {"computer_use": policy},
+                             "target_profile": "windows_desktop_v1", "program_sha256": {"read_meter": canonical_sha256(program)}},
+                "workflow": {"computer_use": policy, "program_ids": ["read_meter"]}, "programs": [program],
             }
 
     monkeypatch.setattr(main, "_equipment_bridge_for_profile", lambda profile_id: Bridge())
@@ -417,6 +419,41 @@ def test_computer_use_readiness_is_passive_and_reports_concrete_program_binding_
         "message": "Selected worker must advertise computer_use_limits.program_hash_binding for this Skill policy.",
     }]
     assert calls == [("equipment.pyautogui.computer_use_readiness", "/capabilities", {"runtime_mode": "live"})]
+
+
+@pytest.mark.parametrize("case", ["valid", "missing_body", "not_workflow_listed", "wrong_hash", "masked_action", "masked_evidence"])
+def test_readiness_checks_static_package_and_mask_constraints(client, monkeypatch, case):
+    from utils.equipment_skill_runtime import canonical_sha256
+    program = {"program_id": "read_meter", "steps": []}
+    policy = {"schema": "ax4lab.equipment_computer_use.policy.v1", "application": {"window_title": "Demo"},
+              "targets": {}, "protected_regions": [], "program_ids": [], "runtime_value_keys": [],
+              "postconditions": [{"type": "program", "program_id": "read_meter", "read_only": True}],
+              "mask_regions": [[80, 80, 5, 5]] if case.startswith("masked") else []}
+    if case == "masked_action":
+        policy["program_ids"] = ["read_meter"]
+        policy["postconditions"] = [{"type": "image", "region": [0, 0, 5, 5], "sha256": "a" * 64}]
+    package = {"manifest": {"lifecycle": "deployed", "enabled": True, "target_profile": "windows_desktop_v1",
+                           "program_sha256": {"read_meter": "b" * 64 if case == "wrong_hash" else canonical_sha256(program)}},
+               "workflow": {"computer_use": policy, "program_ids": [] if case == "not_workflow_listed" else ["read_meter"]},
+               "programs": [] if case == "missing_body" else [program]}
+    class Bridge:
+        def connection_status(self):
+            return {"selected": True, "token_configured": True}
+        def _live_get(self, *_):
+            return {"computer_use_v1": True, "computer_use_limits": {"program_hash_binding": True}}
+    class Registry:
+        def get(self, *_):
+            return package
+    monkeypatch.setattr(main, "_equipment_bridge_for_profile", lambda _: Bridge())
+    monkeypatch.setattr(main, "_equipment_skill_registry", lambda: Registry())
+    monkeypatch.setattr(main, "_equipment_computer_use_endpoint_status", lambda: {"ready": True, "vision_declared": True})
+    client.post("/api/equipment/profiles/windows_desktop_v1/settings", json={"execution_mode": "computer_use"})
+    response = client.get("/api/equipment/profiles/windows_desktop_v1/computer-use-readiness", params={"skill_id": "demo", "version": "1.0"})
+    assert response.status_code == 200
+    result = response.json()
+    assert result["ready"] is (case == "valid")
+    expected = [] if case == "valid" else ["masking_program_unsupported" if case.startswith("masked") else "program_hash_binding_missing"]
+    assert [item["code"] for item in result["blockers"]] == expected
 
 
 def test_computer_use_readiness_rejects_invalid_policy_without_model_or_action(client, monkeypatch):

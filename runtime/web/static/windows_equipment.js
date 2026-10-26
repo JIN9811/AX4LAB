@@ -101,7 +101,6 @@ const computerUseModeInput = document.getElementById("equipment-execution-mode")
 const computerUseMaxTurnsInput = document.getElementById("equipment-computer-use-max-turns");
 const computerUseRequestTimeoutInput = document.getElementById("equipment-computer-use-request-timeout");
 const computerUseFrameMaxAgeInput = document.getElementById("equipment-computer-use-frame-max-age");
-const equipmentVisionLinkInput = document.getElementById("equipment-vision-link-enabled");
 const computerUseSettingsStatus = document.getElementById("equipment-computer-use-settings-status");
 const computerUseReadinessOutput = document.getElementById("equipment-computer-use-readiness");
 const btnSaveComputerUseSettings = document.getElementById("btn-equipment-save-computer-use-settings");
@@ -887,7 +886,6 @@ function renderComputerUseSettings(settings) {
   if (computerUseMaxTurnsInput) computerUseMaxTurnsInput.value = String(limits.max_turns ?? 64);
   if (computerUseRequestTimeoutInput) computerUseRequestTimeoutInput.value = String(limits.request_timeout_s ?? 120);
   if (computerUseFrameMaxAgeInput) computerUseFrameMaxAgeInput.value = String(limits.frame_max_age_s ?? 150);
-  if (equipmentVisionLinkInput) equipmentVisionLinkInput.checked = value.vision_link_enabled === true;
 }
 
 function renderComputerUseReadiness(readiness) {
@@ -923,7 +921,6 @@ async function saveComputerUseSettings() {
       maxTurns: computerUseMaxTurnsInput?.value,
       requestTimeout: computerUseRequestTimeoutInput?.value,
       frameMaxAge: computerUseFrameMaxAgeInput?.value,
-      visionLinkEnabled: equipmentVisionLinkInput?.checked,
     });
     const result = await apiJson(`/api/equipment/profiles/${encodeURIComponent(selectedEquipmentProfileId)}/settings`, {
       method: "POST",

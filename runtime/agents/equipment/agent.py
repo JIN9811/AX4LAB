@@ -2995,6 +2995,10 @@ class LabEquipmentAgent(BaseAgent):
         if checkpoint is not None:
             checkpoint["execution_settings"] = deepcopy(flow_settings)
         agentic_task_id = str(flow.get("agentic_task_id") or "").strip()
+        # Validation/preflight can allocate an ID without starting an execution.
+        # Once pins or progress were recorded, missing private context is fatal.
+        resuming_flow = any((checkpoint or {}).get(key) for key in (
+            "computer_use_flow_transport", "computer_use_model_selection", "next_index", "transitions"))
         flow_execution_id = (checkpoint or {}).get("flow_execution_id") or f"equipment-flow-{uuid4().hex}"
         if checkpoint is not None:
             checkpoint["flow_execution_id"] = flow_execution_id
@@ -3393,16 +3397,29 @@ class LabEquipmentAgent(BaseAgent):
             return AgentResult(success=True, summary="Equipment Flow preconditions verified", data={})
 
         flow_model_selection = None
+        flow_transport_reference = None
         if flow_settings["execution_mode"] == "computer_use":
             from agents.equipment.computer_use import pin_model
             try:
                 _, flow_model_selection = pin_model(ctx, (checkpoint or {}).get("computer_use_model_selection")
                     or self._skill_execution_model_snapshot(ctx, {}))
+                flow_transport = ctx.tools.resource("equipment.computer_use_flow_transport")
+                if not callable(flow_transport):
+                    raise ComputerUseError("resume_requires_operator", "Private flow transport is unavailable")
+                first_skill = blocks[0]["skill"]
+                first_package = EquipmentSkillRegistry(registry_root).get(first_skill["skill_id"], first_skill["skill_version"])
+                transport_scope = {"flow_execution_id": flow_execution_id, "run_id": str(state.run_id),
+                    "cycle_id": str(state.current_experiment_spec.get("cycle_id") or state.loop_count),
+                    "specimen_id": str(state.current_experiment_spec.get("specimen_id") or specimen_id), "equipment_profile_id": profile_id,
+                    "bridge_id": str(first_package["manifest"].get("deployment", {}).get("bridge_id") or "")}
+                flow_transport_reference = flow_transport("start", transport_scope,
+                    (checkpoint or {}).get("computer_use_flow_transport"), resume=resuming_flow)
             except ComputerUseError as exc:
-                return AgentResult(success=False, summary="Equipment computer-use endpoint requires attention",
+                return AgentResult(success=False, summary="Equipment computer-use execution pins require attention",
                     data={"equipment_handoff": {"status": "blocked", "failure_code": exc.code}})
             if checkpoint is not None:
                 checkpoint["computer_use_model_selection"] = deepcopy(flow_model_selection)
+                checkpoint["computer_use_flow_transport"] = flow_transport_reference
         run_context: dict[str, Any] = deepcopy((checkpoint or {}).get("run_context", {}))
         cancelled = False
         for step, block in enumerate(blocks):
@@ -3475,10 +3492,11 @@ class LabEquipmentAgent(BaseAgent):
             request["runtime_context"] = dict(run_context)
             request["_execution_settings"] = deepcopy(flow_settings)
             request["_computer_use_model_selection"] = deepcopy(flow_model_selection)
+            request["_computer_use_flow_transport"] = flow_transport_reference
+            request["_cancel_requested"] = cancel_requested
             if checkpoint is not None:
                 # The enclosing workflow owns terminal recovery, not individual Skills.
                 request["auto_recover"] = False
-                request["_cancel_requested"] = cancel_requested
             last_result = await self._run_equipment_skill(state, ctx, request)
             if agentic_task_id == UTM_COMPRESSION_TASK_ID:
                 raw = last_result.data.get("equipment_result") or {}
@@ -3645,6 +3663,10 @@ class LabEquipmentAgent(BaseAgent):
         )
         persist_execution(profile_id, execution)
         success = terminal == "__complete__"
+        # A checkpoint may continue between blocks. Workspace has no resume
+        # owner; unresolved per-execution transports remain independently pinned.
+        if flow_transport_reference and (success or checkpoint is None):
+            flow_transport("finish", transport_scope, flow_transport_reference)
         data = dict(last_result.data) if last_result is not None else {}
         data["protocol_note"] = "agentic UTM equipment skill flow"
         data["equipment_skill_flow_execution"] = execution

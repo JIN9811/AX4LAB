@@ -53153,6 +53153,18 @@
   "source_maintenance": {
     "base_revision": "e3f1fdb4c083599758fdc2cb7d163d58f3d16452",
     "files": {
+      "runtime/tests/integration/test_live_gui_runtime_layout.py": {
+        "previous_identity": {
+          "sha256": "c4e4f4f1ca26ab94dd2a08006fc748b297ddb1827f170425e651502510b0cb21",
+          "size": 255785,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "26577829c1efacffa8575d857e04f3b6d0d3828cc93696afd6818b9205588fb0",
+          "size": 256270,
+          "mode": "100644"
+        }
+      },
       "runtime/install/bootstrap_linux.sh": {
         "previous_identity": {
           "sha256": "744433417d487c56a61222ead333c0f66f3c669220a9370148e3b043f68873c7",
@@ -53520,8 +53532,8 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "7cf39a8b577174a4c8f18e399b512f68fe4d2967d2494763339afc5b64296c1d",
-          "size": 906247,
+          "sha256": "eb36732d5cd311bd5c2ba5650101882d34d0b5dfc6cd7c7d88bdd3eacd06cfbe",
+          "size": 906504,
           "mode": "100644"
         }
       },
@@ -53848,8 +53860,8 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "5fc5be46023d3b9906ea0ac1290ed03f314d43ddfc803af0088957566a0c2899",
-          "size": 453096,
+          "sha256": "991703efb48fadf1319dde7ef720a92f961102e8e29f647a8b1b8fd6d3c14173",
+          "size": 454173,
           "mode": "100644"
         }
       },
@@ -53956,16 +53968,16 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "5887120a5b6b891b2b8771b591176775b23617a26e02dab8fb267dc9179cb161",
-          "size": 262158,
+          "sha256": "0b3c4ab048e458c1200b5cc9d182af7acc0089808e1f21af40c463e8722d35f9",
+          "size": 264082,
           "mode": "100644"
         }
       },
       "runtime/agents/equipment/computer_use.py": {
         "previous_identity": null,
         "current_identity": {
-          "sha256": "e36b8f3cd2a4643f082a9100bda0c425f06ed34be6108ae6dd5279731d2a7cb2",
-          "size": 23147,
+          "sha256": "8dd5de20d2e6fb6f60096ddccadda5c26d649d15fc984882ae9d4a7d364d0020",
+          "size": 23502,
           "mode": "100644"
         }
       },
@@ -54000,8 +54012,8 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "202d3bef303394babf83d972e9eb6014995f12f545cb8844229f36af9dc63462",
-          "size": 9011,
+          "sha256": "223d2d40432e0073db3d0307ce6a6232981f0b96f86b44a91cf707414341ed2f",
+          "size": 11008,
           "mode": "100644"
         }
       },
@@ -54020,16 +54032,16 @@
       "runtime/tests/integration/test_equipment_computer_use_execution.py": {
         "previous_identity": null,
         "current_identity": {
-          "sha256": "f007e0daaeb9bd70f3336978a76d576a18084e5b815f158a835c64c80c2a8314",
-          "size": 16049,
+          "sha256": "1b58e2d018fb49d2ee0c418625f06a612cb26d0438cc5166c31a9b3da62ac806",
+          "size": 25896,
           "mode": "100644"
         }
       },
       "runtime/tests/integration/test_equipment_profile_workspace_api.py": {
         "previous_identity": null,
         "current_identity": {
-          "sha256": "db745fbf7228eefc23a6e747c80ae8592d4f491dedd5610abaa097c6d3acbf78",
-          "size": 22743,
+          "sha256": "4390c1c42994f0fb437749595f5fe0f351bd5f56cbefdff3d1fcb5861257082b",
+          "size": 25532,
           "mode": "100644"
         }
       },
@@ -54048,8 +54060,8 @@
       "runtime/tests/js/equipment_computer_use_controls.test.cjs": {
         "previous_identity": null,
         "current_identity": {
-          "sha256": "21afeb69c9f79ec9cd76d5f74314b376361afb38c8920a46e04bae89e81b48e8",
-          "size": 24269,
+          "sha256": "efb56e0564e14a5f270635b9c27b295a5a681af71e920524c8bc27da0fdd9c39",
+          "size": 34196,
           "mode": "100644"
         }
       },
@@ -54132,8 +54144,8 @@
       "runtime/web/static/equipment_computer_use_settings.js": {
         "previous_identity": null,
         "current_identity": {
-          "sha256": "f120ae80ee03b7c2d1ce7bcef281382881ad3c190558db06af943a44e4694d6e",
-          "size": 1371,
+          "sha256": "79e4e15d8ef8d48ad220193589deda466cd6920552d0a9234e909f0c53deb8b2",
+          "size": 1308,
           "mode": "100644"
         }
       },
@@ -54156,8 +54168,8 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "452a9d794be7837d017521871e61968d5e24a039bbff74576956b76590660dd4",
-          "size": 122856,
+          "sha256": "1aecb6e90f1d5e4f6206daf2beab89e1089890291c80279f021e7ab19eb443dc",
+          "size": 122602,
           "mode": "100644"
         }
       },
@@ -54180,8 +54192,8 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "aed3aad52aa815c72bc5f0edc64e0450306d4ff714d6228e7243ad5d0802afb0",
-          "size": 31831,
+          "sha256": "5726b807460051cd80dfef4f8dc38d4bc1caf0695d41729e92a09e430ee45215",
+          "size": 31607,
           "mode": "100644"
         }
       },

@@ -131,6 +131,24 @@ def _schema_unsupported(exc):
         return False
 
 
+def computer_use_program_hashes(package, policy):
+    """Validate static worker compatibility and actual workflow-listed bodies."""
+    declared = set(policy["program_ids"]) | {check["program_id"] for check in policy["postconditions"] if check["type"] == "program"}
+    if policy["mask_regions"] and declared:
+        raise ComputerUseError("masking_program_unsupported", "Masked sessions cannot use legacy program capture paths")
+    manifest_hashes = package["manifest"].get("program_sha256", {})
+    # Extra manifest entries are not validated executable authority.
+    workflow_ids = set(package["workflow"].get("program_ids", []))
+    validated_hashes = {}
+    for program in package.get("programs", []):
+        program_id = program.get("program_id")
+        if program_id in declared and program_id in workflow_ids:
+            digest = canonical_sha256(program)
+            if manifest_hashes.get(program_id) == digest:
+                validated_hashes[program_id] = digest
+    return validate_program_hashes(policy, validated_hashes)
+
+
 async def run_computer_use(*, state, ctx, request, package, execution, settings, call_tool, on_progress=None):
     """Return the existing raw result envelope; complete is only a verify proposal.
 
@@ -161,6 +179,8 @@ async def run_computer_use(*, state, ctx, request, package, execution, settings,
     connection = {"bridge_id": str(frozen_request.get("bridge_id") or package.get("manifest", {}).get("deployment", {}).get("bridge_id") or ""),
                   "runtime_mode": "live", "force_live_bridge": True,
                   "confirm_live_execute": frozen_request.get("confirm_live_execute") is True or frozen_request.get("confirm_execute") is True}
+    if request.get("_computer_use_flow_transport"):
+        connection["flow_transport_id"] = request["_computer_use_flow_transport"]
     initial_scope = (str(state.run_id), state.loop_count, str(spec.get("cycle_id") or state.loop_count),
                      str(spec.get("specimen_id") or ""), str(spec.get("equipment_profile_id") or ""))
 
@@ -212,19 +232,7 @@ async def run_computer_use(*, state, ctx, request, package, execution, settings,
         if raw_policy is None:
             raise ComputerUseError("missing_policy", "This exact Skill has no computer-use policy")
         policy = validate_policy(deepcopy(raw_policy))
-        declared = set(policy["program_ids"]) | {check["program_id"] for check in policy["postconditions"] if check["type"] == "program"}
-        manifest_hashes = package["manifest"].get("program_sha256", {})
-        # The package validator loads only workflow-listed bodies. Extra manifest
-        # entries are not validated executable authority, even with a real hash.
-        workflow_ids = set(package["workflow"].get("program_ids", []))
-        validated_hashes = {}
-        for program in package.get("programs", []):
-            program_id = program.get("program_id")
-            if program_id in declared and program_id in workflow_ids:
-                digest = canonical_sha256(program)
-                if manifest_hashes.get(program_id) == digest:
-                    validated_hashes[program_id] = digest
-        program_hashes = validate_program_hashes(policy, validated_hashes)
+        program_hashes = computer_use_program_hashes(package, policy)
         if not connection["confirm_live_execute"]:
             raise ComputerUseError("live_confirmation_required", "Computer use requires explicit live execution confirmation")
         runtime_values = {key: deepcopy(frozen_request.get("runtime_context", {}).get(key))

@@ -27,6 +27,8 @@ def setup(tmp_path, monkeypatch, decisions=None):
     h.ctx.paths.memory_root = tmp_path / "memory"
     h.ctx.paths.memory_root.mkdir()
     h.ctx.tools = ToolRegistry()
+    from device_bridges.windows_pyautogui.tools import register_equipment_tools
+    register_equipment_tools(h.ctx.tools, repo_root=tmp_path)
     h.ctx.tools.register("equipment.pyautogui.run", lambda _: {"ok": False, "status": "blocked", "failure_code": "unexpected_legacy_dispatch"})
     for operation in ("acquire", "observe", "act", "status", "verify", "release"):
         h.ctx.tools.register("equipment.pyautogui.computer_use_" + operation,
@@ -250,6 +252,176 @@ async def test_real_flow_freezes_settings_across_two_skill_blocks(tmp_path, monk
     assert checkpoint["execution_settings"]["execution_mode"] == "computer_use"
     assert checkpoint["execution_settings"]["computer_use"]["max_turns"] == 64
     assert checkpoint["computer_use_model_selection"]["model"] == "endpoint:selected"
+
+
+def demo_flow():
+    return {"schema": "atr.equipment_skill_flow.v1", "flow_id": "demo", "profile_id": "windows_desktop_v1", "agentic_task_id": "", "blocks": [
+        {"id": block_id, "label": block_id, "skill": {"skill_id": "computer_use_demo_v1", "skill_version": "1.0.0"},
+         "agentic": {"task": "demo", "completed": target, "failed": "__blocked__"}, "vision": {"enabled": False}}
+        for block_id, target in [("first", "second"), ("second", "__complete__")]]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("during", ["model", "action"])
+async def test_workspace_no_checkpoint_stop_reaches_active_block(tmp_path, monkeypatch, during):
+    cancelled = False
+    def model(_):
+        nonlocal cancelled
+        if during == "model":
+            cancelled = True
+        return "act"
+    h, registry, state, _, _ = setup(tmp_path, monkeypatch, [model, "act", "complete"])
+    state.current_experiment_spec["equipment_skill_registry_root"] = str(registry.root)
+    flow_transport = h.ctx.tools.resource("equipment.computer_use_flow_transport")
+    transport = {}
+    def remember_transport(operation, scope, reference=None, **kwargs):
+        result = flow_transport(operation, scope, reference, **kwargs)
+        transport.update(scope=scope, reference=result)
+        return result
+    h.ctx.tools.register_resource("equipment.computer_use_flow_transport", remember_transport)
+    operations = []
+    for op in ("acquire", "observe", "act", "status", "verify", "release"):
+        def dispatch(payload, op=op):
+            nonlocal cancelled
+            operations.append((op, deepcopy(payload)))
+            result = h.worker.handle(op, payload, "principal")
+            if op == "act" and during == "action":
+                cancelled = True
+            return result
+        h.ctx.tools.register("equipment.pyautogui.computer_use_" + op, dispatch)
+    result = await LabEquipmentAgent()._run_equipment_skill_flow(state, h.ctx, demo_flow(), cancel_requested=lambda: cancelled)
+    assert not result.success
+    assert result.data["equipment_result"]["failure_code"] == "cancelled"
+    assert h.desktop.effects == (1 if during == "action" else 0)
+    assert len(h.prompts) == 1
+    if during == "action":
+        action_index = next(i for i, (op, _) in enumerate(operations) if op == "act")
+        later = operations[action_index + 1:]
+        assert [op for op, _ in later] == ["status", "release"]
+        assert later[0][1]["action_id"] == operations[action_index][1]["action_id"]
+    assert h.worker.state["lease"] is None
+    from Pyautogui_server_for_window.bridge.computer_use_contract import ComputerUseError
+    with pytest.raises(ComputerUseError, match="unavailable"):
+        flow_transport("start", transport["scope"], transport["reference"], resume=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("drift", [False, True])
+@pytest.mark.parametrize("resume", ["none", "retained", "lost"])
+async def test_registered_flow_pins_worker_across_blocks_and_resume(tmp_path, monkeypatch, drift, resume):
+    import httpx
+    from device_bridges.windows_pyautogui.tools import register_equipment_tools
+    h, registry, state, _, _ = setup(tmp_path, monkeypatch, ["act", "complete"] * 4)
+    state.current_experiment_spec["equipment_skill_registry_root"] = str(registry.root)
+    h.ctx.tools = ToolRegistry()
+    bridge = register_equipment_tools(h.ctx.tools, {"devices": {"equipment": {"mode": "live", "windows_pyautogui": {
+        "allow_live_execute": True, "connection_memory_path": str(tmp_path / "connections.json")}}}}, repo_root=tmp_path)
+    memory = {"selected_candidate": "worker1", "candidates": {"worker1": {
+        "bridge_url": "http://original.invalid", "internal_key": "1234", "allow_live_execute": True}}}
+    bridge._write_connection_memory(memory)
+    observed = []
+    stopped = False
+    def server(req):
+        nonlocal stopped
+        observed.append((str(req.url), req.headers.get(bridge.config.token_header)))
+        if req.url.path == "/capabilities":
+            return httpx.Response(200, json={"ok": True, "computer_use_v1": True})
+        op = req.url.path.rsplit("/", 1)[-1]
+        result = h.worker.handle(op, json.loads(req.content), "principal")
+        if op == "release":
+            stopped = resume != "none"
+            if drift:
+                memory["candidates"]["worker1"].update(bridge_url="http://replacement.invalid", internal_key="5678")
+                bridge._write_connection_memory(memory)
+        return httpx.Response(200, json=result)
+    client = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: client(transport=httpx.MockTransport(server), **kwargs))
+    checkpoint = {}
+    agent = LabEquipmentAgent()
+    first = await agent._run_equipment_skill_flow(state, h.ctx, demo_flow(), checkpoint=checkpoint, cancel_requested=lambda: stopped)
+    if resume != "none":
+        assert not first.success and checkpoint["next_index"] == 1
+        stopped = False
+        if resume == "lost":
+            h.ctx.tools = ToolRegistry()
+            register_equipment_tools(h.ctx.tools, repo_root=tmp_path)
+            count = len(observed)
+        first = await agent._run_equipment_skill_flow(state, h.ctx, demo_flow(), checkpoint=checkpoint)
+        if resume == "lost":
+            assert not first.success
+            assert first.data["equipment_handoff"]["failure_code"] == "resume_requires_operator"
+            assert len(observed) == count and h.desktop.effects == 1
+            return
+    assert first.success, first.data.get("equipment_result", {}).get("failure_code")
+    assert h.desktop.effects == 2
+    assert all(url.startswith("http://original.invalid/") and token == "1234" for url, token in observed)
+    serialized = json.dumps(checkpoint)
+    assert '"1234"' not in serialized and '"5678"' not in serialized
+    assert "original.invalid" not in serialized and "replacement.invalid" not in serialized
+    observed.clear()
+    fresh = await agent._run_equipment_skill_flow(state, h.ctx, demo_flow())
+    assert fresh.success, fresh.data
+    assert h.desktop.effects == 4
+    expected = "replacement" if drift else "original"
+    assert all(url.startswith(f"http://{expected}.invalid/") for url, _ in observed)
+
+
+@pytest.mark.asyncio
+async def test_resumed_flow_without_private_transport_fails_before_acquire(tmp_path, monkeypatch):
+    h, registry, state, _, _ = setup(tmp_path, monkeypatch)
+    state.current_experiment_spec["equipment_skill_registry_root"] = str(registry.root)
+    checkpoint = {"flow_execution_id": "old-flow", "next_index": 1,
+                  "computer_use_flow_transport": "lost-private-context"}
+    result = await LabEquipmentAgent()._run_equipment_skill_flow(state, h.ctx, demo_flow(), checkpoint=checkpoint)
+    assert not result.success
+    assert result.data["equipment_handoff"]["failure_code"] == "resume_requires_operator"
+    assert not h.prompts and h.worker.state["lease"] is None
+
+
+def test_flow_transport_capacity_never_evicts_pins_and_finish_frees_capacity(tmp_path):
+    from device_bridges.windows_pyautogui.tools import register_equipment_tools
+    from Pyautogui_server_for_window.bridge.computer_use_contract import ComputerUseError
+    tools = ToolRegistry()
+    register_equipment_tools(tools, repo_root=tmp_path)
+    pin = tools.resource("equipment.computer_use_flow_transport")
+    scope = {"flow_execution_id": "flow", "run_id": "run", "cycle_id": "1", "specimen_id": "s", "equipment_profile_id": "windows_desktop_v1", "bridge_id": "worker1"}
+    refs = [pin("start", {**scope, "flow_execution_id": f"flow{i}"}) for i in range(128)]
+    with pytest.raises(ComputerUseError) as exc:
+        pin("start", scope)
+    assert exc.value.code == "transport_capacity_requires_operator"
+    first_scope = {**scope, "flow_execution_id": "flow0"}
+    assert pin("start", first_scope, refs[0], resume=True) == refs[0]
+    for key in ("flow_execution_id", "run_id", "cycle_id", "specimen_id", "equipment_profile_id"):
+        with pytest.raises(ComputerUseError) as exc:
+            pin("start", {**first_scope, key: "changed"}, refs[0], resume=True)
+        assert exc.value.code == "resume_requires_operator"
+    pin("finish", first_scope, refs[0])
+    assert pin("start", scope) not in refs
+    with pytest.raises(ComputerUseError) as exc:
+        pin("start", first_scope, refs[0], resume=True)
+    assert exc.value.code == "resume_requires_operator"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("preparation", ["validate_only", "blocked_preflight"])
+async def test_checkpoint_preparation_does_not_count_as_started_transport(tmp_path, monkeypatch, preparation):
+    h, registry, state, _, _ = setup(tmp_path, monkeypatch, ["complete", "complete"])
+    state.current_experiment_spec["equipment_skill_registry_root"] = str(registry.root)
+    agent = LabEquipmentAgent()
+    checkpoint = {}
+    if preparation == "validate_only":
+        prepared = await agent._run_equipment_skill_flow(state, h.ctx, demo_flow(), checkpoint=checkpoint, validate_only=True)
+        assert prepared.success
+    else:
+        original = agent._preflight_skill_flow_resources
+        monkeypatch.setattr(agent, "_preflight_skill_flow_resources", lambda **_: {"ok": False, "failure_code": "fixture_unavailable"})
+        prepared = await agent._run_equipment_skill_flow(state, h.ctx, demo_flow(), checkpoint=checkpoint)
+        assert not prepared.success
+        monkeypatch.setattr(agent, "_preflight_skill_flow_resources", original)
+    assert checkpoint["flow_execution_id"] and not h.prompts
+    result = await agent._run_equipment_skill_flow(state, h.ctx, demo_flow(), checkpoint=checkpoint)
+    assert result.success, result.data
+    assert len(h.prompts) == 2
 
 
 @pytest.mark.asyncio

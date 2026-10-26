@@ -8,6 +8,158 @@ const vm = require("node:vm");
 
 const root = path.join(__dirname, "../..");
 
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return {promise, resolve, reject};
+}
+
+function raceHarness() {
+  const requests = [], renders = [], elements = {"ide-computer-use-settings-status": {textContent: "unchanged"}};
+  const context = vm.createContext({
+    runtimeEquipmentFlowProfileId: "profile-a", runtimeEquipmentFlowLoadGeneration: 0,
+    runtimeEquipmentFlowLoadPending: null, runtimeComputerUseSavePending: null,
+    runtimeComputerUseSaveGeneration: 0, runtimeComputerUseSettingsStatus: null,
+    runtimeComputerUseDraft: null, runtimeEquipmentProfiles: [], runtimeEquipmentFlowPayload: null,
+    document: {getElementById: id => elements[id]},
+    window: {AX4LABEquipmentComputerUseSettings: {payload: expectedSettingsPayload}},
+    resetRuntimeComputerUseDraft() { context.runtimeComputerUseDraft = null; },
+    captureRuntimeComputerUseDraft() {},
+    requestJson(url, options) {
+      const pending = deferred(); requests.push({url, options, ...pending}); return pending.promise;
+    },
+    renderRuntimeEquipmentSkillFlow() {
+      const settings = context.runtimeEquipmentFlowPayload.workspace_settings;
+      renders.push({profile: context.runtimeEquipmentFlowProfileId, mode: settings.execution_mode});
+      elements["ide-equipment-execution-mode"] = {value: settings.execution_mode};
+      for (const [id, value] of [["max-turns", 64], ["request-timeout", 120], ["frame-max-age", 150]]) {
+        elements["ide-computer-use-" + id] = {value: String(value)};
+      }
+    },
+    graphTabs: [], activeGraphTabId: "", MODULE_TAB_PREFIX: "module:", cloneConfig: x => x,
+    renderGraph() {}, encodeURIComponent, URLSearchParams,
+  });
+  vm.runInContext(block("runtime_ide.js", "async function loadRuntimeEquipmentSkillFlow", "function focusModuleForNode"), context);
+  vm.runInContext(block("runtime_ide.js", "async function saveRuntimeComputerUseSettings", "function renderRuntimeEquipmentSkillFlow"), context);
+  const flow = mode => ({flow: {blocks: []}, graph: {}, workspace_settings: {execution_mode: mode}});
+  const tick = () => new Promise(resolve => setImmediate(resolve));
+  return {context, requests, renders, elements, flow, tick};
+}
+
+for (const sameProfile of [false, true]) for (const stalledAt of ["flow", "readiness"]) {
+  test(`IDE discards superseded ${sameProfile ? "same" : "cross"}-profile ${stalledAt} response and saves current values`, async () => {
+    const h = raceHarness();
+    const old = h.context.loadRuntimeEquipmentSkillFlow("profile-a");
+    h.requests[0].resolve({profiles: []});
+    if (stalledAt === "readiness") { h.requests[1].resolve(h.flow("computer_use")); await h.tick(); }
+    const oldReadiness = stalledAt === "readiness" ? h.requests[2] : null;
+    const start = h.requests.length;
+    const profile = sameProfile ? "profile-a" : "profile-b";
+    const latest = h.context.loadRuntimeEquipmentSkillFlow(profile);
+    h.requests[start].resolve({profiles: []}); h.requests[start + 1].resolve(h.flow("skill_flow"));
+    await h.tick(); h.requests.at(-1).resolve({ready: true}); await latest;
+    if (oldReadiness) oldReadiness.resolve({ready: false});
+    else {
+      h.requests[1].resolve(h.flow("computer_use")); await h.tick();
+      // A broken loader starts another readiness request; settle it to expose overwrite.
+      h.requests.at(-1).resolve({ready: false});
+    }
+    await old;
+    assert.deepEqual(h.renders, [{profile, mode: "skill_flow"}]);
+    const saving = h.context.saveRuntimeComputerUseSettings();
+    const post = h.requests.at(-1);
+    assert.equal(post.url, `/api/equipment/profiles/${profile}/settings`);
+    assert.equal(JSON.parse(post.options.body).execution_mode, "skill_flow");
+    post.reject(new Error("current save failure")); await saving;
+    assert.equal(h.elements["ide-computer-use-settings-status"].textContent, "current save failure");
+  });
+}
+
+for (const sameProfile of [false, true]) test(`IDE ignores stale ${sameProfile ? "same" : "cross"}-profile save failure`, async () => {
+  const h = raceHarness();
+  const saving = h.context.saveRuntimeComputerUseSettings();
+  const post = h.requests[0];
+  const loading = h.context.loadRuntimeEquipmentSkillFlow(sameProfile ? "profile-a" : "profile-b");
+  h.requests[1].resolve({profiles: []}); h.requests[2].resolve(h.flow("skill_flow"));
+  await h.tick(); h.requests.at(-1).resolve({ready: true}); await loading;
+  post.reject(new Error("wrong profile or obsolete save")); await saving;
+  assert.equal(h.elements["ide-computer-use-settings-status"].textContent, "unchanged");
+});
+
+for (const stalledAt of ["flow", "readiness"]) test(`IDE discards obsolete ${stalledAt} rejection`, async () => {
+  const h = raceHarness();
+  const old = h.context.loadRuntimeEquipmentSkillFlow("profile-a");
+  h.requests[0].resolve({profiles: []});
+  if (stalledAt === "readiness") { h.requests[1].resolve(h.flow("computer_use")); await h.tick(); }
+  const delayed = h.requests.at(-1);
+  const start = h.requests.length;
+  const latest = h.context.loadRuntimeEquipmentSkillFlow("profile-b");
+  h.requests[start].resolve({profiles: []}); h.requests[start + 1].resolve(h.flow("skill_flow"));
+  await h.tick(); h.requests.at(-1).resolve({ready: true}); await latest;
+  delayed.reject(new Error("obsolete profile failure"));
+  await assert.doesNotReject(old);
+  assert.deepEqual(h.renders, [{profile: "profile-b", mode: "skill_flow"}]);
+});
+
+test("IDE cannot save the previous profile's still-visible form during a new load", async () => {
+  const h = raceHarness();
+  h.elements["ide-computer-use-settings-form"] = {dataset: {profileId: "profile-a"}};
+  const pending = h.context.loadRuntimeEquipmentSkillFlow("profile-b");
+  const saving = h.context.saveRuntimeComputerUseSettings();
+  assert.equal(h.requests.filter(r => r.options?.method === "POST").length, 0);
+  await saving;
+  h.requests[0].resolve({profiles: []}); h.requests[1].resolve(h.flow("skill_flow"));
+  await h.tick(); h.requests.at(-1).resolve({ready: true}); await pending;
+});
+
+test("IDE passive polling cannot starve a slow readiness response or invalidate an active save", async () => {
+  const h = raceHarness();
+  const loading = h.context.loadRuntimeEquipmentSkillFlow("profile-a");
+  h.requests[0].resolve({profiles: []}); h.requests[1].resolve(h.flow("skill_flow"));
+  await h.tick();
+  const readiness = h.requests[2];
+  for (let tick = 0; tick < 4; tick++) {
+    h.context.loadRuntimeEquipmentSkillFlow("profile-a", {passive: true});
+  }
+  assert.equal(h.requests.length, 3);
+  readiness.resolve({ready: true}); await loading;
+  assert.equal(h.renders.length, 1);
+  const saving = h.context.saveRuntimeComputerUseSettings();
+  const post = h.requests.at(-1);
+  await h.context.loadRuntimeEquipmentSkillFlow("profile-a", {passive: true});
+  assert.equal(h.requests.at(-1), post);
+  post.resolve({ok: true}); await h.tick();
+  h.requests.at(-2).resolve({profiles: []}); h.requests.at(-1).resolve(h.flow("skill_flow"));
+  await h.tick(); h.requests.at(-1).resolve({ready: true}); await saving;
+  assert.match(h.context.runtimeComputerUseSettingsStatus.message, /Saved for the next execution/);
+});
+
+for (const surface of ["workspace", "ide"]) test(`${surface} computer-use save leaves Vision preference to its existing owner`, async () => {
+  const h = raceHarness();
+  const shared = require("../../web/static/equipment_computer_use_settings.js");
+  let posted;
+  h.context.window.AX4LABEquipmentComputerUseSettings = shared;
+  const inputs = {mode: "computer_use", maxTurns: "64", requestTimeout: "120", frameMaxAge: "150"};
+  if (surface === "ide") {
+    h.elements["ide-equipment-execution-mode"] = {value: inputs.mode};
+    for (const [id, value] of [["max-turns", inputs.maxTurns], ["request-timeout", inputs.requestTimeout], ["frame-max-age", inputs.frameMaxAge]]) h.elements["ide-computer-use-" + id] = {value};
+    h.context.requestJson = async (_url, options) => { posted = JSON.parse(options.body); return {}; };
+    h.context.loadRuntimeEquipmentSkillFlow = async () => {};
+    await h.context.saveRuntimeComputerUseSettings();
+  } else {
+    Object.assign(h.context, {selectedEquipmentProfileId: "profile-a", btnSaveComputerUseSettings: {disabled: false},
+      computerUseModeInput: {value: inputs.mode}, computerUseMaxTurnsInput: {value: inputs.maxTurns},
+      computerUseRequestTimeoutInput: {value: inputs.requestTimeout}, computerUseFrameMaxAgeInput: {value: inputs.frameMaxAge},
+      equipmentVisionLinkInput: undefined, computerUseSettingsStatus: null, setBusy() {}, renderComputerUseSettings() {},
+      refreshComputerUseReadiness: async () => {},
+      apiJson: async (_url, options) => { posted = JSON.parse(options.body); return {}; }});
+    vm.runInContext(block("windows_equipment.js", "async function saveComputerUseSettings", "async function loadEquipmentProfileState"), h.context);
+    await h.context.saveComputerUseSettings();
+  }
+  assert.equal(Object.hasOwn(posted, "vision_link_enabled"), false);
+  assert.equal(posted.execution_mode, "computer_use");
+});
+
 function source(file) {
   return fs.readFileSync(path.join(root, "web/static", file), "utf8");
 }
@@ -26,7 +178,6 @@ function expectedSettingsPayload(values) {
   const requestTimeout = Number(values.requestTimeout);
   const frameMaxAge = Number(values.frameMaxAge);
   return {
-    vision_link_enabled: values.visionLinkEnabled === true,
     execution_mode: values.mode,
     computer_use: {max_turns: maxTurns, request_timeout_s: requestTimeout, frame_max_age_s: frameMaxAge},
   };
@@ -39,7 +190,6 @@ test("Computer-use settings use one shared browser serializer on both existing p
   assert.deepEqual(helper.payload({
     mode: "computer_use", maxTurns: "24", requestTimeout: "80", frameMaxAge: "40", visionLinkEnabled: true,
   }), {
-    vision_link_enabled: true,
     execution_mode: "computer_use",
     computer_use: {max_turns: 24, request_timeout_s: 80, frame_max_age_s: 40},
   });
@@ -112,7 +262,6 @@ test("Equipment Workspace serializes bounded next-execution settings without lau
       url: "/api/equipment/profiles/profile-a/settings",
       method: "POST",
       body: {
-        vision_link_enabled: true,
         execution_mode: "computer_use",
         computer_use: {max_turns: 32, request_timeout_s: 90, frame_max_age_s: 45},
       },
@@ -182,7 +331,8 @@ test("Runtime IDE serializes through the shared profile settings contract", asyn
   let localPayloadCalls = 0;
   let posted = null;
   const context = vm.createContext({
-    runtimeEquipmentFlowProfileId: "profile-a",
+    runtimeEquipmentFlowLoadPending: null, runtimeComputerUseSavePending: null,
+    runtimeEquipmentFlowProfileId: "profile-a", runtimeEquipmentFlowLoadGeneration: 0, runtimeComputerUseSaveGeneration: 0, // isolated UI state
     runtimeComputerUseSettingsStatus: null,
     document: {getElementById: id => elements[id]},
     requestJson: async (_url, options) => { posted = JSON.parse(options.body); },
@@ -206,7 +356,6 @@ test("Runtime IDE serializes through the shared profile settings contract", asyn
   await context.saveRuntimeComputerUseSettings();
 
   assert.deepEqual(posted, {
-    vision_link_enabled: true,
     execution_mode: "computer_use",
     computer_use: {max_turns: 9, request_timeout_s: 30, frame_max_age_s: 20},
   });
@@ -230,7 +379,8 @@ test("Runtime IDE ignores Profile A save completion after Profile B is selected 
   let resetCalls = 0;
   const loads = [];
   const context = vm.createContext({
-    runtimeEquipmentFlowProfileId: "profile-a",
+    runtimeEquipmentFlowLoadPending: null, runtimeComputerUseSavePending: null,
+    runtimeEquipmentFlowProfileId: "profile-a", runtimeEquipmentFlowLoadGeneration: 0, runtimeComputerUseSaveGeneration: 0, // isolated UI state
     runtimeComputerUseSettingsStatus: null,
     runtimeComputerUseDraft: {profileId: "profile-a", dirty: false},
     document: {getElementById: id => elements[id]},
@@ -280,7 +430,6 @@ test("Runtime IDE ignores Profile A save completion after Profile B is selected 
     url: "/api/equipment/profiles/profile-a/settings",
     method: "POST",
     body: {
-      vision_link_enabled: true,
       execution_mode: "computer_use",
       computer_use: {max_turns: 9, request_timeout_s: 30, frame_max_age_s: 20},
     },
@@ -313,7 +462,8 @@ test("Runtime IDE preserves save confirmation and readiness through the next sam
       readiness: {ready: false},
     },
     runtimeEquipmentProfiles: [{profile_id: "profile-a", label: "Profile A"}],
-    runtimeEquipmentFlowProfileId: "profile-a",
+    runtimeEquipmentFlowLoadPending: null, runtimeComputerUseSavePending: null,
+    runtimeEquipmentFlowProfileId: "profile-a", runtimeEquipmentFlowLoadGeneration: 0, runtimeComputerUseSaveGeneration: 0, // isolated UI state
     runtimeComputerUseSettingsStatus: null,
     document: {getElementById: id => elements[id]},
     requestJson: async () => ({ok: true}),
@@ -360,7 +510,8 @@ test("Runtime IDE renders readiness independently from transient save status", (
       readiness: {ready: false},
     },
     runtimeEquipmentProfiles: [{profile_id: "profile-a", label: "Profile A"}],
-    runtimeEquipmentFlowProfileId: "profile-a",
+    runtimeEquipmentFlowLoadPending: null, runtimeComputerUseSavePending: null,
+    runtimeEquipmentFlowProfileId: "profile-a", runtimeEquipmentFlowLoadGeneration: 0, runtimeComputerUseSaveGeneration: 0, // isolated UI state
     runtimeComputerUseSettingsStatus: null,
     document: {getElementById: () => null},
     escapeHtml(value) { return String(value); },
@@ -396,7 +547,8 @@ test("Runtime IDE same-profile polling preserves dirty values and focused field 
     getElementById(id) { return elements[id] || null; },
   };
   const context = vm.createContext({
-    runtimeEquipmentFlowProfileId: "profile-a",
+    runtimeEquipmentFlowLoadPending: null, runtimeComputerUseSavePending: null,
+    runtimeEquipmentFlowProfileId: "profile-a", runtimeEquipmentFlowLoadGeneration: 0, runtimeComputerUseSaveGeneration: 0, // isolated UI state
     runtimeComputerUseDraft: null,
     runtimeComputerUseSettingsStatus: {profileId: "profile-a", message: "Saved for the next execution."},
     document,
@@ -411,7 +563,7 @@ test("Runtime IDE same-profile polling preserves dirty values and focused field 
     vision_link_enabled: false,
   });
   assert.deepEqual(JSON.parse(JSON.stringify(values)), {
-    mode: "computer_use", maxTurns: "19", requestTimeout: "77", frameMaxAge: "33", visionLinkEnabled: true,
+    mode: "computer_use", maxTurns: "19", requestTimeout: "77", frameMaxAge: "33",
   });
 
   elements["ide-computer-use-max-turns"] = {
@@ -446,7 +598,8 @@ test("Runtime IDE same-profile polling preserves dirty values and focused field 
 
 test("Runtime IDE intentional profile change clears the prior save confirmation", async () => {
   const context = vm.createContext({
-    runtimeEquipmentFlowProfileId: "profile-a",
+    runtimeEquipmentFlowLoadPending: null, runtimeComputerUseSavePending: null,
+    runtimeEquipmentFlowProfileId: "profile-a", runtimeEquipmentFlowLoadGeneration: 0, runtimeComputerUseSaveGeneration: 0, // isolated UI state
     runtimeComputerUseSettingsStatus: {profileId: "profile-a", message: "Saved for the next execution."},
     runtimeEquipmentProfiles: [],
     runtimeEquipmentFlowPayload: null,

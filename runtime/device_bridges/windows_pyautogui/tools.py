@@ -25,6 +25,7 @@ from pathlib import Path
 import re
 import threading
 from typing import Any
+from uuid import uuid4
 
 from device_bridges.windows_pyautogui.bridge import (
     WindowsPyAutoGUIBridge,
@@ -51,7 +52,30 @@ def register_equipment_tools(
     memory_root = paths.memory_root if paths is not None else (repo_root or Path(__file__).resolve().parents[2]) / "memory"
     bridges = {config.equipment_profile_id: bridge}
     computer_use_transports = {}
+    computer_use_flows = {}
     computer_use_lock = threading.Lock()
+
+    def flow_transport(operation, payload, reference=None, *, resume=False):
+        """Private flow pin; the only checkpoint value is a random opaque ID."""
+        from Pyautogui_server_for_window.bridge.computer_use_contract import ComputerUseError
+        scope = tuple(payload.get(k) for k in ("flow_execution_id", "run_id", "cycle_id", "specimen_id", "equipment_profile_id"))
+        with computer_use_lock:
+            if reference:
+                entry = computer_use_flows.get(reference)
+                if entry is None or entry[0] != scope:
+                    raise ComputerUseError("resume_requires_operator", "Private flow transport is unavailable")
+                if operation == "finish":
+                    computer_use_flows.pop(reference)
+                return reference
+            if resume or operation != "start":
+                raise ComputerUseError("resume_requires_operator", "Private flow transport is unavailable")
+            if len(computer_use_flows) >= 128:
+                raise ComputerUseError("transport_capacity_requires_operator", "Private flow transport capacity reached")
+            reference = uuid4().hex
+            computer_use_flows[reference] = (scope, selected_bridge(payload).pin_computer_use_transport(payload), payload.get("bridge_id", ""))
+            return reference
+
+    registry.register_resource("equipment.computer_use_flow_transport", flow_transport)
 
     def selected_bridge(payload: dict[str, Any]) -> WindowsPyAutoGUIBridge:
         profile_id = str(payload.get("equipment_profile_id") or scoped_equipment_profile_id()
@@ -102,7 +126,16 @@ def register_equipment_tools(
                     return blocked("resume_requires_operator")
                 if len(computer_use_transports) >= 128:
                     return blocked("transport_capacity_requires_operator")
-                pinned = selected_bridge(payload).pin_computer_use_transport(payload)
+                flow_reference = payload.get("flow_transport_id")
+                if flow_reference:
+                    flow_entry = computer_use_flows.get(flow_reference)
+                    if flow_entry is None:
+                        return blocked("resume_requires_operator")
+                    if flow_entry[0][1:] != identity[1:] or flow_entry[2] != payload.get("bridge_id", ""):
+                        return blocked("execution_identity_mismatch")
+                    pinned = flow_entry[1]
+                else:
+                    pinned = selected_bridge(payload).pin_computer_use_transport(payload)
                 entry = (identity, pinned, payload.get("bridge_id", ""))
                 # Reserve before HTTP. Uncertain acquire retains its transport;
                 # it must not be evicted and silently retried on another worker.

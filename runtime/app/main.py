@@ -13437,6 +13437,11 @@ def _equipment_computer_use_readiness(profile: EquipmentProfile, *, skill_id: st
     gates["skill_policy"] = bool(skill["policy_valid"])
     gates["skill_postconditions"] = bool(skill["postconditions_valid"])
     if policy is not None:
+        from agents.equipment.computer_use import computer_use_program_hashes
+        try:
+            computer_use_program_hashes(package, policy)
+        except ComputerUseError as exc:
+            blockers.append({"code": exc.code, "message": str(exc)})
         program_postconditions = [
             item for item in policy.get("postconditions", [])
             if isinstance(item, dict) and item.get("type") == "program"

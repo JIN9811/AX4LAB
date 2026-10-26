@@ -311,6 +311,10 @@ function addExecutionOperation(handler, position) {
 }
 let runtimeEquipmentFlowPayload = null;
 let runtimeEquipmentFlowProfileId = "utm_windows_v1";
+let runtimeEquipmentFlowLoadGeneration = 0;
+let runtimeComputerUseSaveGeneration = 0;
+let runtimeEquipmentFlowLoadPending = null;
+let runtimeComputerUseSavePending = null;
 let runtimeEquipmentProfiles = [];
 let runtimeComputerUseDraft = null;
 let runtimeComputerUseSettingsStatus = null;
@@ -3695,7 +3699,6 @@ function runtimeComputerUseFormValues() {
     maxTurns: document.getElementById("ide-computer-use-max-turns")?.value || "64",
     requestTimeout: document.getElementById("ide-computer-use-request-timeout")?.value || "120",
     frameMaxAge: document.getElementById("ide-computer-use-frame-max-age")?.value || "150",
-    visionLinkEnabled: document.getElementById("ide-equipment-vision-link")?.checked === true,
   };
 }
 
@@ -3708,7 +3711,6 @@ function captureRuntimeComputerUseDraft(dirty = false) {
     "ide-computer-use-max-turns",
     "ide-computer-use-request-timeout",
     "ide-computer-use-frame-max-age",
-    "ide-equipment-vision-link",
   ]);
   const active = document.activeElement;
   const focusId = fieldIds.has(active?.id) ? active.id : "";
@@ -3738,7 +3740,6 @@ function runtimeComputerUseValuesForRender(settings) {
     maxTurns: String(limits.max_turns ?? 64),
     requestTimeout: String(limits.request_timeout_s ?? 120),
     frameMaxAge: String(limits.frame_max_age_s ?? 150),
-    visionLinkEnabled: value.vision_link_enabled === true,
   };
 }
 
@@ -3758,7 +3759,6 @@ function bindRuntimeComputerUseDraftControls() {
     "ide-computer-use-max-turns",
     "ide-computer-use-request-timeout",
     "ide-computer-use-frame-max-age",
-    "ide-equipment-vision-link",
   ];
   ids.forEach((id) => {
     const field = document.getElementById(id);
@@ -3770,29 +3770,41 @@ function bindRuntimeComputerUseDraftControls() {
 }
 
 async function saveRuntimeComputerUseSettings() {
+  const savedProfileId = runtimeEquipmentFlowProfileId;
+  let loadGeneration = runtimeEquipmentFlowLoadGeneration;
+  const saveGeneration = ++runtimeComputerUseSaveGeneration;
+  const isCurrent = () => savedProfileId === runtimeEquipmentFlowProfileId
+    && loadGeneration === runtimeEquipmentFlowLoadGeneration
+    && saveGeneration === runtimeComputerUseSaveGeneration;
+  const form = document.getElementById("ide-computer-use-settings-form");
+  if (form && form.dataset.profileId !== savedProfileId) return;
+  runtimeComputerUseSavePending = saveGeneration;
   try {
-    const savedProfileId = runtimeEquipmentFlowProfileId;
     const payload = window.AX4LABEquipmentComputerUseSettings.payload({
       mode: document.getElementById("ide-equipment-execution-mode")?.value,
       maxTurns: document.getElementById("ide-computer-use-max-turns")?.value,
       requestTimeout: document.getElementById("ide-computer-use-request-timeout")?.value,
       frameMaxAge: document.getElementById("ide-computer-use-frame-max-age")?.value,
-      visionLinkEnabled: document.getElementById("ide-equipment-vision-link")?.checked,
     });
     await requestJson(`/api/equipment/profiles/${encodeURIComponent(savedProfileId)}/settings`, {
       method: "POST",
       body: JSON.stringify(payload),
     });
-    if (runtimeEquipmentFlowProfileId !== savedProfileId) return;
+    if (!isCurrent()) return;
     resetRuntimeComputerUseDraft();
     runtimeComputerUseSettingsStatus = {
       profileId: savedProfileId,
       message: "Saved for the next execution. Active execution pins remain unchanged.",
     };
-    await loadRuntimeEquipmentSkillFlow(savedProfileId, {preserveComputerUseDraft: false});
+    const reloading = loadRuntimeEquipmentSkillFlow(savedProfileId, {preserveComputerUseDraft: false});
+    loadGeneration = runtimeEquipmentFlowLoadGeneration;
+    await reloading;
   } catch (error) {
+    if (!isCurrent()) return;
     const status = document.getElementById("ide-computer-use-settings-status");
     if (status) status.textContent = error.message;
+  } finally {
+    if (runtimeComputerUseSavePending === saveGeneration) runtimeComputerUseSavePending = null;
   }
 }
 
@@ -3848,7 +3860,6 @@ function renderRuntimeEquipmentSkillFlow() {
         <label>Max turns <input id="ide-computer-use-max-turns" class="text-input" type="number" min="1" max="256" step="1" value="${escapeHtml(formValues.maxTurns)}"></label>
         <label>Request timeout (seconds) <input id="ide-computer-use-request-timeout" class="text-input" type="number" min="1" max="300" step="0.1" value="${escapeHtml(formValues.requestTimeout)}"></label>
         <label>Frame max age (seconds) <input id="ide-computer-use-frame-max-age" class="text-input" type="number" min="1" max="600" step="0.1" value="${escapeHtml(formValues.frameMaxAge)}"></label>
-        <label class="checkbox-line"><input id="ide-equipment-vision-link" type="checkbox" ${formValues.visionLinkEnabled ? "checked" : ""}> Include Profile Vision link</label>
         <button id="ide-save-computer-use-settings" class="btn tiny primary" type="button">Save Settings</button>
         <p id="ide-computer-use-settings-status" class="hint" role="status">${escapeHtml(computerUseSettingsStatus)}</p>
         <p id="ide-computer-use-readiness" class="hint" role="status">${cuReadiness.ready ? "Ready · worker, endpoint vision, Skill policy, and postconditions are available." : `Unavailable · ${escapeHtml(cuBlockers.map((item) => item.message || item.code).join(" · ") || "select an exact deployed Skill")}`}</p>
@@ -3862,6 +3873,11 @@ function renderRuntimeEquipmentSkillFlow() {
 
 async function loadRuntimeEquipmentSkillFlow(profileId = "utm_windows_v1", options = {}) {
   const nextProfileId = profileId || "utm_windows_v1";
+  if (options.passive && nextProfileId === runtimeEquipmentFlowProfileId
+      && (runtimeEquipmentFlowLoadPending !== null || runtimeComputerUseSavePending !== null)) return;
+  const generation = ++runtimeEquipmentFlowLoadGeneration;
+  runtimeEquipmentFlowLoadPending = generation;
+  const isCurrent = () => generation === runtimeEquipmentFlowLoadGeneration && nextProfileId === runtimeEquipmentFlowProfileId;
   const profileChanged = nextProfileId !== runtimeEquipmentFlowProfileId;
   const preserveComputerUseDraft = options.preserveComputerUseDraft !== false;
   if (profileChanged || !preserveComputerUseDraft) {
@@ -3870,30 +3886,39 @@ async function loadRuntimeEquipmentSkillFlow(profileId = "utm_windows_v1", optio
   }
   else captureRuntimeComputerUseDraft(false);
   runtimeEquipmentFlowProfileId = nextProfileId;
-  const [profilesPayload, flowPayload] = await Promise.all([
-    requestJson("/api/equipment/profiles"),
-    requestJson(`/api/modules/equipment/equipment-skill-flow?profile_id=${encodeURIComponent(runtimeEquipmentFlowProfileId)}`),
-  ]);
-  const firstBlock = Array.isArray(flowPayload.flow?.blocks) ? flowPayload.flow.blocks[0] : null;
-  const skill = firstBlock?.skill && typeof firstBlock.skill === "object" ? firstBlock.skill : {};
-  const readinessQuery = new URLSearchParams();
-  if (skill.skill_id) readinessQuery.set("skill_id", String(skill.skill_id));
-  if (skill.skill_version) readinessQuery.set("version", String(skill.skill_version));
-  const readinessSuffix = readinessQuery.toString() ? `?${readinessQuery.toString()}` : "";
-  flowPayload.computer_use_readiness = await requestJson(`/api/equipment/profiles/${encodeURIComponent(runtimeEquipmentFlowProfileId)}/computer-use-readiness${readinessSuffix}`);
-  if (preserveComputerUseDraft) captureRuntimeComputerUseDraft(false);
-  runtimeEquipmentProfiles = Array.isArray(profilesPayload.profiles) ? profilesPayload.profiles : [];
-  runtimeEquipmentFlowPayload = flowPayload;
-  renderRuntimeEquipmentSkillFlow();
-  const tab = graphTabs.find((item) => item.id === `${MODULE_TAB_PREFIX}equipment`);
-  const catalogBacked = Boolean(tab?.modulePayload?.module?.execution_graph || tab?.modulePayload?.execution_graph);
-  if (tab && !catalogBacked) {
-    tab.graph = flowPayload.graph;
-    tab.baselineGraph = cloneConfig(flowPayload.graph);
-    tab.dirty = false;
+  try {
+    const [profilesPayload, flowPayload] = await Promise.all([
+      requestJson("/api/equipment/profiles"),
+      requestJson(`/api/modules/equipment/equipment-skill-flow?profile_id=${encodeURIComponent(nextProfileId)}`),
+    ]);
+    if (!isCurrent()) return;
+    const firstBlock = Array.isArray(flowPayload.flow?.blocks) ? flowPayload.flow.blocks[0] : null;
+    const skill = firstBlock?.skill && typeof firstBlock.skill === "object" ? firstBlock.skill : {};
+    const readinessQuery = new URLSearchParams();
+    if (skill.skill_id) readinessQuery.set("skill_id", String(skill.skill_id));
+    if (skill.skill_version) readinessQuery.set("version", String(skill.skill_version));
+    const readinessSuffix = readinessQuery.toString() ? `?${readinessQuery.toString()}` : "";
+    flowPayload.computer_use_readiness = await requestJson(`/api/equipment/profiles/${encodeURIComponent(nextProfileId)}/computer-use-readiness${readinessSuffix}`);
+    if (!isCurrent()) return;
+    if (preserveComputerUseDraft) captureRuntimeComputerUseDraft(false);
+    runtimeEquipmentProfiles = Array.isArray(profilesPayload.profiles) ? profilesPayload.profiles : [];
+    runtimeEquipmentFlowPayload = flowPayload;
+    renderRuntimeEquipmentSkillFlow();
+    const tab = graphTabs.find((item) => item.id === `${MODULE_TAB_PREFIX}equipment`);
+    const catalogBacked = Boolean(tab?.modulePayload?.module?.execution_graph || tab?.modulePayload?.execution_graph);
+    if (tab && !catalogBacked) {
+      tab.graph = flowPayload.graph;
+      tab.baselineGraph = cloneConfig(flowPayload.graph);
+      tab.dirty = false;
+    }
+    if (activeGraphTabId === `${MODULE_TAB_PREFIX}equipment` && !catalogBacked) renderGraph(flowPayload.graph);
+    return flowPayload;
+  } catch (error) {
+    if (!isCurrent()) return;
+    throw error;
+  } finally {
+    if (runtimeEquipmentFlowLoadPending === generation) runtimeEquipmentFlowLoadPending = null;
   }
-  if (activeGraphTabId === `${MODULE_TAB_PREFIX}equipment` && !catalogBacked) renderGraph(flowPayload.graph);
-  return flowPayload;
 }
 
 function focusModuleForNode(nodeId) {
@@ -8969,7 +8994,7 @@ if (openEquipmentAgentManagerBtn) openEquipmentAgentManagerBtn.addEventListener(
 setInterval(() => renderRuntimeHeader(), 1000);
 setInterval(() => {
   if (document.hidden || activeGraph?.metadata?.ide_tab_kind !== "equipment_skill_flow") return;
-  loadRuntimeEquipmentSkillFlow(runtimeEquipmentFlowProfileId).catch((err) => log(String(err), "error"));
+  loadRuntimeEquipmentSkillFlow(runtimeEquipmentFlowProfileId, {passive: true}).catch((err) => log(String(err), "error"));
 }, 3000);
 
 renderEventLog();
