@@ -214,6 +214,85 @@ test("Runtime IDE serializes through the shared profile settings contract", asyn
   assert.equal(localPayloadCalls, 0);
 });
 
+test("Runtime IDE ignores Profile A save completion after Profile B is selected and edited", async () => {
+  const elements = {
+    "ide-computer-use-settings-status": {textContent: "Settings are unchanged."},
+    "ide-computer-use-readiness": {textContent: "Unavailable · Profile A worker missing"},
+    "ide-equipment-execution-mode": {value: "computer_use"},
+    "ide-computer-use-max-turns": {value: "9"},
+    "ide-computer-use-request-timeout": {value: "30"},
+    "ide-computer-use-frame-max-age": {value: "20"},
+    "ide-equipment-vision-link": {checked: true},
+  };
+  let resolveProfileASave;
+  const profileASaveResponse = new Promise(resolve => { resolveProfileASave = resolve; });
+  let posted = null;
+  let resetCalls = 0;
+  const loads = [];
+  const context = vm.createContext({
+    runtimeEquipmentFlowProfileId: "profile-a",
+    runtimeComputerUseSettingsStatus: null,
+    runtimeComputerUseDraft: {profileId: "profile-a", dirty: false},
+    document: {getElementById: id => elements[id]},
+    requestJson: async (url, options) => {
+      posted = {url, method: options.method, body: JSON.parse(options.body)};
+      return profileASaveResponse;
+    },
+    resetRuntimeComputerUseDraft() {
+      resetCalls += 1;
+      context.runtimeComputerUseDraft = null;
+    },
+    loadRuntimeEquipmentSkillFlow: async (profileId, options = {}) => {
+      loads.push({profileId, preserveComputerUseDraft: options.preserveComputerUseDraft});
+      const profileChanged = profileId !== context.runtimeEquipmentFlowProfileId;
+      if (profileChanged) {
+        context.runtimeComputerUseSettingsStatus = null;
+        context.runtimeComputerUseDraft = null;
+      }
+      context.runtimeEquipmentFlowProfileId = profileId;
+      if (profileId === "profile-b") elements["ide-computer-use-readiness"].textContent = "Unavailable · Profile B endpoint missing";
+      if (options.preserveComputerUseDraft === false) context.runtimeComputerUseDraft = null;
+    },
+    encodeURIComponent,
+    JSON,
+    Number,
+    Error,
+    window: {AX4LABEquipmentComputerUseSettings: {payload: expectedSettingsPayload}},
+  });
+  vm.runInContext(block("runtime_ide.js", "async function saveRuntimeComputerUseSettings", "function renderRuntimeEquipmentSkillFlow"), context);
+
+  const pendingSave = context.saveRuntimeComputerUseSettings();
+  assert.equal(posted.url, "/api/equipment/profiles/profile-a/settings");
+  await context.loadRuntimeEquipmentSkillFlow("profile-b");
+  const profileBDraft = {
+    profileId: "profile-b",
+    dirty: true,
+    values: {mode: "computer_use", maxTurns: "33", requestTimeout: "70", frameMaxAge: "25", visionLinkEnabled: true},
+  };
+  context.runtimeComputerUseDraft = profileBDraft;
+  context.runtimeComputerUseSettingsStatus = null;
+  const profileBReadiness = elements["ide-computer-use-readiness"].textContent;
+
+  resolveProfileASave({ok: true});
+  await pendingSave;
+
+  assert.deepEqual(posted, {
+    url: "/api/equipment/profiles/profile-a/settings",
+    method: "POST",
+    body: {
+      vision_link_enabled: true,
+      execution_mode: "computer_use",
+      computer_use: {max_turns: 9, request_timeout_s: 30, frame_max_age_s: 20},
+    },
+  });
+  assert.equal(context.runtimeEquipmentFlowProfileId, "profile-b");
+  assert.deepEqual(context.runtimeComputerUseDraft, profileBDraft);
+  assert.equal(context.runtimeComputerUseSettingsStatus, null);
+  assert.equal(elements["ide-computer-use-readiness"].textContent, profileBReadiness);
+  assert.equal(resetCalls, 0);
+  assert.deepEqual(loads, [{profileId: "profile-b", preserveComputerUseDraft: undefined}]);
+});
+
 test("Runtime IDE preserves save confirmation and readiness through the next same-profile passive poll", async () => {
   const elements = {
     "ide-computer-use-settings-status": {textContent: ""},

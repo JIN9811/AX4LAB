@@ -3771,6 +3771,7 @@ function bindRuntimeComputerUseDraftControls() {
 
 async function saveRuntimeComputerUseSettings() {
   try {
+    const savedProfileId = runtimeEquipmentFlowProfileId;
     const payload = window.AX4LABEquipmentComputerUseSettings.payload({
       mode: document.getElementById("ide-equipment-execution-mode")?.value,
       maxTurns: document.getElementById("ide-computer-use-max-turns")?.value,
@@ -3778,16 +3779,17 @@ async function saveRuntimeComputerUseSettings() {
       frameMaxAge: document.getElementById("ide-computer-use-frame-max-age")?.value,
       visionLinkEnabled: document.getElementById("ide-equipment-vision-link")?.checked,
     });
-    await requestJson(`/api/equipment/profiles/${encodeURIComponent(runtimeEquipmentFlowProfileId)}/settings`, {
+    await requestJson(`/api/equipment/profiles/${encodeURIComponent(savedProfileId)}/settings`, {
       method: "POST",
       body: JSON.stringify(payload),
     });
+    if (runtimeEquipmentFlowProfileId !== savedProfileId) return;
     resetRuntimeComputerUseDraft();
     runtimeComputerUseSettingsStatus = {
-      profileId: runtimeEquipmentFlowProfileId,
+      profileId: savedProfileId,
       message: "Saved for the next execution. Active execution pins remain unchanged.",
     };
-    await loadRuntimeEquipmentSkillFlow(runtimeEquipmentFlowProfileId, {preserveComputerUseDraft: false});
+    await loadRuntimeEquipmentSkillFlow(savedProfileId, {preserveComputerUseDraft: false});
   } catch (error) {
     const status = document.getElementById("ide-computer-use-settings-status");
     if (status) status.textContent = error.message;
