@@ -55,6 +55,51 @@ async def test_real_skill_path_uses_runner_then_existing_verification(tmp_path, 
 
 
 @pytest.mark.asyncio
+async def test_module_model_timeout_bounds_pinned_computer_use(tmp_path, monkeypatch):
+    import asyncio
+    from orchestrator.langgraph_runtime import ModuleRuntimeContext
+    from orchestrator.state import Stage
+    async def slow_model(prompt):
+        await asyncio.sleep(0.5)
+        return "act"
+    h, _, state, request, _ = setup(tmp_path, monkeypatch, [slow_model])
+    ctx = ModuleRuntimeContext(h.ctx, {"id": "equipment", "timeout_s": 0.01}, Stage.EQUIPMENT, state=state)
+    result = await LabEquipmentAgent()._run_equipment_skill(state, ctx, request)
+    assert not result.success
+    assert result.data["equipment_result"]["failure_code"] == "block_timeout"
+    assert h.desktop.effects == 0 and h.worker.state["lease"] is None
+
+
+@pytest.mark.asyncio
+async def test_enclosing_budget_is_not_renewed_by_each_turn(tmp_path, monkeypatch):
+    import asyncio
+    from orchestrator.langgraph_runtime import ModuleRuntimeContext
+    from orchestrator.state import Stage
+    async def short_turn(prompt):
+        await asyncio.sleep(0.04)
+        return "wait"
+    h, _, state, request, _ = setup(tmp_path, monkeypatch, [short_turn] * 8)
+    ctx = ModuleRuntimeContext(h.ctx, {"id": "equipment", "timeout_s": 0.12}, Stage.EQUIPMENT, state=state)
+    # Keep this test focused on the real module's budget, not notification UI.
+    ctx._notify_model_call = h.ctx._notify_model_call
+    result = await LabEquipmentAgent()._run_equipment_skill(state, ctx, request)
+    assert not result.success
+    assert result.data["equipment_result"]["failure_code"] == "block_timeout"
+    assert 2 <= len(h.prompts) < 8
+    assert h.desktop.effects == 0 and h.worker.state["lease"] is None
+
+
+@pytest.mark.asyncio
+async def test_release_failure_never_completes_existing_skill_runtime(tmp_path, monkeypatch):
+    h, _, state, request, _ = setup(tmp_path, monkeypatch)
+    h.ctx.tools.register("equipment.pyautogui.computer_use_release", lambda _: {"ok": False, "status": "blocked"})
+    result = await LabEquipmentAgent()._run_equipment_skill(state, h.ctx, request)
+    assert not result.success
+    assert result.data["equipment_result"]["failure_code"] == "release_requires_operator"
+    assert result.data["equipment_skill_execution"]["state"] != "COMPLETED"
+
+
+@pytest.mark.asyncio
 async def test_settings_change_cannot_resume_operator_run_as_legacy(tmp_path, monkeypatch):
     h, registry, state, request, path = setup(tmp_path, monkeypatch, ["needs_operator"])
     agent = LabEquipmentAgent()

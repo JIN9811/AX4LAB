@@ -1,6 +1,7 @@
 """Real bounded loop and worker; only model HTTP and desktop are synthetic."""
 import asyncio
 import importlib
+import inspect
 import json
 from copy import deepcopy
 from pathlib import Path
@@ -52,6 +53,8 @@ def harness(tmp_path, monkeypatch, decisions=None):
         chosen = decisions.pop(0) if decisions else "complete"
         if callable(chosen):
             chosen = chosen(prompt)
+        if inspect.isawaitable(chosen):
+            chosen = await chosen
         if isinstance(chosen, httpx.Response):
             return chosen
         if isinstance(chosen, str) and chosen in {"act", "complete", "needs_operator", "wait"}:
@@ -66,6 +69,52 @@ def harness(tmp_path, monkeypatch, decisions=None):
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: client(transport=httpx.MockTransport(respond), **kwargs))
     args = dict(state=state, ctx=ctx, request=request, package=package, execution=execution, settings=settings, call_tool=call_tool)
     return SimpleNamespace(**locals())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["rejected", "exception"])
+async def test_verified_execution_requires_confirmed_release(tmp_path, monkeypatch, failure):
+    h = harness(tmp_path, monkeypatch)
+    releases = []
+    async def release_failure(name, payload):
+        if name.endswith("_release"):
+            releases.append(payload)
+            if failure == "exception":
+                raise RuntimeError("endpoint-secret lease-secret")
+            return {"ok": False, "status": "blocked", "failure_code": "lease_busy", "detail": "lease-secret"}
+        return await h.call_tool(name, payload)
+    h.args["call_tool"] = release_failure
+    result = await runner().run_computer_use(**h.args)
+    assert result["ok"] is False
+    assert result["failure_code"] == "release_requires_operator"
+    assert result["operator_intervention_required"] is True
+    assert len(releases) == 1 and h.worker.state["lease"] is not None
+    records = [json.loads(Path(item["local_path"]).read_text()) for item in result["output_artifacts"]]
+    assert any(r["kind"] == "verification" and r["data"]["ok"] for r in records)
+    assert records[-1]["kind"] == "release"
+    assert records[-1]["data"]["status"] == "unresolved"
+    serialized = json.dumps([result, records])
+    assert "lease-secret" not in serialized and "endpoint-secret" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_enclosing_timeout_after_dispatch_reconciles_same_id(tmp_path, monkeypatch):
+    h = harness(tmp_path, monkeypatch, ["act", "complete"])
+    h.ctx.runtime_module_config = lambda: {"timeout_s": 0.04}
+    async def delayed_receipt(name, payload):
+        result = await h.call_tool(name, payload)
+        if name.endswith("_act"):
+            await asyncio.sleep(0.08)
+        return result
+    h.args["call_tool"] = delayed_receipt
+    result = await runner().run_computer_use(**h.args)
+    assert not result["ok"] and result["failure_code"] == "block_timeout"
+    assert h.desktop.effects == 1
+    actions = [p for op, p in h.calls if op == "act"]
+    statuses = [p for op, p in h.calls if op == "status"]
+    assert len(actions) == len(statuses) == 1
+    assert actions[0]["action_id"] == statuses[0]["action_id"]
+    await asyncio.sleep(0.09)  # Drain the synthetic receipt task; never another dispatch.
 
 
 @pytest.mark.asyncio
@@ -397,3 +446,16 @@ async def test_typed_action_permission_rejection_never_dispatches(tmp_path, monk
     assert not result["ok"]
     assert h.desktop.effects == 0
     assert not any(op == "act" for op, _ in h.calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("evidence", [False, True])
+async def test_policy_program_without_validated_package_hash_never_acquires(tmp_path, monkeypatch, evidence):
+    h = harness(tmp_path, monkeypatch)
+    if evidence:
+        h.package["workflow"]["computer_use"]["postconditions"] = [{"type": "program", "program_id": "unbound", "read_only": True}]
+    else:
+        h.package["workflow"]["computer_use"]["program_ids"] = ["unbound"]
+    result = await runner().run_computer_use(**h.args)
+    assert result.get("failure_code") == "program_hash_binding_missing"
+    assert not h.calls

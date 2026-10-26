@@ -504,8 +504,10 @@ class WindowsPyAutoGUIBridge(BaseBridge):
             return capability
         if capability.get("computer_use_v1") is not True:
             return blocked("computer_use_unavailable", "Selected worker does not support computer_use_v1")
+        if operation == "acquire" and payload.get("program_hashes") and capability.get("computer_use_limits", {}).get("program_hash_binding") is not True:
+            return blocked("program_hash_binding_unavailable", "Selected worker must be upgraded for hash-bound programs")
         fields = {"execution_id", "run_id", "cycle_id", "specimen_id", "equipment_profile_id", "session_id", "lease_token",
-                  "policy", "runtime_values", "frame_max_age_s", "lease_seconds", "action_id", "observation_id", "action", "payload_sha256"}
+                  "policy", "program_hashes", "runtime_values", "frame_max_age_s", "lease_seconds", "action_id", "observation_id", "action", "payload_sha256"}
         request = {key: value for key, value in payload.items() if key in fields}
         request["equipment_profile_id"] = profile
         return self._live_post(tool, f"/computer-use/{operation}", request, payload)

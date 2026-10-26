@@ -37,6 +37,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+from contextlib import contextmanager
+from copy import deepcopy
 import csv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO, StringIO
@@ -3305,7 +3307,7 @@ def _capability_catalog() -> dict[str, Any]:
         "excluded": ["shell", "arbitrary_python", "file_delete", "password_entry", "window_close", "process_terminate"],
         "failsafe_required": True,
         "computer_use_v1": COMPUTER_USE is not None,
-        "computer_use_limits": {"masked_registered_programs": False, "native_context": "windows_per_monitor_dpi_and_focus"},
+        "computer_use_limits": {"masked_registered_programs": False, "program_hash_binding": True, "native_context": "windows_per_monitor_dpi_and_focus"},
     }
 
 
@@ -3369,7 +3371,37 @@ def _load_custom_programs() -> dict[str, dict[str, Any]]:
     return programs
 
 
+_COMPUTER_USE_PROGRAMS = threading.local()
+
+
+@contextmanager
+def _computer_use_program_scope(program_id: str, expected_sha256: str):
+    """Hash and freeze the exact registered definition for every nested read."""
+    if COMPUTER_USE is None:
+        raise ValueError("Computer-use program binding unavailable")
+    program = deepcopy(_all_programs().get(program_id, {}))
+    validation = _validate_program_definition(program)
+    normalized = deepcopy(validation.get("program", {}))
+    if (not validation.get("ok") or normalized.get("enabled") is False
+            or (program.get("managed_by") == "atr_equipment_skill" and program.get("integrity_ok") is not True)
+            or not re.fullmatch(r"[0-9a-f]{64}", str(expected_sha256))
+            or not secrets.compare_digest(_program_definition_sha256(normalized), expected_sha256)):
+        raise COMPUTER_USE.ComputerUseError("program_hash_mismatch", "Registered program hash differs from the deployed Skill")
+    previous = getattr(_COMPUTER_USE_PROGRAMS, "snapshot", None)
+    _COMPUTER_USE_PROGRAMS.snapshot = {program_id: normalized}
+    try:
+        yield deepcopy(normalized)
+    finally:
+        if previous is None:
+            del _COMPUTER_USE_PROGRAMS.snapshot
+        else:
+            _COMPUTER_USE_PROGRAMS.snapshot = previous
+
+
 def _all_programs() -> dict[str, dict[str, Any]]:
+    snapshot = getattr(_COMPUTER_USE_PROGRAMS, "snapshot", None)
+    if snapshot is not None:
+        return deepcopy(snapshot)
     programs = {key: {**value, "built_in": True, "enabled": True} for key, value in PROGRAMS.items()}
     programs.update(_load_custom_programs())
     return programs

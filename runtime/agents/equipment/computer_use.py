@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import hashlib
 import inspect
 import json
+import math
 import os
 from pathlib import Path
 import time
@@ -22,7 +23,7 @@ from backends.openai_client import OpenAIBackend
 from backends.vllm_client import VLLMBackend
 from Pyautogui_server_for_window.bridge.computer_use_contract import (
     ComputerUseError, _validate_observation, decision_json_schema, normalize_settings,
-    parse_decision, validate_action, validate_policy,
+    parse_decision, validate_action, validate_policy, validate_program_hashes,
 )
 from Pyautogui_server_for_window.bridge.computer_use_runtime import action_payload_sha256
 
@@ -144,7 +145,12 @@ async def run_computer_use(*, state, ctx, request, package, execution, settings,
     last_result = {}
     observation = None
     image = None
+    outcome = {}
     cfg = normalize_settings(settings)["computer_use"]
+    module_config = getattr(ctx, "runtime_module_config", lambda: {})()
+    enclosing_timeout = module_config.get("timeout_s")
+    block_deadline = (time.monotonic() + float(enclosing_timeout)
+                      if isinstance(enclosing_timeout, (int, float)) and math.isfinite(enclosing_timeout) and enclosing_timeout > 0 else None)
     frozen_request = {k: deepcopy(v) for k, v in request.items() if not k.startswith("_")}
     spec = deepcopy(state.current_experiment_spec)
     identity = {"execution_id": str(execution["execution_id"]), "run_id": str(state.run_id),
@@ -164,10 +170,14 @@ async def run_computer_use(*, state, ctx, request, package, execution, settings,
         cancel = request.get("_cancel_requested")
         if scope != initial_scope or (callable(cancel) and cancel()):
             raise ComputerUseError("cancelled", "Execution scope changed or was cancelled")
+        if block_deadline is not None and time.monotonic() >= block_deadline:
+            raise ComputerUseError("block_timeout", "Enclosing execution budget expired")
 
     async def guarded(coro, *, action=False):
         task = asyncio.create_task(coro)
         deadline = time.monotonic() + cfg["request_timeout_s"]
+        if block_deadline is not None:
+            deadline = min(deadline, block_deadline)
         try:
             while not task.done():
                 check_active()
@@ -190,9 +200,10 @@ async def run_computer_use(*, state, ctx, request, package, execution, settings,
                                {**connection, **identity, **(credentials or {}), **(extra or {})})
 
     def fail(code):
-        return {"ok": False, "status": "effect_unknown" if uncertain else "blocked", "failure_code": code,
+        outcome.update({"ok": False, "status": "effect_unknown" if uncertain else "blocked", "failure_code": code,
                 "computer_use": {**metadata, "turns": turns},
-                "output_artifacts": artifacts.records if artifacts else []}
+                "output_artifacts": artifacts.records if artifacts else []})
+        return outcome
 
     try:
         check_active()
@@ -200,6 +211,9 @@ async def run_computer_use(*, state, ctx, request, package, execution, settings,
         if raw_policy is None:
             raise ComputerUseError("missing_policy", "This exact Skill has no computer-use policy")
         policy = validate_policy(deepcopy(raw_policy))
+        declared = set(policy["program_ids"]) | {check["program_id"] for check in policy["postconditions"] if check["type"] == "program"}
+        manifest_hashes = package["manifest"].get("program_sha256", {})
+        program_hashes = validate_program_hashes(policy, {key: manifest_hashes[key] for key in declared if key in manifest_hashes})
         if not connection["confirm_live_execute"]:
             raise ComputerUseError("live_confirmation_required", "Computer use requires explicit live execution confirmation")
         runtime_values = {key: deepcopy(frozen_request.get("runtime_context", {}).get(key))
@@ -213,6 +227,7 @@ async def run_computer_use(*, state, ctx, request, package, execution, settings,
                         programs_sha256=_hash(package["manifest"].get("program_sha256", {})), settings=deepcopy(cfg))
         artifacts = _Artifacts(root, identity, execution.get("sequence_id", ""), metadata)
         acquired = await guarded(tool("acquire", {"policy": policy, "runtime_values": runtime_values,
+                                                  "program_hashes": program_hashes,
                                                   "frame_max_age_s": cfg["frame_max_age_s"]}))
         if acquired.get("ok") is not True:
             raise ComputerUseError(str(acquired.get("failure_code") or "worker_unavailable"), "Worker acquisition failed")
@@ -269,7 +284,7 @@ async def run_computer_use(*, state, ctx, request, package, execution, settings,
                     decision = parse_decision(response.text, observation["observation_id"])
                     break
                 except ComputerUseError as exc:
-                    if exc.code == "cancelled" or attempt == 1:
+                    if exc.code in {"cancelled", "block_timeout"} or attempt == 1:
                         raise
                     prompt["format_error"] = exc.code[:128]
                 except httpx.HTTPStatusError as exc:
@@ -299,9 +314,10 @@ async def run_computer_use(*, state, ctx, request, package, execution, settings,
                 evidence = verified.get("evidence", {})
                 if verified.get("ok") is not True or verified.get("status") != "verified" or evidence.get("ok") is not True or not evidence.get("checks"):
                     raise ComputerUseError("postcondition_failed", "Worker postconditions were not verified")
-                return {**last_result, "ok": True, "status": "completed", "computer_use": {**metadata, "turns": turns},
+                outcome.update({**last_result, "ok": True, "status": "completed", "computer_use": {**metadata, "turns": turns},
                         "screen_checks": [{"ok": True, "source": "computer_use_worker", "evidence": _public(evidence)}],
-                        "request_log_ref": str(artifacts.root), "output_artifacts": [*last_result.get("output_artifacts", []), *artifacts.records]}
+                        "request_log_ref": str(artifacts.root), "output_artifacts": [*last_result.get("output_artifacts", []), *artifacts.records]})
+                return outcome
             validate_action(decision["action"], policy, observation, runtime_values)
             action = {"action_id": f"{identity['execution_id']}-cu-{turns:03d}", "observation_id": observation["observation_id"], "action": decision["action"]}
             action["payload_sha256"] = action_payload_sha256(action)
@@ -344,7 +360,20 @@ async def run_computer_use(*, state, ctx, request, package, execution, settings,
     finally:
         image = observation = None
         if credentials and not uncertain:
+            cleanup = {"status": "unresolved", "reason": "release_unconfirmed"}
             try:
-                await asyncio.wait_for(tool("release"), timeout=min(cfg["request_timeout_s"], 10))
+                released = await asyncio.wait_for(tool("release"), timeout=min(cfg["request_timeout_s"], 10))
+                if released.get("ok") is True and released.get("status") == "released":
+                    cleanup = {"status": "released"}
             except (Exception, asyncio.CancelledError):
-                pass
+                cleanup["reason"] = "release_exception"
+            try:
+                artifacts.write("release", cleanup)
+            except Exception:
+                cleanup = {"status": "unresolved", "reason": "cleanup_evidence_unavailable"}
+            outcome.setdefault("computer_use", {})["cleanup"] = cleanup
+            outcome["output_artifacts"] = [*last_result.get("output_artifacts", []), *artifacts.records]
+            if cleanup["status"] != "released":
+                if outcome.get("failure_code"):
+                    outcome["prior_failure_code"] = outcome["failure_code"]
+                outcome.update(ok=False, status="blocked", failure_code="release_requires_operator", operator_intervention_required=True)

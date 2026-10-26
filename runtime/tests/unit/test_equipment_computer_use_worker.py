@@ -165,6 +165,18 @@ def test_masked_policy_cannot_use_legacy_program_capture_paths(tmp_path):
         assert result["failure_code"] == "masking_program_unsupported"
 
 
+def bind_fake_program(server, program_id):
+    """Supply the independent hash boundary for native-context unit doubles."""
+    from contextlib import contextmanager
+    from copy import deepcopy
+    @contextmanager
+    def scope(identifier, digest):
+        assert identifier == program_id and digest == "a" * 64
+        yield deepcopy(server._all_programs()[identifier])
+    server._computer_use_program_scope = scope
+    return {**IDENTITY, "program_hashes": {program_id: "a" * 64}}
+
+
 def test_evidence_requires_actual_assertion_success():
     from types import SimpleNamespace
     observed = []
@@ -177,7 +189,7 @@ def test_evidence_requires_actual_assertion_success():
     p = policy()
     p["postconditions"] = [{"type": "program", "program_id": "evidence", "read_only": True}]
     native = dict(window_title="Demo", window_id="1", window_rect=[0, 0, 20, 20], desktop_rect=[0, 0, 20, 20], dpi=96)
-    result = runtime().NativeDesktopAdapter(server, native_context=lambda: dict(native)).verify(p, IDENTITY)
+    result = runtime().NativeDesktopAdapter(server, native_context=lambda: dict(native)).verify(p, bind_fake_program(server, "evidence"))
     assert not result["ok"]
     assert observed[0]["require_screen_assertions"] is True
 
@@ -210,13 +222,14 @@ def test_screen_evidence_requires_stable_application_and_native_dpi(action, cond
         get_pyautogui=lambda: (object(), None), _execute_protocol_sequence=evidence)
     adapter = runtime().NativeDesktopAdapter(server, native_context=lambda: dict(native))
     adapter.native_scope = scope
+    context = bind_fake_program(server, "evidence")
     p = policy()
     p["postconditions"] = [{"type": "program", "program_id": "evidence", "read_only": True}]
     if condition == "valid":
-        assert adapter.verify(p, IDENTITY)["ok"]
+        assert adapter.verify(p, context)["ok"]
     else:
         with pytest.raises(runtime().ComputerUseError) as error:
-            adapter.verify(p, IDENTITY)
+            adapter.verify(p, context)
         assert error.value.code == {"wrong_foreground": "window_mismatch", "unavailable_dpi": "native_context_unavailable", "changed": "window_changed"}[condition]
     assert state["checks"] == (1 if condition in {"changed", "valid"} else 0)
     assert not state["scoped"]
@@ -291,8 +304,9 @@ def test_evidence_program_cannot_disguise_mutating_steps():
     adapter = runtime().NativeDesktopAdapter(server)
     p = policy()
     p["postconditions"] = [{"type": "program", "program_id": "evidence", "read_only": True}]
-    with pytest.raises(runtime().ComputerUseError):
-        adapter.verify(p, {})
+    with pytest.raises(runtime().ComputerUseError) as error:
+        adapter.verify(p, bind_fake_program(server, "evidence"))
+    assert error.value.code == "mutating_evidence"
     assert not effects
 
 
@@ -369,12 +383,13 @@ def test_native_unavailable_context_and_registered_program_dispatch():
     gui = SimpleNamespace(screenshot=lambda **kw: Image.new("RGB", (20, 20)))
     calls = []
     server = SimpleNamespace(get_pyautogui=lambda: (gui, None), _execute=lambda payload: calls.append(payload) or {"ok": True})
+    server._all_programs = lambda: {"known": {}}
     native = dict(window_title="Demo", window_id="1", window_rect=[0, 0, 20, 20], desktop_rect=[0, 0, 20, 20], dpi=96)
     adapter = runtime().NativeDesktopAdapter(server, native_context=lambda: dict(native))
     p = policy()
     p["program_ids"] = ["known"]
     observation = adapter.capture(p)
-    context = {**IDENTITY, "policy": p, "observation": observation, "action_id": "action1", "runtime_values": {"program_id": "not-authorized"}}
+    context = {**bind_fake_program(server, "known"), "policy": p, "observation": observation, "action_id": "action1", "runtime_values": {"program_id": "not-authorized"}}
     assert adapter.execute({"type": "invoke_program", "program_id": "known"}, context)["ok"]
     assert calls[0]["program_id"] == "known"
     assert calls[0]["sequence_id"] == "action1"
@@ -382,6 +397,55 @@ def test_native_unavailable_context_and_registered_program_dispatch():
     with pytest.raises(runtime().ComputerUseError):
         adapter.execute({"type": "invoke_program", "program_id": "known"}, context)
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("evidence", [False, True])
+def test_program_policy_requires_exact_hash_binding_before_lease(tmp_path, evidence):
+    c = runtime().ComputerUseController(tmp_path, Desktop(), "worker1")
+    p = policy()
+    if evidence:
+        p["postconditions"] = [{"type": "program", "program_id": "bound", "read_only": True}]
+    else:
+        p["program_ids"] = ["bound"]
+    result = c.handle("acquire", {**IDENTITY, "policy": p}, "principal")
+    assert result.get("failure_code") == "program_hash_binding_missing"
+    assert c.state["lease"] is None
+
+
+@pytest.mark.parametrize("packaged", [False, True])
+@pytest.mark.parametrize("evidence", [False, True])
+def test_native_program_hash_check_and_execution_share_immutable_registry(tmp_path, monkeypatch, packaged, evidence):
+    from tests.unit.test_windows_pyautogui_bridge_server_helper import _load_helper_module, _load_packaged_helper_module
+    server = _load_packaged_helper_module() if packaged else _load_helper_module()
+    assert hasattr(server, "_computer_use_program_scope"), "worker has no hash-bound execution scope"
+    sequence = [{"action": "wait_for_file", "pattern": "synthetic.csv", "timeout_s": 1}] if evidence else [{"action": "press", "key": "enter"}]
+    definition = {"schema": server.PROGRAM_SCHEMA, "program_id": "bound", "name": "Bound", "sequence": sequence}
+    program = server._validate_program_definition(definition)["program"]
+    digest = server._program_definition_sha256(program)
+    current = {"bound": {**program, "managed_by": "atr_equipment_skill", "integrity_ok": True}}
+    monkeypatch.setattr(server, "_load_custom_programs", lambda: current)
+    monkeypatch.setattr(server, "_desktop_platform_status", lambda: {"desktop_control_ready": True})
+    effects = []
+    def dispatch(sequence_id=None, payload=None, *, program_id, **kwargs):
+        # Even lower-level registry lookup sees the snapshot, not a changed file.
+        current["bound"]["sequence"] = [{"action": "press", "key": "escape"}]
+        effects.append((payload["sequence"], server._all_programs()[program_id]["sequence"]))
+        return {"ok": True}
+    monkeypatch.setattr(server, "_run_custom_sequence", dispatch)
+    monkeypatch.setattr(server, "_execute_protocol_sequence", dispatch)
+    monkeypatch.setattr(server, "get_pyautogui", lambda: (object(), None))
+    def invoke():
+        if evidence:
+            p = policy()
+            p["postconditions"] = [{"type": "program", "program_id": "bound", "read_only": True}]
+            return runtime().NativeDesktopAdapter(server).verify(p, {**IDENTITY, "program_hashes": {"bound": digest}})
+        with server._computer_use_program_scope("bound", digest):
+            return server._execute({"program_id": "bound", "sequence_id": "synthetic"})
+    assert invoke()["ok"]
+    assert effects == [(sequence, sequence)]
+    with pytest.raises(runtime().ComputerUseError, match="hash"):
+        invoke()
+    assert len(effects) == 1
 
 
 def test_write_failure_never_dispatches_and_corrupt_ledger_never_resets(tmp_path, monkeypatch):

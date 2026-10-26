@@ -22,9 +22,9 @@ import time
 from uuid import uuid4
 
 try:
-    from .computer_use_contract import ComputerUseError, validate_policy, validate_action, _validate_observation
+    from .computer_use_contract import ComputerUseError, validate_policy, validate_program_hashes, validate_action, _validate_observation
 except ImportError:  # standalone packaged worker
-    from computer_use_contract import ComputerUseError, validate_policy, validate_action, _validate_observation
+    from computer_use_contract import ComputerUseError, validate_policy, validate_program_hashes, validate_action, _validate_observation
 
 IDENTITY_FIELDS = ("execution_id", "run_id", "cycle_id", "specimen_id", "equipment_profile_id")
 OPERATIONS = {"acquire", "observe", "act", "status", "verify", "release"}
@@ -67,7 +67,7 @@ class ComputerUseController:
             lease = self.state["lease"]
             if lease is not None:
                 _require(isinstance(lease, dict) and {"identity", "principal", "session_id", "token_hash", "policy",
-                         "runtime_values", "lease_seconds", "frame_max_age_s", "expires_at"} == set(lease),
+                         "runtime_values", "lease_seconds", "frame_max_age_s", "expires_at"} == set(lease) - {"program_hashes"},
                          "ledger_invalid", "Invalid lease ledger")
                 _require(isinstance(lease["identity"], dict) and set(lease["identity"]) == set(IDENTITY_FIELDS) and
                          isinstance(lease["principal"], str) and bool(lease["principal"]) and
@@ -79,6 +79,7 @@ class ComputerUseController:
                 for value in [lease["session_id"], *lease["identity"].values()]:
                     _id(value)
                 validate_policy(lease["policy"])
+                lease["program_hashes"] = validate_program_hashes(lease["policy"], lease.get("program_hashes"))
                 _require(isinstance(lease["runtime_values"], dict) and
                          lease["runtime_values"].keys() <= set(lease["policy"]["runtime_value_keys"]) and
                          all(isinstance(v, str) and len(v) <= 4096 and "\x00" not in v for v in lease["runtime_values"].values()),
@@ -179,6 +180,7 @@ class ComputerUseController:
                 _require(not policy["mask_regions"] or not (policy["program_ids"] or
                          any(check["type"] == "program" for check in policy["postconditions"])),
                          "masking_program_unsupported", "Masked sessions cannot use legacy program capture paths")
+                program_hashes = validate_program_hashes(policy, payload.get("program_hashes"))
                 values = payload.get("runtime_values", {})
                 _require(isinstance(values, dict) and values.keys() <= set(policy["runtime_value_keys"]) and
                          all(isinstance(v, str) and len(v) <= 4096 and "\x00" not in v for v in values.values()),
@@ -189,6 +191,7 @@ class ComputerUseController:
                 token, session = secrets.token_urlsafe(32), uuid4().hex
                 self.state["lease"] = {"identity": identity, "principal": principal, "session_id": session,
                     "token_hash": hashlib.sha256(token.encode()).hexdigest(), "policy": policy,
+                    "program_hashes": program_hashes,
                     "runtime_values": deepcopy(values), "lease_seconds": seconds, "frame_max_age_s": age,
                     "expires_at": time.time() + seconds}
                 self._persist()
@@ -224,7 +227,8 @@ class ComputerUseController:
         # Never hold the worker mutex during a physical program or image capture.
         try:
             context = {**deepcopy(lease["identity"]), "session_id": lease["session_id"],
-                       "runtime_values": deepcopy(lease["runtime_values"]), "policy": deepcopy(lease["policy"])}
+                       "runtime_values": deepcopy(lease["runtime_values"]), "policy": deepcopy(lease["policy"]),
+                       "program_hashes": deepcopy(lease["program_hashes"])}
             if operation == "observe":
                 observation = self._capture(lease)
                 with self.lock:
@@ -410,9 +414,10 @@ class NativeDesktopAdapter:
         kind = action["type"]
         if kind == "invoke_program":
             _require(not policy["mask_regions"], "masking_program_unsupported", "Masked sessions cannot run legacy programs")
-            return self.server._execute({**{k: context[k] for k in IDENTITY_FIELDS},
-                "program_id": action["program_id"], "sequence_id": context["action_id"],
-                "runtime_values": context["runtime_values"]})
+            with self._program_scope(action["program_id"], context):
+                return self.server._execute({**{k: context[k] for k in IDENTITY_FIELDS},
+                    "program_id": action["program_id"], "sequence_id": context["action_id"],
+                    "runtime_values": context["runtime_values"]})
         target = policy["targets"][action["target_id"]]
         _require(hashlib.sha256(self._crop(image, target["anchor"]["region"]).tobytes()).hexdigest() == target["anchor"]["sha256"],
                  "anchor_mismatch", "Target changed before dispatch")
@@ -443,6 +448,14 @@ class NativeDesktopAdapter:
             raise ComputerUseError("invalid_action", "Unsupported input")
         return {"ok": True}
 
+    def _program_scope(self, program_id, context):
+        digest = context.get("program_hashes", {}).get(program_id)
+        _require(isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest),
+                 "program_hash_binding_missing", "Registered program hash is required")
+        scope = getattr(self.server, "_computer_use_program_scope", None)
+        _require(callable(scope), "program_hash_binding_unavailable", "Worker program binding support unavailable")
+        return scope(program_id, digest)
+
     def verify(self, policy, context):
         checks = []
         for check in policy["postconditions"]:
@@ -451,33 +464,36 @@ class NativeDesktopAdapter:
                     _, _, image = self._image(policy)
                 checks.append({"type": "image", "ok": hashlib.sha256(self._crop(image, check["region"]).tobytes()).hexdigest() == check["sha256"]})
                 continue
-            program = self.server._all_programs().get(check["program_id"], {})
             _require(not policy["mask_regions"], "masking_program_unsupported", "Masked sessions cannot run legacy evidence programs")
-            sequence = program.get("sequence", [])
-            # Introspect actual registry contents, not the policy's read_only claim.
-            read_actions = {"health", "log", "wait", "assert_visible", "assert_text", "pixel_matches_color", "wait_for_file", "wait_until_image", "wait_until_text"}
-            assertions = {"assert_visible", "assert_text", "pixel_matches_color", "wait_for_file", "wait_until_image", "wait_until_text"}
-            _require(program.get("enabled") is not False and (program.get("managed_by") != "atr_equipment_skill" or program.get("integrity_ok") is True)
-                     and isinstance(sequence, list) and 1 <= len(sequence) <= 100 and
-                     all(isinstance(step, dict) and step.get("action") in read_actions for step in sequence) and
-                     any(step["action"] in assertions for step in sequence), "mutating_evidence", "Registered evidence is not a read-only assertion program")
-            gui, _ = self.server.get_pyautogui()
-            _require(gui is not None, "native_context_unavailable", "Evidence desktop unavailable")
-            trace = []
-            screen_evidence = any(step["action"] in assertions - {"wait_for_file"} for step in sequence)
-            with self.native_scope() if screen_evidence else nullcontext():
-                if screen_evidence:
-                    native = self.native_context()
-                    _require(native["window_title"] == policy["application"]["window_title"],
-                             "window_mismatch", "Evidence application window is not foreground")
-                result = self.server._execute_protocol_sequence(gui, program_id=check["program_id"],
-                    payload={"sequence": deepcopy(sequence), "locators": deepcopy(program.get("locators", {})),
-                             "require_screen_assertions": True, "runtime_values": context.get("runtime_values", {})},
-                    run_id=context["run_id"], specimen_id=context["specimen_id"], trace=trace)
-                if screen_evidence:
-                    after = self.native_context()
-                    _require(all(native[k] == after[k] for k in ("window_id", "window_title", "window_rect", "desktop_rect", "dpi")),
-                             "window_changed", "Native application context changed during evidence verification")
-            checks.append({"type": "program", "program_id": check["program_id"],
-                           "ok": result.get("ok") is True and all(step.get("status") == "ok" for step in trace)})
+            with self._program_scope(check["program_id"], context) as program:
+                checks.append(self._verify_program(policy, context, check, program))
         return {"ok": bool(checks) and all(c["ok"] for c in checks), "checks": checks}
+
+    def _verify_program(self, policy, context, check, program):
+        sequence = program.get("sequence", [])
+        # Inspect the hash-verified snapshot, including all nested registry reads.
+        read_actions = {"health", "log", "wait", "assert_visible", "assert_text", "pixel_matches_color", "wait_for_file", "wait_until_image", "wait_until_text"}
+        assertions = {"assert_visible", "assert_text", "pixel_matches_color", "wait_for_file", "wait_until_image", "wait_until_text"}
+        _require(program.get("enabled") is not False and (program.get("managed_by") != "atr_equipment_skill" or program.get("integrity_ok") is True)
+                 and isinstance(sequence, list) and 1 <= len(sequence) <= 100 and
+                 all(isinstance(step, dict) and step.get("action") in read_actions for step in sequence) and
+                 any(step["action"] in assertions for step in sequence), "mutating_evidence", "Registered evidence is not a read-only assertion program")
+        gui, _ = self.server.get_pyautogui()
+        _require(gui is not None, "native_context_unavailable", "Evidence desktop unavailable")
+        trace = []
+        screen_evidence = any(step["action"] in assertions - {"wait_for_file"} for step in sequence)
+        with self.native_scope() if screen_evidence else nullcontext():
+            if screen_evidence:
+                native = self.native_context()
+                _require(native["window_title"] == policy["application"]["window_title"],
+                         "window_mismatch", "Evidence application window is not foreground")
+            result = self.server._execute_protocol_sequence(gui, program_id=check["program_id"],
+                payload={"sequence": deepcopy(sequence), "locators": deepcopy(program.get("locators", {})),
+                         "require_screen_assertions": True, "runtime_values": context.get("runtime_values", {})},
+                run_id=context["run_id"], specimen_id=context["specimen_id"], trace=trace)
+            if screen_evidence:
+                after = self.native_context()
+                _require(all(native[k] == after[k] for k in ("window_id", "window_title", "window_rect", "desktop_rect", "dpi")),
+                         "window_changed", "Native application context changed during evidence verification")
+        return {"type": "program", "program_id": check["program_id"],
+                "ok": result.get("ok") is True and all(step.get("status") == "ok" for step in trace)}

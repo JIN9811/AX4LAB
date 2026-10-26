@@ -113,6 +113,18 @@ def normalize_settings(raw: dict | None) -> dict:
         "max_turns": turns, "request_timeout_s": float(timeout), "frame_max_age_s": float(age)}}
 
 
+def validate_program_hashes(policy: dict, raw: dict | None) -> dict:
+    """Bind every mutating/evidence program to a host-validated deployed hash."""
+    expected = set(policy["program_ids"]) | {check["program_id"] for check in policy["postconditions"] if check["type"] == "program"}
+    value = {} if raw is None else raw
+    _require(isinstance(value, dict) and set(value) == expected,
+             "program_hash_binding_missing", "Every declared program requires its validated package hash")
+    for program_id, digest in value.items():
+        _identifier(program_id)
+        _hash(digest)
+    return deepcopy(value)
+
+
 def validate_policy(raw: dict) -> dict:
     """Validate declared permissions. All rectangles are window-relative pixels."""
     _object(raw, ("schema", "application", "targets", "protected_regions", "program_ids",
