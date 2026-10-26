@@ -51,7 +51,10 @@
   }
 
   async function apiJson(url, options = {}) {
-    const response = await fetch(url, {
+    const scoped = new URL(url, window.location.origin);
+    const profile = new URLSearchParams(window.location.search).get("profile_id");
+    if (profile) scoped.searchParams.set("profile_id", profile);
+    const response = await fetch(scoped.pathname + scoped.search, {
       headers: { "Content-Type": "application/json", ...(options.headers || {}) },
       ...options,
     });

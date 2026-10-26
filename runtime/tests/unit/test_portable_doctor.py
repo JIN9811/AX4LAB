@@ -62,6 +62,14 @@ def forbidden(*args, **kwargs):
     raise ForbiddenOperation("doctor attempted a forbidden runtime operation")
 
 
+def test_offline_doctor_does_not_certify_llm_readiness(checkout, monkeypatch):
+    monkeypatch.setattr(socket, "socket", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    rows = module.Doctor(paths=checkout, core_only=True).run()
+    assert any(row["name"] == "LLM readiness" and row["status"] == "unverified"
+               and row["level"] == "warn" for row in rows)
+
+
 class ForbiddenOperation(BaseException):
     pass
 
@@ -94,7 +102,7 @@ def test_cli_endpoint_mapping_errors_keep_redacted_json(checkout, monkeypatch, c
 @pytest.mark.parametrize("core_only", [False, True])
 def test_default_does_not_bootstrap_import_sdks_connect_or_spawn(checkout, monkeypatch, core_only):
     original_import = builtins.__import__
-    blocked = ("app.main", "app.bootstrap", "pyrealsense2", "torch", "botorch", "pyautogui", "paho")
+    blocked = ("app.main", "app.bootstrap", "pyrealsense2", "torch", "botorch", "pyautogui", "paho", "pymcprotocol")
 
     def guarded(name, *args, **kwargs):
         if name.startswith(blocked):

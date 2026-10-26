@@ -43,10 +43,14 @@ const nemoclawStatusDotEl = document.getElementById("nemoclaw-status-dot");
 const nemoclawStatusLabelEl = document.getElementById("nemoclaw-status-label");
 const nemoclawStatusDetailEl = document.getElementById("nemoclaw-status-detail");
 const modelOrchestratorChipEl = document.getElementById("model-orchestrator-chip");
-const modelE4BChipEl = document.getElementById("model-e4b-chip");
+const modelWorkerChipEl = document.getElementById("model-worker-chip");
 const modelLoadButtons = Array.from(document.querySelectorAll(".model-load-btn"));
 const modelUnloadButtons = Array.from(document.querySelectorAll(".model-unload-btn"));
 const modelLoadDots = Array.from(document.querySelectorAll("[data-model-dot]"));
+document.getElementById("btn-open-llm-connections")?.addEventListener("click", (event) => {
+  event.preventDefault();
+  window.open("/llm-connections", "ax4lab-llm-connections", "popup=yes,width=1120,height=900,resizable=yes,scrollbars=yes,noopener");
+});
 const apiKeyChipEl = document.getElementById("api-key-chip");
 const apiKeyStatusTextEl = document.getElementById("api-key-status-text");
 const apiKeyDetailEl = document.getElementById("api-key-detail");
@@ -118,7 +122,7 @@ const GRAPH_NODES = [
   { id: "manipulation", label: "Manipulation", col: 6, row: 5, terminal: false, accent: "execution" },
   { id: "equipment", label: "Equipment", col: 8, row: 5, terminal: false, accent: "execution" },
   { id: "mcp", label: "MCP Tools", col: 3, row: 7, terminal: false, accent: "tools" },
-  { id: "ollama", label: "NemoClaw / Ollama", col: 6, row: 7, terminal: false, accent: "tools" },
+  { id: "ollama", label: "LLM Serving", col: 6, row: 7, terminal: false, accent: "tools" },
   { id: "memory", label: "Memory / Logs", col: 9, row: 7, terminal: false, accent: "memory" },
   { id: "bridges", label: "Device Bridges", col: 11, row: 7, terminal: false, accent: "tools" },
   { id: "complete", label: "Complete", col: 9, row: 9, terminal: true, accent: "terminal" },
@@ -725,9 +729,7 @@ function renderRuntimeStatus(snapshot, state, isRunning) {
   }
 
   setDotState(backendStatusDotEl, backendActive ? "active" : backend.active ? "busy" : "idle");
-  if (backendStatusLabelEl) {
-    backendStatusLabelEl.textContent = backendActive ? `${backend.label || "Backend"} active` : `${backend.label || "Backend"} standby`;
-  }
+  if (backendStatusLabelEl) backendStatusLabelEl.textContent = "vLLM";
   if (backendStatusDetailEl) {
     backendStatusDetailEl.textContent = backend.proxy_url
       ? `Endpoint ${backend.proxy_url} routing ${backendActive ? "live" : "ready"} traffic.`
@@ -735,19 +737,11 @@ function renderRuntimeStatus(snapshot, state, isRunning) {
   }
 
   const stage = String(state.stage || "idle");
-  const e4bStages = new Set(["design", "analysis", "knowledge", "guardian", "specimen", "vision", "manipulation", "equipment"]);
-  const e4bActive = isRunning && e4bStages.has(stage);
+  const workerStages = new Set(["design", "analysis", "knowledge", "guardian", "specimen", "vision", "manipulation", "equipment"]);
+  const workerActive = isRunning && workerStages.has(stage);
 
   setDotState(nemoclawStatusDotEl, backendActive ? "active" : "idle");
-  if (nemoclawStatusLabelEl) {
-    if (backendActive) {
-      nemoclawStatusLabelEl.textContent = `${backend.label || "Backend"} agents working`;
-    } else if (backend.active) {
-      nemoclawStatusLabelEl.textContent = `${backend.label || "Backend"} ready`;
-    } else {
-      nemoclawStatusLabelEl.textContent = "Backend idle";
-    }
-  }
+  if (nemoclawStatusLabelEl) nemoclawStatusLabelEl.textContent = isRunning ? "Working" : "Ready";
   if (nemoclawStatusDetailEl) {
     nemoclawStatusDetailEl.textContent = isRunning
       ? `Stage ${stage} is currently routed through ${backend.label || "the selected backend"}.`
@@ -756,13 +750,15 @@ function renderRuntimeStatus(snapshot, state, isRunning) {
 
   const chipBindings = [
     [modelOrchestratorChipEl, models.orchestrator?.primary, isRunning],
-    [modelE4BChipEl, models.e4b?.primary, e4bActive],
+    [modelWorkerChipEl, models.worker?.primary, workerActive],
   ];
   for (const [chip, model, active] of chipBindings) {
     if (!chip || !model) continue;
     const body = chip.querySelector("strong");
     if (body) body.textContent = model || body.textContent;
     chip.dataset.model = model;
+    for (const button of chip.querySelectorAll("button[data-model]")) button.dataset.model = model;
+    for (const dot of chip.querySelectorAll("[data-model-dot]")) dot.dataset.modelDot = model;
     chip.classList.toggle("is-primary", Boolean(active));
     chip.classList.toggle("is-idle", !active);
     const dot = chip.querySelector(".chip-dot");
@@ -782,42 +778,8 @@ function setModelActionDot(dot, state) {
 }
 
 function renderModelStatuses(payload) {
-  const enabled = Boolean(payload && payload.ok && payload.enabled);
-  const byModel = new Map();
-  for (const item of payload?.models || []) {
-    if (item && item.model) byModel.set(String(item.model), item);
-  }
-
-  const chips = [modelOrchestratorChipEl, modelE4BChipEl].filter(Boolean);
-  for (const chip of chips) {
-    const model = chip.dataset.model || chip.querySelector("strong")?.textContent || "";
-    const status = byModel.get(model);
-    const state = status?.state || (enabled ? "unknown" : "disabled");
-    const loaded = Boolean(status?.loaded);
-    chip.classList.toggle("is-loaded", loaded);
-    chip.classList.toggle("is-loading", state === "loading");
-    chip.classList.toggle("is-unloaded", state === "unloaded" || state === "disabled");
-    chip.title = status
-      ? `${model}: ${state} desired=${status.desired_replicas} available=${status.available_replicas}`
-      : `${model}: status unavailable`;
-  }
-
-  for (const dot of modelLoadDots) {
-    const model = dot.dataset.modelDot || "";
-    const status = byModel.get(model);
-    setModelActionDot(dot, status?.state || (enabled ? "unknown" : "disabled"));
-  }
-
-  for (const button of modelLoadButtons) {
-    const status = byModel.get(button.dataset.model || "");
-    const state = status?.state || "";
-    button.disabled = !enabled || state === "loaded" || state === "loading";
-  }
-  for (const button of modelUnloadButtons) {
-    const status = byModel.get(button.dataset.model || "");
-    const state = status?.state || "";
-    button.disabled = !enabled || (state !== "loaded" && state !== "loading");
-  }
+  window.AX4LABModelCards?.render(payload?.registered_models || [], payload?.models || [],
+    payload?.local_roles || {}, {managedEnabled: Boolean(payload?.ok && payload?.enabled)});
 }
 
 async function refreshModelStatuses() {
@@ -830,20 +792,16 @@ async function refreshModelStatuses() {
   }
 }
 
-async function setModelServingState(model, action, button) {
-  if (!model || !["load", "unload"].includes(action)) return;
+async function setModelServingState(endpointId, action, button) {
+  if (!endpointId || !["load", "unload"].includes(action)) return;
   const originalText = button ? button.textContent : "";
   if (button) {
     button.disabled = true;
     button.textContent = action === "load" ? "Loading..." : "Unloading...";
   }
   try {
-    const data = await postJson(`/api/runtime/models/${action}`, { model });
-    if (data.status) {
-      renderModelStatuses(data.status);
-    } else {
-      await refreshModelStatuses();
-    }
+    await postJson(`/api/runtime/models/${action}`, { endpoint_id: endpointId });
+    await refreshModelStatuses();
     await refreshState();
   } finally {
     if (button) button.textContent = originalText;
@@ -868,14 +826,16 @@ function renderApiKeyStatus(payload) {
   }
   if (apiKeyDetailEl) {
     const primary = apiKeyState.primary_backend || apiKeyState.fallback_backend || "local";
-    apiKeyDetailEl.textContent = hasKey
+    apiKeyDetailEl.textContent = apiKeyState.endpoint_matches === false
+      ? "Saved key belongs to another endpoint. Enter a key for this API address."
+      : hasKey
       ? `${enabled ? "API primary" : "API disabled"} · route=${primary} · source=${apiKeyState.source || "memory"}`
       : "OpenAI API key is missing. Click API Key to register one.";
   }
-  if (apiKeyLoadBtn) apiKeyLoadBtn.disabled = !hasKey || enabled;
+  if (apiKeyLoadBtn) apiKeyLoadBtn.disabled = !hasKey || enabled || apiKeyState.endpoint_matches === false;
   if (apiKeyUnloadBtn) apiKeyUnloadBtn.disabled = !hasKey || !enabled;
-  if (apiKeyEnableInputEl) apiKeyEnableInputEl.checked = enabled || !hasKey;
-  if (apiKeyDialogStatusEl) {
+  if (apiKeyEnableInputEl && !apiKeyDialogEl?.open) apiKeyEnableInputEl.checked = enabled || !hasKey;
+  if (apiKeyDialogStatusEl && !apiKeyDialogEl?.open) {
     apiKeyDialogStatusEl.textContent = hasKey
       ? "Saved key is registered. Full value is never displayed."
       : "No key saved yet. Enter a key and save to create memory/api_keys.json.";
@@ -928,6 +888,8 @@ async function setApiKeyServingState(action, button) {
 function openApiKeyDialog() {
   if (apiKeyInputEl) apiKeyInputEl.value = "";
   if (apiKeyDialogEl && typeof apiKeyDialogEl.showModal === "function") {
+    apiKeyDialogEl.dataset.endpoint = apiKeyState.base_url || "";
+    if (apiKeyDialogStatusEl) apiKeyDialogStatusEl.textContent = `Save a key for ${apiKeyDialogEl.dataset.endpoint}. Saved keys are never displayed.`;
     apiKeyDialogEl.showModal();
   }
 }
@@ -941,7 +903,9 @@ async function saveApiKeyFromDialog() {
   const enabled = apiKeyEnableInputEl ? apiKeyEnableInputEl.checked : true;
   if (apiKeyDialogStatusEl) apiKeyDialogStatusEl.textContent = "Saving API key locally...";
   try {
-    const data = await postApiKeyJson("/api/runtime/api-key", { api_key: apiKey, enabled });
+    const data = await postApiKeyJson("/api/runtime/api-key", {
+      api_key: apiKey, enabled, expected_base_url: apiKeyDialogEl?.dataset.endpoint || "",
+    });
     renderApiKeyStatus(data);
     if (apiKeyInputEl) apiKeyInputEl.value = "";
     if (apiKeyDialogEl && typeof apiKeyDialogEl.close === "function") apiKeyDialogEl.close();
@@ -1327,17 +1291,10 @@ if (backendSelect) {
   });
 }
 
-for (const button of modelLoadButtons) {
-  button.addEventListener("click", () => {
-    setModelServingState(button.dataset.model || "", "load", button);
-  });
-}
-
-for (const button of modelUnloadButtons) {
-  button.addEventListener("click", () => {
-    setModelServingState(button.dataset.model || "", "unload", button);
-  });
-}
+document.getElementById("registered-model-cards")?.addEventListener("click", event => {
+  const button = event.target.closest("button[data-model-action]");
+  if (button && !button.disabled) setModelServingState(button.dataset.endpointId, button.dataset.modelAction, button);
+});
 
 if (apiKeyOpenBtn) {
   apiKeyOpenBtn.addEventListener("click", openApiKeyDialog);

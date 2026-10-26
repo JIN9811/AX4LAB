@@ -1,0 +1,23 @@
+    <dialog id="api-key-dialog" class="api-key-dialog" aria-labelledby="api-key-dialog-title">
+      <form id="api-key-form" class="api-key-form" method="dialog">
+        <div class="api-key-dialog-head">
+          <div>
+            <h3 id="api-key-dialog-title">OpenAI API Key</h3>
+            <p>Saved locally to <code>memory/api_keys.json</code>. The file is ignored by git.</p>
+          </div>
+          <button id="api-key-close-btn" class="btn mini" type="button">Close</button>
+        </div>
+        <label>
+          API key
+          <input id="api-key-input" type="password" autocomplete="off" placeholder="sk-..." />
+        </label>
+        <label class="api-key-checkbox">
+          <input id="api-key-enable-input" type="checkbox" checked />
+          Enable after saving
+        </label>
+        <p id="api-key-dialog-status" class="api-key-dialog-status">Current key is never displayed in full.</p>
+        <div class="api-key-dialog-actions">
+          <button id="api-key-save-btn" class="btn primary" type="submit">Save API Key</button>
+        </div>
+      </form>
+    </dialog>

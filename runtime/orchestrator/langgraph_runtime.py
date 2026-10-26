@@ -491,7 +491,19 @@ class ModuleRuntimeContext:
         self._timeout_s = module_config.get("timeout_s")
         self._task_type = str(module_config.get("llm_role") or "").strip()
         self._allowed_tools = module_config.get("tools") if isinstance(module_config.get("tools"), list) else []
-        self.active_backend = str(self._llm.get("backend") or base.active_backend).strip() or base.active_backend
+        backend_override = str(self._llm.get("backend") or "").strip()
+        registered_backends = getattr(base, "primary_backends", {}) or {}
+        if backend_override and backend_override not in registered_backends:
+            # Standalone contexts may inject only their active provider, without
+            # a registry. They can pin that provider, never an unknown alias.
+            standalone_active = (
+                not registered_backends
+                and backend_override == base.active_backend
+                and getattr(base, "primary_backend", None) is not None
+            )
+            if not standalone_active:
+                raise ValueError("Unsupported module inference backend; select a registered runtime backend.")
+        self.active_backend = backend_override or base.active_backend
         base_tools = getattr(base, "tools", None)
         if base_tools is not None and self._allowed_tools:
             self.tools = ModuleToolRegistryProxy(
@@ -712,6 +724,12 @@ class ModuleRuntimeContext:
             if fallback_backend is not primary_backend and fallback_model:
                 attempts.append((backend_name, fallback_backend, fallback_model, f"{selection.role}:fallback"))
 
+        # Modules inheriting the runtime route must honor the same API-key
+        # priority as AgentContext. Keep explicitly pinned module routes intact.
+        pinned_route = any(self._llm.get(key) for key in ("backend", "model", "primary", "fallback"))
+        if fallback_backend_name == "openai" and not pinned_route:
+            attempts.sort(key=lambda attempt: attempt[0] != "openai")
+
         errors: list[tuple[str, str, str, Exception]] = []
         seen: set[tuple[int, str, str]] = set()
         for attempt_backend_name, backend, model, role in attempts:
@@ -721,6 +739,10 @@ class ModuleRuntimeContext:
             seen.add(key)
             try:
                 response = await _call_backend(backend, model, role)
+                if not str(response.text or "").strip():
+                    raise RuntimeError(
+                        f"empty LLM response from backend={attempt_backend_name} model={model}"
+                    )
                 if images and response.raw.get("mock"):
                     raise RuntimeError("mock response cannot satisfy a multimodal request")
                 await self._notify_model_call(

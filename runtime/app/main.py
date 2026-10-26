@@ -140,7 +140,8 @@ from utils.manipulation_profile import (
 )
 from utils.recording_specimen_pose import load_recording_specimen_pose
 from utils.ids import is_run_id, make_event_id
-from utils.equipment_profiles import DEFAULT_UTM_PROFILE_ID, EquipmentProfile, EquipmentProfileRegistry, build_execution_contract
+from utils.equipment_profiles import (DEFAULT_UTM_PROFILE_ID, EquipmentProfile, EquipmentProfileRegistry,
+    EquipmentProfileStore, equipment_profile_scope, scoped_equipment_profile_id, build_execution_contract)
 from utils.equipment_skill_runtime import EquipmentSkillRegistry, SkillContractError, canonical_sha256
 from utils.equipment_skill_flow import EquipmentSkillFlowError, EquipmentSkillFlowStore, normalize_equipment_skill_flow
 from utils.equipment_agentic_task import build_utm_compression_flow_template, list_equipment_agentic_tasks
@@ -181,6 +182,29 @@ if RUNTIME_PATHS is None:
     raise RuntimeError("Bootstrap must supply finalized RuntimePaths")
 
 app = FastAPI(title="AX4LAB")
+
+
+@app.middleware("http")
+async def equipment_workspace_profile_scope(request: Request, call_next):
+    """All existing workspace actions use the profile viewed by this tab."""
+    path = request.url.path
+    if not (path.startswith("/api/equipment/") or path == "/equipment/windows" or path.startswith("/equipment/windows/")):
+        return await call_next(request)
+    requested = request.query_params.get("profile_id", "") or request.headers.get("x-equipment-profile", "")
+    match = re.match(r"/api/equipment/profiles/([^/]+)(?:/|$)", path)
+    path_profile = unquote(match.group(1)) if match else ""
+    if path_profile and requested and path_profile != requested:
+        return JSONResponse({"detail": "Conflicting equipment profile identities"}, status_code=422)
+    profile_id = path_profile or requested
+    if not profile_id:
+        return await call_next(request)
+    try:
+        _equipment_profile_registry().get(profile_id)
+    except ValueError as exc:
+        return JSONResponse({"detail": str(exc)}, status_code=404)
+    with equipment_profile_scope(profile_id):
+        return await call_next(request)
+
 app.state.specimen_pose_server_started_at_ms = int(time.time() * 1000)
 templates = Jinja2Templates(directory=str(resolve_runtime_path("web/templates", paths=RUNTIME_PATHS)))
 app.mount("/static", StaticFiles(directory=str(resolve_runtime_path("web/static", paths=RUNTIME_PATHS))), name="static")
@@ -196,6 +220,7 @@ _KNOWLEDGE_RECONCILIATION_WORKER: KnowledgeReconciliationWorker | None = None
 _KNOWLEDGE_RECONCILIATION_KNOWLEDGE_SERVICE: KnowledgeService | None = None
 _EQUIPMENT_AGENTIC_RUN_GUARD = threading.Lock()
 _EQUIPMENT_AGENTIC_ACTIVE_PROFILES: set[str] = set()
+_EQUIPMENT_CONSOLE_ACTIVE_PROFILES: dict[str, int] = {}
 _EQUIPMENT_AGENTIC_CANCEL_EVENTS: dict[str, threading.Event] = {}
 _EQUIPMENT_AGENTIC_RESET_PROFILES: set[str] = set()
 _BO_VISUALIZATION_UPGRADE_CACHE: dict[tuple[str, int, str], dict[str, Any]] = {}
@@ -259,6 +284,30 @@ RUNTIME_GRAPH_VERSION_ROOT = RUNTIME_PATHS.memory_root / "graph_versions"
 RUNTIME_MODULE_ROOT = RUNTIME_PATHS.runtime_root / "graphs/modules"
 RUNTIME_MODULE_VERSION_ROOT = RUNTIME_PATHS.memory_root / "module_versions"
 API_KEY_SETTINGS_PATH = RUNTIME_PATHS.memory_root / "api_keys.json"
+LLM_CONNECTIONS_PATH = RUNTIME_PATHS.memory_root / "llm_connections.json"
+API_KEY_DEFAULT_BASE_URL = controller._deps.agent_context.primary_backends['openai']._base_url
+_connection_service = None
+
+
+def _llm_connection_busy() -> bool:
+    ctx = controller._deps.agent_context
+    lease = ctx.llm_lease.status() if ctx.llm_lease else {}
+    return bool((controller._run_task and not controller._run_task.done())
+                or controller._planning_handoff_active()
+                or controller._planning_request_lock.locked()
+                or lease.get('active') or lease.get('waiting'))
+
+
+def _llm_connections():
+    from app.llm_connections import LLMConnections
+    global _connection_service
+    if _connection_service is None:
+        _connection_service = LLMConnections(controller._deps.agent_context, LLM_CONNECTIONS_PATH,
+                                             busy=_llm_connection_busy)
+        _connection_service.load()
+    return _connection_service
+
+
 WANDB_LOCAL_API_KEY_SETTINGS_PATH = RUNTIME_PATHS.memory_root / "wandb_local_api_key.json"
 TEST_MODE_EXECUTION_PROFILES_PATH = RUNTIME_PATHS.memory_root / "test_mode_execution_profiles.json"
 LEROBOT_ACTION_LOG_ROOT = RUNTIME_PATHS.run_root / "lerobot_action_logs"
@@ -565,47 +614,68 @@ def _read_api_key_settings(*, import_env: bool = True) -> dict[str, Any]:
             "schema": "api_key.v1",
             "provider": "openai",
             "api_key": env_key,
+            "base_url": API_KEY_DEFAULT_BASE_URL,
             "enabled": True,
             "source": env_source,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         _write_workspace_settings(path, settings)
         return settings
-    enabled = bool(settings.get("enabled", False)) and bool(api_key)
+    enabled = bool(settings.get("enabled", False))
     return {
         "schema": "api_key.v1",
         "provider": "openai",
         "api_key": api_key,
+        "base_url": str(settings.get("base_url") or API_KEY_DEFAULT_BASE_URL),
         "enabled": enabled,
         "source": source or ("memory" if api_key else "none"),
         "updated_at": str(settings.get("updated_at") or ""),
     }
 
 
-def _write_api_key_settings(api_key: str, *, enabled: bool, source: str = "user") -> dict[str, Any]:
+def _write_api_key_settings(api_key: str, *, enabled: bool, source: str = "user", base_url: str | None = None) -> dict[str, Any]:
     """Persist OpenAI API key settings to the local gitignored single-file store."""
     clean_key = str(api_key or "").strip()
     payload = {
         "schema": "api_key.v1",
         "provider": "openai",
         "api_key": clean_key,
-        "enabled": bool(enabled and clean_key),
+        "base_url": base_url or controller._deps.agent_context.primary_backends['openai']._base_url,
+        "enabled": bool(enabled),
         "source": source,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     return _write_workspace_settings(API_KEY_SETTINGS_PATH, payload)
 
 
+def _selected_api_endpoint_has_key() -> bool:
+    from backends.endpoint_routes import has_endpoint_credentials, role_endpoint_references
+    ctx = controller._deps.agent_context
+    router = ctx.model_routers['openai']
+    return has_endpoint_credentials(ctx.primary_backends['openai'], role_endpoint_references(router))
+
+
+def _api_key_matches_selected_endpoint(base_url: str) -> bool:
+    from backends.endpoint_routes import selected_uses_global_credential, role_endpoint_references
+    ctx = controller._deps.agent_context
+    router = ctx.model_routers['openai']
+    return selected_uses_global_credential(ctx.primary_backends['openai'], role_endpoint_references(router), base_url)
+
+
 def _public_api_key_settings(settings: dict[str, Any]) -> dict[str, object]:
     """Return API key status without the secret value."""
     api_key = str(settings.get("api_key") or "").strip()
-    enabled = bool(settings.get("enabled") and api_key)
+    endpoint_matches = _api_key_matches_selected_endpoint(str(settings.get('base_url') or API_KEY_DEFAULT_BASE_URL))
+    registered_key = _selected_api_endpoint_has_key()
+    enabled = bool(settings.get("enabled") and ((api_key and endpoint_matches) or registered_key))
     return {
         "ok": True,
         "provider": "openai",
         "enabled": enabled,
-        "has_key": bool(api_key),
-        "key_status": "registered" if api_key else "not_registered",
+        "has_key": bool(api_key or registered_key),
+        "endpoint_matches": endpoint_matches or registered_key,
+        "base_url": controller._deps.agent_context.primary_backends['openai']._base_url,
+        "key_status": "registered" if api_key or registered_key else "not_registered",
         "source": str(settings.get("source") or ("memory" if api_key else "none")),
         "settings_path": str(API_KEY_SETTINGS_PATH),
         "updated_at": str(settings.get("updated_at") or ""),
@@ -613,12 +683,15 @@ def _public_api_key_settings(settings: dict[str, Any]) -> dict[str, object]:
 
 
 async def _apply_runtime_api_key_settings(settings: dict[str, Any], *, emit_event: bool = True) -> dict[str, object]:
-    apply_result = await controller.apply_openai_api_key(
-        str(settings.get("api_key") or ""),
-        enabled=bool(settings.get("enabled")),
-        emit_event=emit_event,
-    )
     public = _public_api_key_settings(settings)
+    bound_url = str(settings.get('base_url') or API_KEY_DEFAULT_BASE_URL).rstrip('/')
+    key_matches = _api_key_matches_selected_endpoint(bound_url)
+    apply_result = await controller.apply_openai_api_key(
+        str(settings.get("api_key") or "") if key_matches else '',
+        enabled=bool(public['enabled']),
+        emit_event=emit_event,
+        base_url=bound_url,
+    )
     public["apply_result"] = apply_result
     public["primary_backend"] = str(apply_result.get("primary_backend") or "")
     public["fallback_backend"] = str(apply_result.get("fallback_backend") or "")
@@ -734,6 +807,7 @@ async def keep_startup_side_effect_free() -> None:
     controller.set_plc_safety_status_provider(plc_service.status)
     await plc_service.start()
     _cleanup_bambu_video_stream_processes(include_orphans=True)
+    _llm_connections()
     settings = _read_api_key_settings(import_env=True)
     await _apply_runtime_api_key_settings(settings, emit_event=False)
     controller._deps.agent_context.on_knowledge_ingest = None
@@ -787,7 +861,7 @@ class StartRunRequest(BaseModel):
 
     mode: Literal["live", "test", "replay", "fault-injection"] = "test"
     goal: str | None = None
-    backend: Literal["openai", "nemoclaw", "ollama", "vllm"] | None = None
+    backend: Literal["openai", "vllm"] | None = None
     fault: str = Field(default="none", description="Fault name for fault-injection mode")
     fault_stage: str = Field(default="", description="Stage where fault is injected")
 
@@ -826,7 +900,7 @@ class PlanningMessageRequest(BaseModel):
 
     message: str = Field(..., min_length=1)
     goal: str | None = None
-    backend: Literal["openai", "nemoclaw", "ollama", "vllm"] | None = None
+    backend: Literal["openai", "vllm"] | None = None
     constraints: dict[str, object] = Field(default_factory=dict)
     session_id: str | None = None
     setup_context: dict | None = None
@@ -847,7 +921,7 @@ class PlanningBootstrapRequest(BaseModel):
     """Request body for starting the Live GUI orchestrator before user input."""
 
     goal: str | None = None
-    backend: Literal["openai", "nemoclaw", "ollama", "vllm"] | None = None
+    backend: Literal["openai", "vllm"] | None = None
     constraints: dict[str, object] = Field(default_factory=dict)
     session_id: str | None = None
 
@@ -880,7 +954,7 @@ class VisionSpecimenPlacementRetryRequest(BaseModel):
 class BackendSwitchRequest(BaseModel):
     """Request body for one-click inference backend switching."""
 
-    backend: Literal["openai", "nemoclaw", "ollama", "vllm"]
+    backend: Literal["openai", "vllm"]
 
 
 class RuntimeGraphSaveRequest(BaseModel):
@@ -970,7 +1044,20 @@ class RuntimeGraphDryRunRequest(BaseModel):
 class RuntimeModelRequest(BaseModel):
     """Request body for managed vLLM model load/unload controls."""
 
-    model: str = Field(..., min_length=1)
+    endpoint_id: str | None = Field(default=None, pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$')
+    model: str | None = Field(default=None, min_length=1)
+
+    def reference(self) -> str:
+        if bool(self.endpoint_id) == bool(self.model):
+            raise HTTPException(400, 'Specify one endpoint_id.')
+        return f'endpoint:{self.endpoint_id}' if self.endpoint_id else str(self.model)
+
+
+class LLMConnectionRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    provider: Literal['openai', 'vllm']
+    connection: dict[str, Any]
+    role: Literal['orchestrator', 'worker'] = 'worker'
 
 
 class RuntimeApiKeyRequest(BaseModel):
@@ -978,6 +1065,13 @@ class RuntimeApiKeyRequest(BaseModel):
 
     api_key: str = Field(..., min_length=1)
     enabled: bool = True
+    expected_base_url: str | None = None
+
+
+class LocalModelsRequest(BaseModel):
+    base_url: str = Field(min_length=1, max_length=2048)
+    access_token: str | None = Field(default=None, max_length=4096)
+    models: list[str] = Field(default_factory=list, max_length=128)
 
 
 class LeRobotWandBLocalApiKeyRequest(BaseModel):
@@ -1423,6 +1517,18 @@ class EquipmentProfileSettingsRequest(BaseModel):
     """Persist operator preferences for one registered equipment Profile."""
 
     vision_link_enabled: bool
+
+
+class EquipmentProfileCreateRequest(BaseModel):
+    label: str = Field(min_length=1, max_length=80)
+
+
+class EquipmentProfileApplyRequest(BaseModel):
+    worker_id: str = ""
+
+
+class EquipmentProfileDeleteRequest(BaseModel):
+    confirmed: bool = False
 
 
 class EquipmentSkillFlowSaveRequest(BaseModel):
@@ -1908,7 +2014,7 @@ class RuntimeAgentMessageRequest(BaseModel):
 
     message: str = Field(..., min_length=1)
     goal: str | None = None
-    backend: Literal["openai", "nemoclaw", "ollama", "vllm"] | None = None
+    backend: Literal["openai", "vllm"] | None = None
     mode: Literal["ask", "command", "approval", "edit_report"] = "ask"
     constraints: dict[str, object] = Field(default_factory=dict)
     session_id: str | None = None
@@ -1943,10 +2049,19 @@ def _load_agent_baseline_markdown() -> str:
     return AGENT_BASELINE_DOC_PATH.read_text(encoding="utf-8")
 
 
-def _equipment_bridge() -> WindowsPyAutoGUIBridge:
+def _equipment_bridge(profile_id: str = "") -> WindowsPyAutoGUIBridge:
     cfg = load_all_configs(RUNTIME_PATHS.runtime_root / "configs", paths=RUNTIME_PATHS)
-    config = WindowsPyAutoGUIBridgeConfig.from_devices_config(cfg.get("devices", {}), repo_root=RUNTIME_PATHS.repository_root, paths=RUNTIME_PATHS)
+    config = WindowsPyAutoGUIBridgeConfig.from_devices_config(cfg.get("devices", {}), repo_root=RUNTIME_PATHS.repository_root, paths=RUNTIME_PATHS, profile_id=profile_id)
     return WindowsPyAutoGUIBridge(config)
+
+
+def _equipment_bridge_for_profile(profile_id: str) -> WindowsPyAutoGUIBridge:
+    """Use a stored Skill/job identity even outside the HTTP request's context."""
+    viewed = scoped_equipment_profile_id()
+    if viewed and viewed != profile_id:
+        raise HTTPException(status_code=422, detail="Skill and workspace equipment profiles do not match")
+    with equipment_profile_scope(profile_id):
+        return _equipment_bridge()
 
 
 def _local_pyautogui_bridge_supervisor() -> LocalPyAutoGUIBridgeSupervisor:
@@ -2476,6 +2591,12 @@ async def home(request: Request) -> HTMLResponse:
     )
 
 
+@app.get('/llm-connections', response_class=HTMLResponse)
+async def llm_connections_gui(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(request=request, name='llm_connections.html',
+                                      context={'title': 'AX4LAB · LLM Connections'})
+
+
 @app.get("/test-mode-settings", response_class=HTMLResponse)
 async def test_mode_settings_gui(request: Request) -> HTMLResponse:
     """Serve the persistent test-mode execution-profile editor."""
@@ -2848,7 +2969,8 @@ async def windows_equipment_gui(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         request=request,
         name="windows_equipment.html",
-        context={"title": "Windows Equipment Bridge"},
+        context={"title": "Windows Equipment Bridge", "equipment_profile_id":
+                 request.query_params.get("profile_id") or EquipmentProfileStore(RUNTIME_PATHS.memory_root).selected_id()},
     )
 
 
@@ -2889,6 +3011,7 @@ def _rewrite_windows_bridge_console_html(html: str) -> str:
         "(()=>{localStorage.setItem(\"bridgeToken\",\"atr-proxy-session\");"
         "const f=window.fetch.bind(window);window.fetch=(input,init)=>{"
         "if(typeof input==='string'&&input.startsWith('/'))input='" + prefix + "'+input;"
+        "init={...init,headers:{...((init||{}).headers||{}),'X-Equipment-Profile':new URLSearchParams(location.search).get('profile_id')||''}};"
         "return f(input,init);};})();"
         "</script>"
     )
@@ -2930,16 +3053,36 @@ async def local_windows_equipment_console() -> HTMLResponse:
 )
 async def proxy_windows_equipment_bridge_ui(resource_path: str, request: Request) -> Response:
     """Serve the selected Windows bridge GUI through AX4LAB without exposing its token."""
-    bridge = _equipment_bridge()
     request_body = await request.body()
-    result = await asyncio.to_thread(
-        bridge.proxy_ui_request,
-        method=request.method,
-        resource_path=resource_path,
-        query_string=request.url.query,
-        body=request_body,
-        content_type=request.headers.get("content-type", ""),
-    )
+    bridge = _equipment_bridge()
+    profile_id = scoped_equipment_profile_id() or EquipmentProfileStore(RUNTIME_PATHS.memory_root).selected_id()
+    tracked = request.method != "GET"
+    if tracked:
+        with _EQUIPMENT_AGENTIC_RUN_GUARD:
+            try:
+                _equipment_profile_registry().get(profile_id)
+            except ValueError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            _EQUIPMENT_CONSOLE_ACTIVE_PROFILES[profile_id] = _EQUIPMENT_CONSOLE_ACTIVE_PROFILES.get(profile_id, 0) + 1
+    def proxy_request():
+        try:
+            return bridge.proxy_ui_request(
+                method=request.method,
+                resource_path=resource_path,
+                query_string=request.url.query,
+                body=request_body,
+                content_type=request.headers.get("content-type", ""),
+            )
+        finally:
+            if tracked:
+                with _EQUIPMENT_AGENTIC_RUN_GUARD:
+                    remaining = _EQUIPMENT_CONSOLE_ACTIVE_PROFILES[profile_id] - 1
+                    if remaining:
+                        _EQUIPMENT_CONSOLE_ACTIVE_PROFILES[profile_id] = remaining
+                    else:
+                        _EQUIPMENT_CONSOLE_ACTIVE_PROFILES.pop(profile_id)
+    # Disconnecting the browser does not stop a macro already running on Windows.
+    result = await asyncio.shield(asyncio.to_thread(proxy_request))
     content = result.get("content", b"")
     content_type = str(result.get("content_type") or "application/octet-stream")
     if content_type.lower().startswith("text/html") and isinstance(content, bytes):
@@ -8386,22 +8529,127 @@ async def post_runtime_backend(req: BackendSwitchRequest) -> dict[str, object]:
     return await controller.switch_inference_backend(req.backend)
 
 
+@app.get('/api/runtime/llm-connections')
+async def get_llm_connections() -> dict[str, object]:
+    result = _llm_connections().public()
+    result['api_key'] = _public_api_key_settings(_read_api_key_settings(import_env=True))
+    result['runtime'] = controller._runtime_profile()
+    result['local_models'] = await _llm_connections().local_models_public()
+    result['resolved_endpoints'] = {}
+    backend = controller._deps.agent_context.primary_backends['vllm']
+    local = result['profiles']['vllm']
+    try:
+        for role in ('orchestrator', 'worker'):
+            result['resolved_endpoints'][role] = await backend._base_url_for_model('endpoint:' + local[role + '_endpoint'])
+    except (RuntimeError, OSError, ValueError):
+        result['endpoint_notice'] = 'Managed endpoint unavailable. Check that the existing local cluster is running.'
+    return result
+
+
+@app.put('/api/runtime/llm-connections')
+async def put_llm_connections(req: LLMConnectionRequest) -> dict[str, object]:
+    try:
+        result = _llm_connections().save(req.provider, req.connection)
+    except ValueError:
+        raise HTTPException(400, 'Invalid role assignment. Choose registered endpoints for this provider.') from None
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from None
+    except OSError:
+        raise HTTPException(500, 'Could not save connection settings. Current settings were not changed.') from None
+    result['api_key'] = await _apply_runtime_api_key_settings(_read_api_key_settings(), emit_event=False)
+    result['message'] = 'Connection settings saved and applied. No experiment or model was started.'
+    return result
+
+
+@app.post('/api/runtime/llm-connections/test')
+async def test_llm_connection(req: LLMConnectionRequest) -> dict[str, object]:
+    service = _llm_connections()
+    settings = _read_api_key_settings(import_env=True)
+    key = ''
+    from app.llm_connections import endpoint_url
+    try:
+        if req.provider == 'openai':
+            profile = service.validate(req.provider, req.connection)
+            selected = service._endpoints.get(profile.get(req.role + '_endpoint'), {})
+            if endpoint_url(selected.get('base_url', '')) == endpoint_url(settings.get('base_url') or API_KEY_DEFAULT_BASE_URL):
+                key = str(settings.get('api_key') or '')
+        return await service.probe(req.provider, req.connection, req.role, api_key=key)
+    except ValueError:
+        raise HTTPException(400, 'Invalid connection settings. Check the base URL and model names.') from None
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from None
+
+
 @app.get("/api/runtime/models")
 async def get_runtime_models() -> dict[str, object]:
     """Return managed model serving status for the selected backend."""
-    return await controller.runtime_model_statuses()
+    result = await controller.runtime_model_statuses()
+    service = _llm_connections()
+    result['registered_models'] = await service.local_models_public()
+    result['local_roles'] = service.public()['profiles']['vllm']
+    return result
+
+
+@app.post('/api/runtime/llm-connections/models/discover')
+async def discover_local_models(req: LocalModelsRequest):
+    raise HTTPException(410, 'Model discovery was removed. Register an endpoint and its served model ID.')
+
+
+@app.post('/api/runtime/llm-connections/models')
+async def register_local_models(req: LocalModelsRequest):
+    raise HTTPException(410, 'Register a connection through /api/runtime/llm-connections/endpoints/{id}.')
+
+
+@app.delete('/api/runtime/llm-connections/models')
+async def remove_local_model(model: str):
+    raise HTTPException(410, 'Remove the endpoint registration by ID, not by model name.')
+
+
+@app.put('/api/runtime/llm-connections/endpoints/{endpoint_id}')
+async def put_llm_endpoint(endpoint_id: str, record: dict[str, Any]):
+    try:
+        result = _llm_connections().save_endpoint(endpoint_id, record)
+    except ValueError:
+        raise HTTPException(400, 'Invalid endpoint. Check its ID, URL, served model ID and management target.') from None
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from None
+    except OSError:
+        raise HTTPException(500, 'Could not save endpoint settings. Current settings were not changed.') from None
+    result['api_key'] = await _apply_runtime_api_key_settings(_read_api_key_settings(), emit_event=False)
+    result['message'] = 'Endpoint saved. No model or experiment was started.'
+    return result
+
+
+@app.delete('/api/runtime/llm-connections/endpoints/{endpoint_id}')
+async def delete_llm_endpoint(endpoint_id: str):
+    try:
+        return _llm_connections().remove_endpoint(endpoint_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from None
+    except OSError:
+        raise HTTPException(500, 'Could not save endpoint settings.') from None
 
 
 @app.post("/api/runtime/models/load")
 async def post_runtime_model_load(req: RuntimeModelRequest) -> dict[str, object]:
-    """Load one managed NemoClaw vLLM model."""
-    return await controller.load_runtime_model(req.model)
+    """Load the selected endpoint's server management target."""
+    try:
+        async with _llm_connections().lifecycle('load'):
+            return await controller.load_runtime_model(req.reference())
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from None
 
 
 @app.post("/api/runtime/models/unload")
 async def post_runtime_model_unload(req: RuntimeModelRequest) -> dict[str, object]:
-    """Unload one managed NemoClaw vLLM model."""
-    return await controller.unload_runtime_model(req.model)
+    """Unload the selected endpoint's server management target."""
+    try:
+        async with _llm_connections().lifecycle('unload'):
+            return await controller.unload_runtime_model(req.reference())
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from None
 
 
 @app.get("/api/runtime/api-key")
@@ -8414,6 +8662,9 @@ async def get_runtime_api_key() -> dict[str, object]:
 @app.post("/api/runtime/api-key")
 async def post_runtime_api_key(req: RuntimeApiKeyRequest) -> dict[str, object]:
     """Save the OpenAI API key to the local gitignored single-file store."""
+    current_url = controller._deps.agent_context.primary_backends['openai']._base_url
+    if req.expected_base_url is not None and req.expected_base_url.rstrip('/') != current_url.rstrip('/'):
+        raise HTTPException(status_code=409, detail='API endpoint changed. Reopen the key dialog for the current address.')
     settings = _write_api_key_settings(req.api_key, enabled=req.enabled, source="user")
     return await _apply_runtime_api_key_settings(settings)
 
@@ -8422,7 +8673,7 @@ async def post_runtime_api_key(req: RuntimeApiKeyRequest) -> dict[str, object]:
 async def post_runtime_api_key_load() -> dict[str, object]:
     """Enable the saved OpenAI API key for runtime fallback use."""
     settings = _read_api_key_settings(import_env=True)
-    if not str(settings.get("api_key") or "").strip():
+    if not str(settings.get("api_key") or "").strip() and not _selected_api_endpoint_has_key():
         public = _public_api_key_settings(settings)
         public.update({"ok": False, "message": "API key is not configured."})
         return public
@@ -8430,6 +8681,7 @@ async def post_runtime_api_key_load() -> dict[str, object]:
         str(settings.get("api_key") or ""),
         enabled=True,
         source=str(settings.get("source") or "memory"),
+        base_url=str(settings.get('base_url') or API_KEY_DEFAULT_BASE_URL),
     )
     return await _apply_runtime_api_key_settings(settings)
 
@@ -8442,6 +8694,7 @@ async def post_runtime_api_key_unload() -> dict[str, object]:
         str(settings.get("api_key") or ""),
         enabled=False,
         source=str(settings.get("source") or "memory"),
+        base_url=str(settings.get('base_url') or API_KEY_DEFAULT_BASE_URL),
     )
     return await _apply_runtime_api_key_settings(settings)
 
@@ -9965,7 +10218,10 @@ def _persist_windows_utm_proof_package(package: dict[str, object]) -> dict[str, 
     """Persist the Windows UTM proof package as a run-local JSON artifact."""
     run_id = str(package.get("run_id") or controller._state.run_id or "run").strip() or "run"
     safe_run_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", run_id).strip("._-")[:96] or "run"
+    profile_id = str(package.get("equipment_profile_id") or DEFAULT_UTM_PROFILE_ID)
     artifact_dir = (RUNTIME_PATHS.artifact_root / "equipment") / safe_run_id / "utm"
+    if profile_id != DEFAULT_UTM_PROFILE_ID:
+        artifact_dir = artifact_dir / re.sub(r"[^A-Za-z0-9_-]", "_", profile_id)
     artifact_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     path = artifact_dir / f"windows_utm_proof_package_{stamp}.json"
@@ -10235,6 +10491,9 @@ def _persist_windows_utm_completion_audit(result: dict[str, object]) -> dict[str
     run_id = str(verification.get("run_id") or controller._state.run_id or result.get("run_id") or "run").strip() or "run"
     safe_run_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", run_id).strip("._-")[:96] or "run"
     artifact_dir = (RUNTIME_PATHS.artifact_root / "equipment") / safe_run_id / "utm"
+    profile_id = scoped_equipment_profile_id() or EquipmentProfileStore(RUNTIME_PATHS.memory_root).selected_id()
+    if profile_id != DEFAULT_UTM_PROFILE_ID:
+        artifact_dir = artifact_dir / profile_id
     artifact_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     path = artifact_dir / f"windows_utm_completion_audit_{stamp}.json"
@@ -10268,6 +10527,9 @@ def _persist_windows_utm_live_validation(report: dict[str, object]) -> dict[str,
     run_id = str(report.get("run_id") or controller._state.run_id or "run").strip() or "run"
     safe_run_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", run_id).strip("._-")[:96] or "run"
     artifact_dir = (RUNTIME_PATHS.artifact_root / "equipment") / safe_run_id / "live_validation"
+    profile_id = scoped_equipment_profile_id() or EquipmentProfileStore(RUNTIME_PATHS.memory_root).selected_id()
+    if profile_id != DEFAULT_UTM_PROFILE_ID:
+        artifact_dir = artifact_dir / profile_id
     artifact_dir.mkdir(parents=True, exist_ok=True)
     path = artifact_dir / "lab_equipment_utm_live_validation.json"
     artifact = {
@@ -10399,8 +10661,10 @@ def _latest_windows_utm_proof_package_path() -> Path | None:
     root = (RUNTIME_PATHS.artifact_root / "equipment")
     if not root.exists():
         return None
+    profile_id = scoped_equipment_profile_id() or EquipmentProfileStore(RUNTIME_PATHS.memory_root).selected_id()
+    pattern = "*/utm/windows_utm_proof_package_*.json" if profile_id == DEFAULT_UTM_PROFILE_ID else f"*/utm/{profile_id}/windows_utm_proof_package_*.json"
     candidates = sorted(
-        root.glob("*/utm/windows_utm_proof_package_*.json"),
+        root.glob(pattern),
         key=lambda item: item.stat().st_mtime if item.exists() else 0.0,
         reverse=True,
     )
@@ -10484,11 +10748,15 @@ def _load_windows_utm_proof_package_for_verify(path_value: str = "", *, use_curr
             load_info["blockers"] = ["PROOF_PACKAGE_JSON_NOT_OBJECT"]
             load_info["path"] = str(resolved)
             return {}, load_info
+        profile_id = scoped_equipment_profile_id() or EquipmentProfileStore(RUNTIME_PATHS.memory_root).selected_id()
+        if str(package.get("equipment_profile_id") or DEFAULT_UTM_PROFILE_ID) != profile_id:
+            load_info["blockers"] = ["PROOF_PACKAGE_PROFILE_MISMATCH"]
+            return {}, load_info
         load_info["source"] = "path"
         load_info["path"] = str(resolved)
         return package, load_info
     if use_current:
-        package = controller._state.run_metadata.get("last_windows_utm_proof_package")
+        package = _equipment_profile_metadata().get("last_windows_utm_proof_package")
         if isinstance(package, dict):
             load_info["source"] = "runtime_state"
             artifact = package.get("package_artifact") if isinstance(package.get("package_artifact"), dict) else {}
@@ -11200,12 +11468,12 @@ async def post_windows_equipment_live_validation(req: WindowsBridgeLiveValidatio
             for key in ("equipment_result", "equipment_report", "utm_data_ready", "equipment_handoff"):
                 value = runtime_promotion.get(key)
                 if isinstance(value, dict):
-                    controller._state.run_metadata[key] = value
-            controller._state.run_metadata["last_windows_utm_runtime_promotion"] = runtime_promotion
+                    _store_equipment_profile_evidence(key, value)
+            _store_equipment_profile_evidence("last_windows_utm_runtime_promotion", runtime_promotion)
         report = _persist_windows_utm_live_validation(report)
-    controller._state.run_metadata["last_windows_utm_live_validation"] = report
+    _store_equipment_profile_evidence("last_windows_utm_live_validation", report)
     if execute_requested:
-        controller._state.run_metadata["last_windows_utm_physical_validation"] = report
+        _store_equipment_profile_evidence("last_windows_utm_physical_validation", report)
     await controller.emit_workspace_result(
         workspace="equipment",
         tool="equipment.pyautogui.live_validation",
@@ -11308,7 +11576,7 @@ def _run_equipment_skill_authoring_job(job_id: str) -> None:
         )
         if _stop_equipment_skill_authoring_at_boundary(manager, job_id, runtime_service, runtime):
             return
-        worker_result = _equipment_bridge().get_recording(
+        worker_result = _equipment_bridge_for_profile(str(job["target_profile"])).get_recording(
             {
                 "recording_id": job["recording_id"],
                 "bridge_id": job["bridge_id"],
@@ -11551,7 +11819,10 @@ def _launch_equipment_skill_deployment_job(job_id: str) -> None:
 
 @app.get("/api/equipment/runtime/executions")
 async def get_equipment_runtime_executions(limit: int = 100) -> dict[str, Any]:
-    executions = _equipment_runtime_service().list(limit=limit)
+    profile_id = scoped_equipment_profile_id()
+    executions = _equipment_runtime_service().list(limit=1000 if profile_id else limit)
+    if profile_id:
+        executions = [item for item in executions if item.get("profile_id") == profile_id][:max(1, min(limit, 1000))]
     return {
         "ok": True,
         "executions": executions,
@@ -11568,7 +11839,7 @@ async def get_current_equipment_runtime_execution(
     """Return the latest Equipment execution scoped to the active run when supplied."""
     execution = _equipment_runtime_service().latest(
         run_id=run_id,
-        profile_id=profile_id,
+        profile_id=profile_id or scoped_equipment_profile_id(),
         execution_id=execution_id,
     )
     return {
@@ -11582,6 +11853,8 @@ async def get_current_equipment_runtime_execution(
 async def get_equipment_runtime_execution(execution_id: str) -> dict[str, Any]:
     try:
         execution = _equipment_runtime_service().get(execution_id)
+        if scoped_equipment_profile_id() and execution.get("profile_id") != scoped_equipment_profile_id():
+            raise EquipmentRuntimeContractError("Equipment execution not found for this profile")
     except EquipmentRuntimeContractError as exc:
         raise HTTPException(
             status_code=404,
@@ -12008,8 +12281,11 @@ def _skill_contract_http_error(exc: SkillContractError) -> HTTPException:
 
 
 @app.get("/api/equipment/skills")
-async def get_equipment_skills() -> dict[str, Any]:
-    return {"ok": True, "skills": _equipment_skill_registry().list(), "root": str(EQUIPMENT_SKILL_ROOT)}
+async def get_equipment_skills(profile_id: str = "") -> dict[str, Any]:
+    skills = _equipment_skill_registry().list()
+    if profile_id:
+        skills = [item for item in skills if item.get("target_profile") == profile_id]
+    return {"ok": True, "skills": skills, "root": str(EQUIPMENT_SKILL_ROOT)}
 
 
 @app.get("/api/equipment/workers/{bridge_id}/recordings")
@@ -12223,7 +12499,7 @@ async def post_equipment_recording_import(
             status="transferring",
             detail="selected worker recording accepted for transfer",
         )
-    worker_result = _equipment_bridge().get_recording(
+    worker_result = _equipment_bridge_for_profile(req.target_profile).get_recording(
         {"recording_id": recording_id, "bridge_id": req.bridge_id, "force_live_bridge": True}
     )
     if not worker_result.get("ok"):
@@ -12422,7 +12698,7 @@ async def post_equipment_skill_workflow_step_test(
             status_code=400,
             detail={"ok": False, "failure_code": "SKILL_STEP_INVALID", "issues": checked["issues"]},
         )
-    result = _equipment_bridge().run(
+    result = _equipment_bridge_for_profile(str(package["manifest"]["target_profile"])).run(
         {
             "bridge_id": req.bridge_id,
             "force_live_bridge": True,
@@ -12636,7 +12912,7 @@ def _execute_equipment_skill_deployment(
                 status="deploying",
                 detail=f"registering {len(programs)} deterministic program segment(s)",
             )
-        bridge = _equipment_bridge()
+        bridge = _equipment_bridge_for_profile(str(package["manifest"]["target_profile"]))
         registered: list[str] = []
         for index, program in enumerate(programs, start=1):
             if callable(stop_requested) and stop_requested():
@@ -12797,7 +13073,7 @@ async def post_equipment_skill_test(
                 raise HTTPException(status_code=422, detail=f"{runtime_mode} Raw CSV execution requires confirm_execute=true")
         elif runtime_mode == "live" and not req.confirm_execute:
             raise SkillContractError("live Skill test requires confirm_execute=true")
-        bridge = _equipment_bridge()
+        bridge = _equipment_bridge_for_profile(str(manifest.get("target_profile") or DEFAULT_UTM_PROFILE_ID))
         bridge_id = str(package.get("manifest", {}).get("deployment", {}).get("bridge_id") or "")
         results: list[dict[str, Any]] = []
         for index, program_id in enumerate(package["workflow"].get("program_ids", []), start=1):
@@ -12854,7 +13130,7 @@ async def delete_equipment_skill(skill_id: str, version: str) -> dict[str, Any]:
                     "message": "deployed Skill must be disabled before deletion",
                 },
             )
-        bridge = _equipment_bridge()
+        bridge = _equipment_bridge_for_profile(str(package["manifest"].get("target_profile") or DEFAULT_UTM_PROFILE_ID))
         bridge_id = str(package.get("manifest", {}).get("deployment", {}).get("bridge_id") or "")
         for program_id in package["workflow"].get("program_ids", []):
             result = bridge.delete_program(
@@ -12881,7 +13157,7 @@ async def delete_equipment_skill(skill_id: str, version: str) -> dict[str, Any]:
 
 def _equipment_profile_registry() -> EquipmentProfileRegistry:
     """Return the common equipment registry used by Workspace and Agent adapters."""
-    return EquipmentProfileRegistry.default()
+    return EquipmentProfileRegistry.default(memory_root=RUNTIME_PATHS.memory_root)
 
 
 def _equipment_skill_flow_store() -> EquipmentSkillFlowStore:
@@ -12906,7 +13182,7 @@ def _equipment_skill_flow_payload(
         graph = store.as_runtime_graph(profile.profile_id)
     except EquipmentSkillFlowError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    skills = _equipment_skill_registry().list()
+    skills = [item for item in _equipment_skill_registry().list() if item.get("target_profile") == profile_id]
     catalog = {
         (str(item.get("skill_id") or ""), str(item.get("version") or "")): item
         for item in skills
@@ -13041,7 +13317,7 @@ def _equipment_profile_state(profile_id: str) -> dict[str, object]:
         profile = _equipment_profile_registry().get(profile_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    bridge = _equipment_bridge()
+    bridge = _equipment_bridge_for_profile(profile_id)
     connection = bridge.connection_status()
     readiness = _windows_utm_readiness_from_bridge(bridge)
     profile_status = bridge.utm_profile_status()
@@ -13057,7 +13333,7 @@ def _equipment_profile_state(profile_id: str) -> dict[str, object]:
         "readiness": readiness,
         "programs": bridge.list_programs({"runtime_mode": "test"}).get("programs", []),
         "utm_profile": profile_status,
-        "evidence": controller._state.run_metadata.get("last_windows_utm_protocol_result", {}),
+        "evidence": _equipment_profile_metadata(profile_id).get("last_windows_utm_protocol_result", {}),
         "workspace_settings": _equipment_profile_workspace_settings(profile),
     }
 
@@ -13068,9 +13344,84 @@ async def get_equipment_profiles() -> dict[str, object]:
     registry = _equipment_profile_registry()
     return {
         "ok": True,
-        "selected_profile_id": DEFAULT_UTM_PROFILE_ID,
+        "selected_profile_id": registry.selected_id,
         "profiles": [profile.to_safe_dict() for profile in registry.list()],
     }
+
+
+@app.post("/api/equipment/profiles")
+async def create_equipment_profile(req: EquipmentProfileCreateRequest) -> dict[str, object]:
+    try:
+        profile = EquipmentProfileStore(RUNTIME_PATHS.memory_root).create(req.label)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"ok": True, "profile": profile.to_safe_dict()}
+
+
+@app.post("/api/equipment/profiles/{profile_id}/apply")
+async def apply_equipment_profile(profile_id: str, req: EquipmentProfileApplyRequest) -> dict[str, object]:
+    """Persist the chosen device, never execute equipment or retarget an active run."""
+    with _EQUIPMENT_AGENTIC_RUN_GUARD:
+        if (controller.snapshot().get("is_running") or _EQUIPMENT_AGENTIC_ACTIVE_PROFILES or _EQUIPMENT_CONSOLE_ACTIVE_PROFILES
+                or _EQUIPMENT_SKILL_AUTHORING_THREADS or _EQUIPMENT_SKILL_DEPLOYMENT_THREADS):
+            raise HTTPException(status_code=409, detail="Apply is unavailable while a run or equipment job is active")
+        try:
+            _equipment_profile_registry().get(profile_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        bridge = _equipment_bridge(profile_id=profile_id)
+        connection = bridge.connection_status()
+        worker_id = req.worker_id.strip() or str(connection.get("selected_candidate") or "")
+        candidate = next((item for item in connection.get("candidates", []) if item["candidate_alias"] == worker_id), None)
+        if not candidate or not candidate.get("token_configured"):
+            raise HTTPException(status_code=409, detail="Pair and select a Worker for this profile first")
+        selected = bridge.select_candidate({"candidate_alias": worker_id})
+        if not selected.get("ok"):
+            raise HTTPException(status_code=409, detail="Worker selection failed")
+        EquipmentProfileStore(RUNTIME_PATHS.memory_root).apply(profile_id)
+        return {"ok": True, "profile_id": profile_id, "worker_id": worker_id, "status": "applied", "non_actuating": True}
+
+
+@app.delete("/api/equipment/profiles/{profile_id}")
+async def delete_equipment_profile(profile_id: str, req: EquipmentProfileDeleteRequest) -> dict[str, object]:
+    """Remove a confirmed custom profile from selection; retain all historical data."""
+    if not req.confirmed:
+        raise HTTPException(status_code=422, detail="Confirm profile deletion first")
+    with _EQUIPMENT_AGENTIC_RUN_GUARD:
+        if (controller.snapshot().get("is_running") or _EQUIPMENT_AGENTIC_ACTIVE_PROFILES or _EQUIPMENT_CONSOLE_ACTIVE_PROFILES.get(profile_id)
+                or _EQUIPMENT_SKILL_AUTHORING_THREADS or _EQUIPMENT_SKILL_DEPLOYMENT_THREADS):
+            raise HTTPException(status_code=409, detail="Delete is unavailable while a run or equipment job is active")
+        try:
+            _equipment_profile_registry().get(profile_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        store = EquipmentProfileStore(RUNTIME_PATHS.memory_root)
+        try:
+            store.delete(profile_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"ok": True, "profile_id": profile_id, "selected_profile_id": store.selected_id(),
+                "historical_data_preserved": True, "non_actuating": True}
+
+
+def _equipment_profile_metadata(profile_id: str = "") -> dict[str, Any]:
+    """Never present an old instrument's evidence as this instrument's result."""
+    viewed = profile_id or scoped_equipment_profile_id() or EquipmentProfileStore(RUNTIME_PATHS.memory_root).selected_id()
+    actual = (controller._state.current_experiment_spec or {}).get("equipment_profile_id") or DEFAULT_UTM_PROFILE_ID
+    metadata = controller._state.run_metadata
+    result = {key: value for key, value in metadata.items() if key != "equipment_workspace_evidence"} if viewed == actual else {}
+    result.update(metadata.get("equipment_workspace_evidence", {}).get(viewed, {}))
+    return result
+
+
+def _store_equipment_profile_evidence(key: str, value: dict[str, Any]) -> None:
+    """Workspace checks do not overwrite evidence belonging to another device."""
+    profile_id = scoped_equipment_profile_id() or EquipmentProfileStore(RUNTIME_PATHS.memory_root).selected_id()
+    actual = (controller._state.current_experiment_spec or {}).get("equipment_profile_id") or DEFAULT_UTM_PROFILE_ID
+    if profile_id == actual:
+        controller._state.run_metadata[key] = value
+    else:
+        controller._state.run_metadata.setdefault("equipment_workspace_evidence", {}).setdefault(profile_id, {})[key] = value
 
 
 @app.get("/api/equipment/profiles/{profile_id}/state")
@@ -13429,7 +13780,7 @@ async def post_equipment_profile_test(profile_id: str, req: EquipmentProfileActi
         "vision_link_request": vision_link_request,
         "analysis_handoff": {"status": "ready" if bool(result.get("ok")) and not missing else "blocked", "missing_evidence": missing},
     }
-    controller._state.run_metadata["last_windows_utm_protocol_result"] = response
+    _store_equipment_profile_evidence("last_windows_utm_protocol_result", response)
     await controller.emit_workspace_result(
         workspace="equipment",
         tool="equipment.profile.test",
@@ -13451,15 +13802,16 @@ async def get_windows_equipment_config() -> dict[str, object]:
     programs = bridge.list_programs({"runtime_mode": "test"})
     profile = bridge.utm_profile_status()
     readiness = _windows_utm_readiness_from_bridge(bridge)
-    evidence_audit = _windows_utm_evidence_audit_from_metadata(dict(controller._state.run_metadata), run_id=controller._state.run_id)
+    metadata = _equipment_profile_metadata()
+    evidence_audit = _windows_utm_evidence_audit_from_metadata(metadata, run_id=controller._state.run_id)
     request_audit = _windows_bridge_request_log_from_bridge(bridge, runtime_mode="test", confirm_live=False)
-    live_validation = controller._state.run_metadata.get("last_windows_utm_live_validation")
+    live_validation = metadata.get("last_windows_utm_live_validation")
     if not isinstance(live_validation, dict):
         live_validation = {}
-    completion_audit = controller._state.run_metadata.get("last_windows_utm_completion_audit")
+    completion_audit = metadata.get("last_windows_utm_completion_audit")
     if not isinstance(completion_audit, dict):
         completion_audit = {}
-    vision_proof_draft = controller._state.run_metadata.get("last_windows_utm_vision_proof_draft")
+    vision_proof_draft = metadata.get("last_windows_utm_vision_proof_draft")
     if not isinstance(vision_proof_draft, dict):
         vision_proof_draft = {}
     return {
@@ -13485,7 +13837,7 @@ async def get_windows_equipment_readiness() -> dict[str, object]:
 @app.get("/api/equipment/windows/evidence-audit")
 async def get_windows_equipment_evidence_audit() -> dict[str, object]:
     """Return post-run UTM evidence gates from current runtime metadata."""
-    return _windows_utm_evidence_audit_from_metadata(dict(controller._state.run_metadata), run_id=controller._state.run_id)
+    return _windows_utm_evidence_audit_from_metadata(_equipment_profile_metadata(), run_id=controller._state.run_id)
 
 
 @app.get("/api/equipment/windows/proof-package")
@@ -13494,12 +13846,13 @@ async def get_windows_equipment_proof_package() -> dict[str, object]:
     bridge = _equipment_bridge()
     readiness = _windows_utm_readiness_from_bridge(bridge)
     package = _windows_utm_proof_package_from_metadata(
-        dict(controller._state.run_metadata),
+        _equipment_profile_metadata(),
         run_id=controller._state.run_id,
         passive_readiness=readiness,
     )
+    package["equipment_profile_id"] = scoped_equipment_profile_id() or EquipmentProfileStore(RUNTIME_PATHS.memory_root).selected_id()
     package = _persist_windows_utm_proof_package(package)
-    controller._state.run_metadata["last_windows_utm_proof_package"] = package
+    _store_equipment_profile_evidence("last_windows_utm_proof_package", package)
     await controller.emit_workspace_result(
         workspace="equipment",
         tool="equipment.pyautogui.live_proof_package",
@@ -13518,7 +13871,7 @@ async def post_windows_equipment_verify_proof_package(req: WindowsBridgeProofPac
     """Re-verify a persisted Windows UTM proof package and its local artifacts."""
     package, load_info = _load_windows_utm_proof_package_for_verify(req.path, use_current=req.use_current)
     result = _verify_windows_utm_proof_package(package, load_info=load_info)
-    controller._state.run_metadata["last_windows_utm_proof_package_verification"] = result
+    _store_equipment_profile_evidence("last_windows_utm_proof_package_verification", result)
     await controller.emit_workspace_result(
         workspace="equipment",
         tool="equipment.pyautogui.live_proof_package.verify",
@@ -13537,7 +13890,7 @@ async def post_windows_equipment_completion_audit(req: WindowsBridgeCompletionAu
     """Run the strict final Improvement 05 completion audit against a proof package."""
     result = _windows_utm_completion_audit(req.path, use_current=req.use_current, latest=req.latest)
     result = _persist_windows_utm_completion_audit(result)
-    controller._state.run_metadata["last_windows_utm_completion_audit"] = result
+    _store_equipment_profile_evidence("last_windows_utm_completion_audit", result)
     await controller.emit_workspace_result(
         workspace="equipment",
         tool="equipment.pyautogui.improvement05_completion_audit",
@@ -13555,12 +13908,14 @@ async def post_windows_equipment_completion_audit(req: WindowsBridgeCompletionAu
 async def post_windows_equipment_vision_proof_draft(req: WindowsBridgeVisionProofDraftRequest) -> dict[str, object]:
     """Build a non-actuating Vision proof JSON draft from current runtime evidence."""
     result = _windows_utm_vision_proof_draft(
-        dict(controller._state.run_metadata),
-        observations=dict(controller._state.latest_observations),
+        _equipment_profile_metadata(),
+        observations=(dict(controller._state.latest_observations) if
+                      (scoped_equipment_profile_id() or EquipmentProfileStore(RUNTIME_PATHS.memory_root).selected_id()) ==
+                      ((controller._state.current_experiment_spec or {}).get("equipment_profile_id") or DEFAULT_UTM_PROFILE_ID) else {}),
         run_id=req.run_id,
         specimen_id=req.specimen_id,
     )
-    controller._state.run_metadata["last_windows_utm_vision_proof_draft"] = result
+    _store_equipment_profile_evidence("last_windows_utm_vision_proof_draft", result)
     await controller.emit_workspace_result(
         workspace="equipment",
         tool="equipment.pyautogui.vision_proof_draft",
@@ -16572,8 +16927,8 @@ async def post_windows_equipment_run_program(req: WindowsBridgeRunProgramRequest
                     {"step": "READINESS_PRECHECK", "status": "blocked", "detail": ", ".join(blockers) or required_gate},
                 ],
             }
-            controller._state.run_metadata["last_windows_equipment_run_result"] = result
-            controller._state.run_metadata["last_windows_utm_protocol_result"] = result
+            _store_equipment_profile_evidence("last_windows_equipment_run_result", result)
+            _store_equipment_profile_evidence("last_windows_utm_protocol_result", result)
             await controller.emit_workspace_result(
                 workspace="equipment",
                 tool="equipment.pyautogui.run",
@@ -16593,7 +16948,7 @@ async def post_windows_equipment_run_program(req: WindowsBridgeRunProgramRequest
                 include_request_log=True,
                 runtime_overrides=payload,
             )
-            controller._state.run_metadata["last_windows_live_preflight_result"] = preflight
+            _store_equipment_profile_evidence("last_windows_live_preflight_result", preflight)
             if not bool(preflight.get("ready_for_autonomous_profile")):
                 blockers = [str(item) for item in preflight.get("blockers", []) if str(item or "").strip()]
                 warnings = [str(item) for item in preflight.get("warnings", []) if str(item or "").strip()]
@@ -16620,8 +16975,8 @@ async def post_windows_equipment_run_program(req: WindowsBridgeRunProgramRequest
                         {"step": "LIVE_PREFLIGHT", "status": "blocked", "detail": ", ".join(blockers) or "live_preflight"},
                     ],
                 }
-                controller._state.run_metadata["last_windows_equipment_run_result"] = result
-                controller._state.run_metadata["last_windows_utm_protocol_result"] = result
+                _store_equipment_profile_evidence("last_windows_equipment_run_result", result)
+                _store_equipment_profile_evidence("last_windows_utm_protocol_result", result)
                 await controller.emit_workspace_result(
                     workspace="equipment",
                     tool="equipment.pyautogui.run",
@@ -16665,10 +17020,10 @@ async def post_windows_equipment_run_program(req: WindowsBridgeRunProgramRequest
         else:
             result["pre_execution_readiness"] = readiness
             if not req.simulate_utm_protocol:
-                result["pre_execution_preflight"] = controller._state.run_metadata.get("last_windows_live_preflight_result", {})
-    controller._state.run_metadata["last_windows_equipment_run_result"] = result
+                result["pre_execution_preflight"] = _equipment_profile_metadata().get("last_windows_live_preflight_result", {})
+    _store_equipment_profile_evidence("last_windows_equipment_run_result", result)
     if str(result.get("program_id") or req.program_id or "").startswith("utm_"):
-        controller._state.run_metadata["last_windows_utm_protocol_result"] = result
+        _store_equipment_profile_evidence("last_windows_utm_protocol_result", result)
     await controller.emit_workspace_result(
         workspace="equipment",
         tool="equipment.pyautogui.run",

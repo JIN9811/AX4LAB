@@ -39,7 +39,7 @@ Modification guide:
     <link rel="preload" as="image" href="/static/ax4lab-logo-transparent.png">
     <link rel="stylesheet" href="/static/workspace_boot.css?v=1">
   </head>
-  <body>
+  <body data-equipment-profile="{{ equipment_profile_id }}">
     {% set workspace_title = "Windows Automation Workspace" %}
     {% include "workspace_boot.html" %}
     <main class="page equipment-setup-page">
@@ -76,6 +76,15 @@ Modification guide:
           <select id="equipment-profile-items" class="text-input equipment-profile-select" aria-label="Equipment profile">
             <option value="utm_windows_v1" selected>UTM</option>
           </select>
+          <label class="planning-message-label" for="equipment-profile-name">Profile name
+            <input id="equipment-profile-name" class="text-input" type="text" maxlength="80" autocomplete="off" placeholder="e.g. UTM 2">
+          </label>
+          <div class="button-row">
+            <button id="btn-equipment-new-profile" type="button" class="btn">New Profile</button>
+            <button id="btn-equipment-apply-profile" type="button" class="btn primary">Apply</button>
+            <button id="btn-equipment-delete-profile" type="button" class="btn danger" disabled>Delete Profile</button>
+          </div>
+          <p id="equipment-profile-apply-status" class="hint" role="status">Loading applied profile.</p>
         </article>
         <article id="equipment-profile-connection">
           <span class="eyebrow">Connection</span>
@@ -416,6 +425,6 @@ Modification guide:
 
     <script src="/static/equipment_skill_flow_model.js" defer></script>
     <script src="/static/windows_equipment_selection.js" defer></script>
-    <script src="/static/windows_equipment.js" defer></script>
+    <script src="/static/windows_equipment.js?v=20261026-profile-delete-2" defer></script>
   </body>
 </html>

@@ -36,7 +36,8 @@ from agents.base_agent import AgentContext, AgentResult, BaseAgent
 from utils.agent_artifact_archive import archive_agent_run
 from utils.test_mode_execution_profiles import is_resolved_all_virtual_bridge
 from orchestrator.state import Mode, OrchestratorState
-from utils.equipment_profiles import EquipmentExecutionContract, EquipmentProfile, EquipmentProfileRegistry, build_execution_contract
+from utils.equipment_profiles import (EquipmentExecutionContract, EquipmentProfile, EquipmentProfileRegistry,
+    EquipmentProfileStore, equipment_profile_scope, scoped_equipment_profile_id, build_execution_contract)
 from policies.guardian_gate import equipment_skill_recovery_gate, gate_blocks_execution
 from knowledge.manuals.prompting import manual_context_audit
 from utils.equipment_skill_runtime import (
@@ -453,13 +454,21 @@ class LabEquipmentAgent(BaseAgent):
 
     def _selected_profile(self, state: OrchestratorState) -> EquipmentProfile:
         spec = state.current_experiment_spec if isinstance(state.current_experiment_spec, dict) else {}
-        profile_id = str(spec.get("equipment_profile_id") or "").strip()
+        profile_id = str(spec.get("equipment_profile_id") or scoped_equipment_profile_id() or "").strip()
         return EquipmentProfileRegistry.default().resolve(
             profile_id=profile_id,
             program_id=self._program_hint(state),
         )
 
     async def _call_tool(self, ctx: AgentContext, tool: str, payload: dict[str, Any], *, state: OrchestratorState | None = None) -> dict[str, Any]:
+        if state is not None and tool.startswith(("equipment.pyautogui.", "equipment.runtime.")):
+            # A model cannot choose a different physical device for an in-flight run.
+            paths = getattr(ctx, "paths", None)
+            registry = EquipmentProfileRegistry.default(memory_root=paths.memory_root if paths else None)
+            payload["equipment_profile_id"] = registry.resolve(
+                profile_id=str((state.current_experiment_spec or {}).get("equipment_profile_id") or scoped_equipment_profile_id() or ""),
+                program_id=self._program_hint(state),
+            ).profile_id
         # Model arguments never establish virtual authority, including for live callers.
         for key in ("virtual_bridge_simulation", "allow_virtual_bridge_in_test", "prefer_virtual_bridge_in_test"):
             payload.pop(key, None)
@@ -4359,6 +4368,23 @@ class LabEquipmentAgent(BaseAgent):
 
     @archive_agent_run
     async def run(self, state: OrchestratorState, ctx: AgentContext) -> AgentResult:
+        paths = getattr(ctx, "paths", None)
+        memory_root = paths.memory_root if paths else None
+        store = EquipmentProfileStore(memory_root)
+        explicit = str((state.current_experiment_spec or {}).get("equipment_profile_id") or "")
+        applied = bool(store.read().get("selection_applied"))
+        selected = EquipmentProfileRegistry.default(memory_root=memory_root).resolve(
+            profile_id=explicit or (store.selected_id() if applied else ""),
+            program_id=self._program_hint(state),
+        ).profile_id
+        # A saved Apply is explicit, including the default UTM. Untouched legacy
+        # installations retain their original program-vs-Skill-Flow dispatch.
+        if explicit or applied or selected not in {"utm_windows_v1", "windows_desktop_v1"}:
+            state.current_experiment_spec["equipment_profile_id"] = selected
+        with equipment_profile_scope(selected):
+            return await self._run_profile_bound(state, ctx)
+
+    async def _run_profile_bound(self, state: OrchestratorState, ctx: AgentContext) -> AgentResult:
         await self.request_attention(state, ctx, "handoff")
         from agents.equipment.execution import default_equipment_execution_graph, execute_equipment_graph
         from agents.execution_graph import execution_event_emitter, execution_graph_from_context

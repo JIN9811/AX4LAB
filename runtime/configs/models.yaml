@@ -16,7 +16,7 @@
 # - Risky places to edit: role keys expected by code
 # - Related files: backends/model_router.py, .env.example
 #
-# The default branch remains the local/NemoClaw vLLM route. The backend fallback
+# The default branch is the registered local vLLM endpoint. The backend fallback
 # is OpenAI API so Windows or Linux deployments can still run with an API key
 # when local inference is unavailable or intentionally skipped.
 
@@ -26,56 +26,36 @@ backend:
 
 models:
   orchestrator:
-    primary: gemma4:31b
-    fallback: gemma4:e4b-it-nvfp4
-  e4b:
-    primary: gemma4:e4b-it-nvfp4
-    fallback: gemma4:31b
-role_capabilities:
-  orchestrator:
-    text: true
-    vision: false
-  e4b:
-    text: true
-    vision: true
+    primary: endpoint:local-main
+  worker:
+    primary: endpoint:local-main
+# Capabilities belong to the selected endpoint in system.yaml, not a role name.
 backend_models:
   openai:
     orchestrator:
-      primary: gpt-5.5
-    e4b:
-      primary: gpt-5.5
-  nemoclaw:
-    orchestrator:
-      primary: gemma4:e4b-it-bf16
-      fallback: gemma4:31b
-    e4b:
-      primary: gemma4:e4b-it-bf16
-      fallback: gemma4:31b
-  ollama:
-    orchestrator:
-      primary: gemma4:e4b-it-bf16
-      fallback: gemma4:31b
-    e4b:
-      primary: gemma4:e4b-it-bf16
-      fallback: gemma4:31b
+      primary: endpoint:api-main
+    worker:
+      primary: endpoint:api-main
   vllm:
     orchestrator:
-      primary: gemma4:31b
-      fallback: gemma4:e4b-it-nvfp4
-    e4b:
-      primary: gemma4:e4b-it-nvfp4
-      fallback: gemma4:31b
+      primary: endpoint:local-main
+    worker:
+      primary: endpoint:local-main
 
 task_routes:
   orchestrator_plan: orchestrator
-  design_reasoning: e4b
-  specimen_reasoning: e4b
-  analysis_reasoning: e4b
-  bo_policy: e4b
-  knowledge_query: e4b
-  knowledge_relation: e4b
-  guardian_reasoning: e4b
-  tool_formatting: e4b
-  equipment_workflow_decision: e4b
-  gui_helper: e4b
+  orchestrator_supervisor: orchestrator
+  design_reasoning: worker
+  specimen_reasoning: worker
+  analysis_reasoning: worker
+  bo_policy: worker
+  knowledge_query: worker
+  knowledge_relation: worker
+  guardian_reasoning: worker
+  guardian_review: worker
+  vision_observation: worker
+  manipulation_plan: worker
+  tool_formatting: worker
+  equipment_workflow_decision: worker
+  gui_helper: worker
   module_designer: orchestrator

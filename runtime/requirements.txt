@@ -1403,6 +1403,10 @@ pydantic-core==2.46.4 \
     --hash=sha256:fc010ab034c8c7452522748bf937df58020d256ccae0874463d1f4d01758af8e \
     --hash=sha256:fc3e9034a63de20e15e8ade85358bc6efc614008cab72898b4b4952bea0509ff
     # via pydantic
+pymcprotocol==0.3.0 \
+    --hash=sha256:4ecc47c1c1f0955b0eddaa137d29663dbd30892f57119c74bf711b317cfdc23a \
+    --hash=sha256:614217d43fbf8d9e409c1928993cbb4339d17828c1002c1766ce900aaee12dd6
+    # via ax4lab
 pyparsing==3.3.2 \
     --hash=sha256:850ba148bd908d7e2411587e247a1e4f0327839c40e2e5e6d05a007ecc69911d \
     --hash=sha256:c777f4d763f140633dcb6d8a3eda953bf7a214dc4eff598413c070bcdc117cbc

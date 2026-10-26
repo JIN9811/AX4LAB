@@ -106,21 +106,23 @@ test, and this guide together.
 
 ## Installation And Diagnostic Environment
 
-Install the AX4LAB server dependency in the normal project environment:
+From the repository root, install the normal AX4LAB server environment:
 
 ```bash
-pip install -r requirements.txt
+bash runtime/install/bootstrap_linux.sh
 ```
 
-`requirements.txt` and `pyproject.toml` declare
-`pymcprotocol>=0.3.0,<0.4.0`. The AX4LAB server imports this package in-process; it
-does not launch Conda for each poll.
+`runtime/pyproject.toml` includes `pymcprotocol>=0.3.0,<0.4.0` in the core
+dependencies. The lock and generated `runtime/requirements.txt` select version
+`0.3.0`. Neither the compatibility flag `--with-plc` nor a separate Conda
+environment is required. The AX4LAB server imports the package in-process;
+it does not launch Conda for each poll. Installing the package does not start
+the server or issue PLC commands.
 
-The validated Linux diagnostic environment name is lowercase `plc`. Verify the
-installed diagnostic package without connecting to a PLC:
+Verify the server's installed package without connecting to a PLC:
 
 ```bash
-conda run -n plc python -c 'import importlib.metadata as m, pymcprotocol; print(m.version("pymcprotocol")); print(pymcprotocol.__file__)'
+.venv/bin/python -c 'import importlib.metadata as m, pymcprotocol; print(m.version("pymcprotocol")); print(pymcprotocol.__file__)'
 ```
 
 The validated result is `pymcprotocol 0.3.0`. A successful import proves only

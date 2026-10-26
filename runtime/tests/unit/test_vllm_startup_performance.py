@@ -19,6 +19,50 @@ from knowledge.rag import HybridRAG, LocalRAGIndex, WebRetriever
 from mcp_tools.tool_registry import ToolRegistry
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("host", ["invalid IP", "", "172.18.0.2invalid IP", "0.0.0.0"])
+async def test_managed_url_rejects_unusable_container_ip(monkeypatch, host):
+    runtime = NemoClawVLLMRuntime(enabled=True, cluster_container="cluster", namespace="ns",
+        models={"model": ManagedVLLMModel(deployment="deployment", node_port=31001)})
+
+    async def inspect(*args, **kwargs):
+        return host
+
+    monkeypatch.setattr(runtime, "_run", inspect)
+    with pytest.raises(RuntimeError, match="container IP"):
+        await runtime.base_url_for_model("model")
+
+
+@pytest.mark.asyncio
+async def test_managed_url_refreshes_after_container_address_changes(monkeypatch):
+    runtime = NemoClawVLLMRuntime(enabled=True, cluster_container="cluster", namespace="ns",
+        models={"model": ManagedVLLMModel(deployment="deployment", node_port=31001)})
+    addresses = iter(("172.18.0.2", "172.18.0.3"))
+
+    async def inspect(*args, **kwargs):
+        return next(addresses)
+
+    monkeypatch.setattr(runtime, "_run", inspect)
+    assert await runtime.base_url_for_model("model") == "http://172.18.0.2:31001/v1"
+    assert await runtime.base_url_for_model("model") == "http://172.18.0.3:31001/v1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("addresses,host", [
+    ("invalid IP\n172.18.0.4\n", "172.18.0.4"),
+    ("\n2001:db8::1\n", "[2001:db8::1]"),
+])
+async def test_managed_url_handles_multiple_networks_and_ipv6(monkeypatch, addresses, host):
+    runtime = NemoClawVLLMRuntime(enabled=True, cluster_container="cluster", namespace="ns",
+        models={"model": ManagedVLLMModel(deployment="deployment", node_port=31001)})
+
+    async def inspect(*args, **kwargs):
+        return addresses
+
+    monkeypatch.setattr(runtime, "_run", inspect)
+    assert await runtime.base_url_for_model("model") == f"http://{host}:31001/v1"
+
+
 class _PreparedBackend(BaseLLMBackend):
     """Backend that exposes prepare_model so AgentContext can prove it does not duplicate work."""
 
@@ -325,7 +369,7 @@ def test_vllm_backend_requests_json_object_for_structured_completion() -> None:
     assert VLLMBackend._response_format_for_metadata({"response_format": "text"}) is None
 
 
-def test_nemoclaw_vllm_deployment_memory_profile_allows_resident_gemma4_models() -> None:
+def test_nemoclaw_vllm_deployment_keeps_only_registered_local_management_target() -> None:
     deploy_path = Path(__file__).resolve().parents[2] / "deploy" / "nemoclaw-vllm.yaml"
     docs = [doc for doc in yaml.safe_load_all(deploy_path.read_text(encoding="utf-8")) if isinstance(doc, dict)]
 
@@ -341,7 +385,6 @@ def test_nemoclaw_vllm_deployment_memory_profile_allows_resident_gemma4_models()
 
     assert memory_profile == {
         "vllm-gemma4-31b": "0.55",
-        "vllm-gemma4-e4b": "0.14",
     }
 
 

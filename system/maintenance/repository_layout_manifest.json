@@ -2252,16 +2252,16 @@
     "docs/oldversion/superpowers/specs/assets/package_agent_bridge_boundaries.svg",
     "docs/oldversion/system/README.md",
     "docs/oldversion/system/codex_lerobot_robotis_gui_prompt.txt",
-    "docs/oldversion/\uac1c\uc120\uc548/03_vision_agent_lab_perception_signal_loop_research.md",
-    "docs/oldversion/\uac1c\uc120\uc548/05_lab_equipment_agent_utm_visual_control_data_loop_research.md",
-    "docs/oldversion/\uac1c\uc120\uc548/09_guardian_agent_graphwide_safety_incident_loop_research.md",
-    "docs/oldversion/\uac1c\uc120\uc548/12_free_modularization_gap_analysis.md",
-    "docs/oldversion/\uac1c\uc120\uc548/13_bambulab_x2d_spc_device_bridge_research.md",
-    "docs/oldversion/\uac1c\uc120\uc548/14_bambulab_gcode_autoejection_runtime_plan.md",
-    "docs/oldversion/\uac1c\uc120\uc548/16_utm_ros_runtime_bridge_live_gui_plan.md",
-    "docs/oldversion/\uac1c\uc120\uc548/17_vision_agent_camera_device_bridge_live_gui_plan.md",
-    "docs/oldversion/\uac1c\uc120\uc548/live_gui_upgrade/README.md",
-    "docs/oldversion/\uac1c\uc120\uc548/reference_assets/bambulab_device_screen_20260614.png",
+    "docs/oldversion/개선안/03_vision_agent_lab_perception_signal_loop_research.md",
+    "docs/oldversion/개선안/05_lab_equipment_agent_utm_visual_control_data_loop_research.md",
+    "docs/oldversion/개선안/09_guardian_agent_graphwide_safety_incident_loop_research.md",
+    "docs/oldversion/개선안/12_free_modularization_gap_analysis.md",
+    "docs/oldversion/개선안/13_bambulab_x2d_spc_device_bridge_research.md",
+    "docs/oldversion/개선안/14_bambulab_gcode_autoejection_runtime_plan.md",
+    "docs/oldversion/개선안/16_utm_ros_runtime_bridge_live_gui_plan.md",
+    "docs/oldversion/개선안/17_vision_agent_camera_device_bridge_live_gui_plan.md",
+    "docs/oldversion/개선안/live_gui_upgrade/README.md",
+    "docs/oldversion/개선안/reference_assets/bambulab_device_screen_20260614.png",
     "docs/paper/01_problem_and_contributions.md",
     "docs/paper/02_system_architecture.md",
     "docs/paper/03_closed_loop_method.md",
@@ -12293,8 +12293,8 @@
       "size": 17468,
       "approved_content_changes": []
     },
-    "docs/oldversion/\uac1c\uc120\uc548/03_vision_agent_lab_perception_signal_loop_research.md": {
-      "destination": "system/retained-history/\uac1c\uc120\uc548/03_vision_agent_lab_perception_signal_loop_research.md",
+    "docs/oldversion/개선안/03_vision_agent_lab_perception_signal_loop_research.md": {
+      "destination": "system/retained-history/개선안/03_vision_agent_lab_perception_signal_loop_research.md",
       "disposition": "move",
       "reason": "Retained bundle/evidence; no new deletion approval",
       "mode": "100644",
@@ -12303,8 +12303,8 @@
       "size": 30120,
       "approved_content_changes": []
     },
-    "docs/oldversion/\uac1c\uc120\uc548/05_lab_equipment_agent_utm_visual_control_data_loop_research.md": {
-      "destination": "system/retained-history/\uac1c\uc120\uc548/05_lab_equipment_agent_utm_visual_control_data_loop_research.md",
+    "docs/oldversion/개선안/05_lab_equipment_agent_utm_visual_control_data_loop_research.md": {
+      "destination": "system/retained-history/개선안/05_lab_equipment_agent_utm_visual_control_data_loop_research.md",
       "disposition": "move",
       "reason": "Retained bundle/evidence; no new deletion approval",
       "mode": "100644",
@@ -12313,8 +12313,8 @@
       "size": 35404,
       "approved_content_changes": []
     },
-    "docs/oldversion/\uac1c\uc120\uc548/09_guardian_agent_graphwide_safety_incident_loop_research.md": {
-      "destination": "system/retained-history/\uac1c\uc120\uc548/09_guardian_agent_graphwide_safety_incident_loop_research.md",
+    "docs/oldversion/개선안/09_guardian_agent_graphwide_safety_incident_loop_research.md": {
+      "destination": "system/retained-history/개선안/09_guardian_agent_graphwide_safety_incident_loop_research.md",
       "disposition": "move",
       "reason": "Retained bundle/evidence; no new deletion approval",
       "mode": "100644",
@@ -12323,8 +12323,8 @@
       "size": 34100,
       "approved_content_changes": []
     },
-    "docs/oldversion/\uac1c\uc120\uc548/12_free_modularization_gap_analysis.md": {
-      "destination": "system/retained-history/\uac1c\uc120\uc548/12_free_modularization_gap_analysis.md",
+    "docs/oldversion/개선안/12_free_modularization_gap_analysis.md": {
+      "destination": "system/retained-history/개선안/12_free_modularization_gap_analysis.md",
       "disposition": "move",
       "reason": "Retained bundle/evidence; no new deletion approval",
       "mode": "100644",
@@ -12333,8 +12333,8 @@
       "size": 61553,
       "approved_content_changes": []
     },
-    "docs/oldversion/\uac1c\uc120\uc548/13_bambulab_x2d_spc_device_bridge_research.md": {
-      "destination": "system/retained-history/\uac1c\uc120\uc548/13_bambulab_x2d_spc_device_bridge_research.md",
+    "docs/oldversion/개선안/13_bambulab_x2d_spc_device_bridge_research.md": {
+      "destination": "system/retained-history/개선안/13_bambulab_x2d_spc_device_bridge_research.md",
       "disposition": "move",
       "reason": "Retained bundle/evidence; no new deletion approval",
       "mode": "100644",
@@ -12343,8 +12343,8 @@
       "size": 81273,
       "approved_content_changes": []
     },
-    "docs/oldversion/\uac1c\uc120\uc548/14_bambulab_gcode_autoejection_runtime_plan.md": {
-      "destination": "system/retained-history/\uac1c\uc120\uc548/14_bambulab_gcode_autoejection_runtime_plan.md",
+    "docs/oldversion/개선안/14_bambulab_gcode_autoejection_runtime_plan.md": {
+      "destination": "system/retained-history/개선안/14_bambulab_gcode_autoejection_runtime_plan.md",
       "disposition": "move",
       "reason": "Retained bundle/evidence; no new deletion approval",
       "mode": "100644",
@@ -12353,8 +12353,8 @@
       "size": 76095,
       "approved_content_changes": []
     },
-    "docs/oldversion/\uac1c\uc120\uc548/16_utm_ros_runtime_bridge_live_gui_plan.md": {
-      "destination": "system/retained-history/\uac1c\uc120\uc548/16_utm_ros_runtime_bridge_live_gui_plan.md",
+    "docs/oldversion/개선안/16_utm_ros_runtime_bridge_live_gui_plan.md": {
+      "destination": "system/retained-history/개선안/16_utm_ros_runtime_bridge_live_gui_plan.md",
       "disposition": "move",
       "reason": "Retained bundle/evidence; no new deletion approval",
       "mode": "100644",
@@ -12363,8 +12363,8 @@
       "size": 27141,
       "approved_content_changes": []
     },
-    "docs/oldversion/\uac1c\uc120\uc548/17_vision_agent_camera_device_bridge_live_gui_plan.md": {
-      "destination": "system/retained-history/\uac1c\uc120\uc548/17_vision_agent_camera_device_bridge_live_gui_plan.md",
+    "docs/oldversion/개선안/17_vision_agent_camera_device_bridge_live_gui_plan.md": {
+      "destination": "system/retained-history/개선안/17_vision_agent_camera_device_bridge_live_gui_plan.md",
       "disposition": "move",
       "reason": "Retained bundle/evidence; no new deletion approval",
       "mode": "100644",
@@ -12373,8 +12373,8 @@
       "size": 24662,
       "approved_content_changes": []
     },
-    "docs/oldversion/\uac1c\uc120\uc548/live_gui_upgrade/README.md": {
-      "destination": "system/retained-history/\uac1c\uc120\uc548/live_gui_upgrade/README.md",
+    "docs/oldversion/개선안/live_gui_upgrade/README.md": {
+      "destination": "system/retained-history/개선안/live_gui_upgrade/README.md",
       "disposition": "move",
       "reason": "Retained bundle/evidence; no new deletion approval",
       "mode": "100644",
@@ -12383,8 +12383,8 @@
       "size": 1230,
       "approved_content_changes": []
     },
-    "docs/oldversion/\uac1c\uc120\uc548/reference_assets/bambulab_device_screen_20260614.png": {
-      "destination": "system/retained-history/\uac1c\uc120\uc548/reference_assets/bambulab_device_screen_20260614.png",
+    "docs/oldversion/개선안/reference_assets/bambulab_device_screen_20260614.png": {
+      "destination": "system/retained-history/개선안/reference_assets/bambulab_device_screen_20260614.png",
       "disposition": "move",
       "reason": "Retained bundle/evidence; no new deletion approval",
       "mode": "100644",
@@ -53160,8 +53160,8 @@
           "mode": "100755"
         },
         "current_identity": {
-          "sha256": "973d9b1fd4433e26b2b4ff01e33443973cd34e628448269cdb0bc0e104df4cae",
-          "size": 5021,
+          "sha256": "ea64491f14277aa0d8f9d7d1cc004a98ba71c2081ca0815c87155c9b1b3b8ae4",
+          "size": 5038,
           "mode": "100755"
         }
       },
@@ -53198,6 +53198,690 @@
         "current_identity": {
           "sha256": "eeadc91da0021e7dbbb5f4965e4491da7a6dfe662891d0441707dac577f2eb82",
           "size": 49341,
+          "mode": "100644"
+        }
+      },
+      ".github/workflows/basic-tests.yml": {
+        "previous_identity": {
+          "sha256": "c8f8defb9f2422dbeb5d9584444ce9adbdf585d20b2b2d74617e951240770b71",
+          "size": 3134,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "47bd48681360f53337b7ca1e6027423082d9edfb2d11ded7ec11d6c4273e6079",
+          "size": 3439,
+          "mode": "100644"
+        }
+      },
+      "docs/cheatsheet.md": {
+        "previous_identity": {
+          "sha256": "c4bda784cb080f9b0a70017e2f6a4d81abd92148ed8bfa486c8e43c4c8aabe26",
+          "size": 7107,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "18b49aee4546716c934eb38b029432aee42ac929ee0cd8d5f33104a396899a2b",
+          "size": 9457,
+          "mode": "100644"
+        }
+      },
+      "docs/project/REQUIREMENTS.md": {
+        "previous_identity": {
+          "sha256": "c5b52c976c521f084228322f3abb09f1d7f0a5414634bf4c1a77227ab5cc2f2b",
+          "size": 58756,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "63c6feddfda5ebb6189c4a9dffe4d9efa7d146345ef096e345ca1f9c192982fb",
+          "size": 58385,
+          "mode": "100644"
+        }
+      },
+      "runtime/device_bridges/plc_bridge.py": {
+        "previous_identity": {
+          "sha256": "474b174b7801302164fe7974dcdfe787ba04380ad7a4963519d629e7804b2439",
+          "size": 6547,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "c358df345c35b6f6b25ef1b75279e434256b8ba88da79c9448ddc9ec1a145b28",
+          "size": 6549,
+          "mode": "100644"
+        }
+      },
+      "runtime/install/README.md": {
+        "previous_identity": {
+          "sha256": "8f797f4a61cf4ed471d3e7c3e31bcbc8ab53a4032450fb0ee4adf1fbaf39adb3",
+          "size": 30078,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "522e141cf5d4a363dd3531a8d87bbbc9e1389df0d2c3868ab438d81e8ce65b88",
+          "size": 32391,
+          "mode": "100644"
+        }
+      },
+      "runtime/pyproject.toml": {
+        "previous_identity": {
+          "sha256": "b80c902418ef1f63e33bbc9c9c587c259c97c29771eb791c93de37a50ffcdc4f",
+          "size": 1637,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "107241f34c489d972a1a7ad968b0857eb8a22a1ef7df62dfc05a1ae65f74c76d",
+          "size": 1750,
+          "mode": "100644"
+        }
+      },
+      "runtime/requirements.txt": {
+        "previous_identity": {
+          "sha256": "c8de949a41a0eada26702b5d70f8c7349fbfa8ebe3d41a0320e2f79183e47304",
+          "size": 170504,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "2dd4f95b16383234ab7075677a4a40a0fb78fbec166f3d2acd834c0fff7d59b4",
+          "size": 170711,
+          "mode": "100644"
+        }
+      },
+      "runtime/scripts/doctor.py": {
+        "previous_identity": {
+          "sha256": "7b7e0692ea4a76633fd9175f45b56d65439d5bb86c2c060a80c5e57de0188378",
+          "size": 22542,
+          "mode": "100755"
+        },
+        "current_identity": {
+          "sha256": "e327cce850355c218bd9bb3f8e00961a011346d70eeafb77289102ba5b1f1b5c",
+          "size": 22892,
+          "mode": "100755"
+        }
+      },
+      "runtime/tests/unit/test_portable_doctor.py": {
+        "previous_identity": {
+          "sha256": "2ba6928267922bb8032d8c2527d9e03383c59d1f877181a3eabf3d7d3ecfb899",
+          "size": 16651,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "64f6d80b2382ce7682c4dc8635c8a163f6af4dec8ea3e3ee9c5ae3b151227754",
+          "size": 17059,
+          "mode": "100644"
+        }
+      },
+      "runtime/uv.lock": {
+        "previous_identity": {
+          "sha256": "b7ae5b5dff9039bf1ff9753f0d65860f630839975e967af17572c6f983c83d6d",
+          "size": 781986,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "672194015b44768c9ba3e522842d27215fa4d61a6270a47073e596fafe8b5916",
+          "size": 782078,
+          "mode": "100644"
+        }
+      },
+      "system/device_bridges/plc_safety_bridge.md": {
+        "previous_identity": {
+          "sha256": "09ed4d5ebcf3c8c6510d7de5dac57425c24292a53d8cd9ae03a99e1df8add8a7",
+          "size": 19891,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "cb6f97857c97f14ec59919cc77700e8b55ba4e2da660a445aaab8181ef881588",
+          "size": 20068,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/unit/test_plc_installation.py": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "07c7b36ae59a3966671956a07e937f217e96fc503d7340abedfdfd561e7993f9",
+          "size": 2578,
+          "mode": "100644"
+        }
+      },
+      ".env.example": {
+        "previous_identity": {
+          "sha256": "9fb0785cef4077a37c33470f2220746ba37a14c605ec23f704fea91a74516354",
+          "size": 2771,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "56528126b2edceb834b636aff2f23c5b4f1126981f68c3a2ed9f54520b4a15fd",
+          "size": 3154,
+          "mode": "100644"
+        }
+      },
+      "runtime/app/bootstrap.py": {
+        "previous_identity": {
+          "sha256": "9ff7015571bfcd7ddd70581b5355f222c2933da72ebe2543af6b80e9648c0439",
+          "size": 16991,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "38dcbcc43acdbf461f64f475ead5edb8babdd16687ce23ce6e9d56ae61258536",
+          "size": 19939,
+          "mode": "100644"
+        }
+      },
+      "runtime/app/controller.py": {
+        "previous_identity": {
+          "sha256": "28e2afe6e1d4c1df072c605605cef26a87b787255fbde522fce5a63838712bf8",
+          "size": 612671,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "259ac2cd98553eb78c153f9d67b26f7ce7a350d82fac86d311ae909bd3dd5fa7",
+          "size": 613533,
+          "mode": "100644"
+        }
+      },
+      "runtime/backends/nemoclaw_vllm_runtime.py": {
+        "previous_identity": {
+          "sha256": "16ee5bea3606217d07a9ba94c65eff19a8b3b7a82341648a2b5cefa575d0353e",
+          "size": 17107,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "36a96e1a1d09d953c0736c4cafeb06c3d599b03294f1e02705ad6b2d2751178c",
+          "size": 17461,
+          "mode": "100644"
+        }
+      },
+      "runtime/distribution-files.json": {
+        "previous_identity": {
+          "sha256": "702865b377619e120c042d8a05684d9f9c96ad1c9e61768b9d8f2817a4a70d5c",
+          "size": 87808,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "eda4aebc8e1b31b71ced58a7cfd6f0cdb3cb34112899cf7c3f3edb6a8c2a5381",
+          "size": 88766,
+          "mode": "100644"
+        }
+      },
+      "runtime/install/install_cli.sh": {
+        "previous_identity": {
+          "sha256": "56c6dc8b5d7743f9755c64ec65455a28b9e810f3d15db4b59ad44213b6ae9e9d",
+          "size": 25077,
+          "mode": "100755"
+        },
+        "current_identity": {
+          "sha256": "a44ae4fe2a5ec8826eb8665cdc63c451a589bcb442f9006ba02158147b6216d5",
+          "size": 25020,
+          "mode": "100755"
+        }
+      },
+      "runtime/tests/integration/test_runtime_api_key_settings.py": {
+        "previous_identity": {
+          "sha256": "6bb6819f42f2ac1aa8c4dd051967261cf48b142f2421839f3d6feb395c574d66",
+          "size": 7469,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "fc7edb32208e70d2fd8bd109684249d0afb65632714823c015d34f0601134efa",
+          "size": 8378,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/unit/test_ax4lab_launcher.py": {
+        "previous_identity": {
+          "sha256": "fac8363dcf21ccff2b1a995b1e2c797d020853193bb2fb09027425aa1ed4733d",
+          "size": 8639,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "3053cfccbe1fbdbc5b8c0a51bfa0624cc84bc5a5f11488dbdac99d0a3a5eb579",
+          "size": 9172,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/unit/test_vllm_startup_performance.py": {
+        "previous_identity": {
+          "sha256": "902630d17f2bd6043ad83ad9e748b8ce471b7561b89202b943543580ab30f8cb",
+          "size": 12734,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "d0f428295428001f0f5b49dd2c8926c9b89f587ee821a9c4b80fe7ef1902c0fb",
+          "size": 14550,
+          "mode": "100644"
+        }
+      },
+      "system/runtime/api_keys.md": {
+        "previous_identity": {
+          "sha256": "8139e4245472b2901649b5dead5c4dedd59f76266bb2c1d0effd3fd4eb0e9d5e",
+          "size": 2877,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "039f0cb992d01671cda4217d58f88ca59d6bdeba99124e5e1b2e2e3f7c9e7627",
+          "size": 6538,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/unit/test_backend_model_config.py": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "93024f0d049bf48c418023b81c840d7a51c648b4b3787f2a3a5adfd927d80252",
+          "size": 6326,
+          "mode": "100644"
+        }
+      },
+      "runtime/orchestrator/langgraph_runtime.py": {
+        "previous_identity": {
+          "sha256": "f43f6dd95cfa232892b668c07590367667d23b5b4e4852cd2f6dba2ad04e2861",
+          "size": 182619,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "d3c9135b34bd524ac65d4b83daddb21a4bab2017761e2d5a250e0d7d3baea416",
+          "size": 183935,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/unit/test_module_multimodal.py": {
+        "previous_identity": {
+          "sha256": "63d21e4096db319d4e4dac7bbb549ecb96cf74743f03b3e0a811e1531500f360",
+          "size": 5069,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "10272f77cc5ac731a61df767eaa9db24320cf4e09343a2a951f14ce49af45934",
+          "size": 7895,
+          "mode": "100644"
+        }
+      },
+      "docs/gui/gui.md": {
+        "previous_identity": {
+          "sha256": "3c3ff08eaafa0966ace962d028c6e8bb9a94bc45f378aaa96f0e8426f780a29d",
+          "size": 108034,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "7ab61bfb7e438ae6d46e79809847dae6df573da3fc78a8687a5f29f657612858",
+          "size": 113700,
+          "mode": "100644"
+        }
+      },
+      "runtime/app/llm_connections.py": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "a4066f67ecc7a0db1bf10c0118e767a432219a43deda4fe8133da0591c198dc5",
+          "size": 20688,
+          "mode": "100644"
+        }
+      },
+      "runtime/app/main.py": {
+        "previous_identity": {
+          "sha256": "da387c03f202050604c73d3b2a7c58f12f0057ac37f190b41544c7e8b956c276",
+          "size": 878032,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "65f00bc6a36550e5ec6c038980d0e5adccecae98280d3d18637349df5c6e2135",
+          "size": 887128,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/integration/test_llm_connections_api.py": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "f40db328a3be03ba926b52f23042f1b149b3ee4b6017fae180a5a33d021e4642",
+          "size": 10329,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/unit/test_llm_connections.py": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "1c923b2dc11d4917fa9d30106abd4ffdfb5cffb244c4c9a8723860b88d7f648e",
+          "size": 16934,
+          "mode": "100644"
+        }
+      },
+      "runtime/web/static/app.js": {
+        "previous_identity": {
+          "sha256": "3a97e1ef24d0472df09f31547d43bad4010fdc568977222bb01a322b9b9eefa9",
+          "size": 54173,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "2148ce595404e66fcf257f25ef687dffc5b75f946b1b4c0d4caa414e4a34257f",
+          "size": 53281,
+          "mode": "100644"
+        }
+      },
+      "runtime/web/static/llm_connections.css": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "262f01c669620244445d659568665802e5f7b82c680dde6fe31f5007b4c056f8",
+          "size": 3370,
+          "mode": "100644"
+        }
+      },
+      "runtime/web/static/llm_connections.js": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "71f44ef5370c356dac4cb0b049b3b869021c54ce403c31d9f65bc2198a516d98",
+          "size": 19355,
+          "mode": "100644"
+        }
+      },
+      "runtime/web/templates/index.html": {
+        "previous_identity": {
+          "sha256": "f74c0c7e851eb0a2afb82b4f5bf8458656e11ffbd35d219acfcd0e5c774e06a0",
+          "size": 14032,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "9338fbf45de798d2d862d97ddd6abe7c99474b613f4c14bc7d6326a168670726",
+          "size": 9807,
+          "mode": "100644"
+        }
+      },
+      "runtime/web/templates/llm_connections.html": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "caab72432ef03bdfa6394619ccc05e52a21904d52ec4b83511c2ea54c6858272",
+          "size": 6467,
+          "mode": "100644"
+        }
+      },
+      "runtime/web/templates/partials/api_key_dialog.html": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "12274918a90972f0b4236dc34ea515a6996b9623f107457b0761642d33e7e5b9",
+          "size": 1101,
+          "mode": "100644"
+        }
+      },
+      "runtime/web/templates/partials/llm_control.html": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "ff43e242a7abae16e79187c9cfa539d789c99ac27ae526ac30d8fa50dcbb947b",
+          "size": 2068,
+          "mode": "100644"
+        }
+      },
+      "system/maintenance/plans/2026-10-25-llm-connections.md": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "bd08df2ee84aea1e085ada7b2bf249be96006375a16d0656ab0af6945e43980c",
+          "size": 5345,
+          "mode": "100644"
+        }
+      },
+      "docs/tutorials/user_manual.en.md": {
+        "previous_identity": {
+          "sha256": "cc141b6d70557967c215b0c9710036f9872d4c19b6ec282df39bd3acbd1c1b85",
+          "size": 14530,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "11e92d07d868b208e2ab2c33d6f24556332f02e16a906e76b11c4d6aee3901fe",
+          "size": 16239,
+          "mode": "100644"
+        }
+      },
+      "docs/tutorials/user_manual.ko.md": {
+        "previous_identity": {
+          "sha256": "a15cbf54952267073524427c9c557d8f0b4df951334bcf91201e5c41f2317aa8",
+          "size": 15498,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "0e534c9cbf0f538056840c0a682e8a008e1d25905d71a5c3c105b6ba06d1114d",
+          "size": 18034,
+          "mode": "100644"
+        }
+      },
+      "runtime/backends/vllm_client.py": {
+        "previous_identity": {
+          "sha256": "91bff7a1e0b273ee92548d7653ace455b5af91ea31dfd7ce5d776ed43774f29f",
+          "size": 7502,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "64e3cd2a133acd01c9aa8ba06d38d03942ab8b34664fb5e4c00f56a3d9e4a881",
+          "size": 10817,
+          "mode": "100644"
+        }
+      },
+      "runtime/web/static/llm_model_cards.js": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "4d24cd2ecc8254eaf585a7ee224da333b6318849c3d19e5635afc544f26e458d",
+          "size": 3105,
+          "mode": "100644"
+        }
+      },
+      "system/maintenance/plans/2026-10-25-local-model-catalog.md": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "9c80a79b82adee80871fb68df641806907ffc8e9f5e8c09e853ef03777e7e135",
+          "size": 3523,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/unit/test_llm_connections_frontend.py": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "4b2dd992c268ceff0e392b95eae996a900c15404c83ee492676865681c2c78e1",
+          "size": 18777,
+          "mode": "100644"
+        }
+      },
+      "runtime/backends/endpoint_routes.py": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "a0cfe7048295b3c30f7ce36487f2081c6ab9ff24dd65e25ab1393f14655b97fa",
+          "size": 3355,
+          "mode": "100644"
+        }
+      },
+      "runtime/backends/model_router.py": {
+        "previous_identity": {
+          "sha256": "8ec2017bcfe0029502d3eed9a3b3b05296254aad42caff4a83d8ce0d310e825b",
+          "size": 1457,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "161dfaf01c0fbdd9f718825bcaeda9cdfad3c9bafd01071308bc1c5862b251a4",
+          "size": 1660,
+          "mode": "100644"
+        }
+      },
+      "runtime/backends/openai_client.py": {
+        "previous_identity": {
+          "sha256": "b8fa22bdbf3b37e28095ae5b20214d70ea6d1be068dabfa8090a66905c3bc83c",
+          "size": 5548,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "79d15140fec0a83c0e869d2ccecfdbb53544cfb04f0a8371c9f17bf8fa763ddf",
+          "size": 6342,
+          "mode": "100644"
+        }
+      },
+      "runtime/configs/models.yaml": {
+        "previous_identity": {
+          "sha256": "0f8b5fab7f76f07be3dca492275c48a171e83e423aa124e35e64be4300d9adf4",
+          "size": 1912,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "a81b55f6a2bd34d76489ea48511abf87e5bf21562a0fe2946053f75944a145a3",
+          "size": 1643,
+          "mode": "100644"
+        }
+      },
+      "runtime/configs/system.yaml": {
+        "previous_identity": {
+          "sha256": "40fdd6d617aff5a82c6002a32cbc0a4b7da93262685ad61532522e9a6d6476a8",
+          "size": 3186,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "fdfedd7163b75817a010019241b510c8a576175777d50cb16a26f892b5f00aa2",
+          "size": 3094,
+          "mode": "100644"
+        }
+      },
+      "runtime/deploy/nemoclaw-vllm.yaml": {
+        "previous_identity": {
+          "sha256": "44832ed94f164a5c3327a4a1bfbfe4fae9dc000132324c58267ced024229da4e",
+          "size": 5796,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "c3992a34964f8720bb2e819c56513e82cbc349cb62216e3ce807eebf38501a26",
+          "size": 3259,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/conftest.py": {
+        "previous_identity": {
+          "sha256": "ca68d1369cea2341e7628d997696850b3eb82fadf84c951f495f41a6cc20ff4d",
+          "size": 5710,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "06ac2c35105a380d4aacaa59a77de968f30263e19f33f816bac1db5ff3c26dd4",
+          "size": 5708,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/unit/test_ax4lab_backend_selection.py": {
+        "previous_identity": {
+          "sha256": "392449a7b9faa158eb13e34f9892ce6e42ae77cf396dee2faff3490833d905b0",
+          "size": 3392,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "8384f19825645005ab75774429c46f35b8e6f34bbe0b35c6a0e749bb874436b8",
+          "size": 5642,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/unit/test_endpoint_connections.py": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "ae96a934ff0f4c0b24b5855831145673808761fbc5eb9d26fa441e68ec053c2a",
+          "size": 7727,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/unit/test_endpoint_routing.py": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "7ac5a0f79989e7ce009436a28e25ae346ff388cf2d119af6ebbba2778a9132e5",
+          "size": 3877,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/unit/test_langgraph_runtime.py": {
+        "previous_identity": {
+          "sha256": "c8999f77bf72335462fd25d28d7374f13f0b701a7195ea28025d0cb91c1d0c7b",
+          "size": 195984,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "9d3e86a6ffc0b455ad229e6ab90ea4ef56d5d3accadabb40fe2a86c8c6152918",
+          "size": 195999,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/unit/test_model_router.py": {
+        "previous_identity": {
+          "sha256": "f3b9fdaf9b51db2600ef0dcba5c3aa78b2d9d0da0313f851e0938f5bee73b228",
+          "size": 9043,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "dd36615acee4d5804c913f2944c4cb1386a025da285f7bc3d94f88b6443fa998",
+          "size": 9540,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/unit/test_runtime_profile_capabilities.py": {
+        "previous_identity": {
+          "sha256": "080035cc1a9fe1405d8c1cac19ff6ce880fbbe66e493adb353b9d728e32550ee",
+          "size": 708,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "1f03b65fd554a0f6d4fd9127bb5730784bbd248b4557e8a131a494d493c45ce7",
+          "size": 1182,
+          "mode": "100644"
+        }
+      },
+      "runtime/utils/launcher_settings.py": {
+        "previous_identity": {
+          "sha256": "b83e9be14d37ec5b0582f1b8124bd7e79963f50fbbf7147a74caa039ce754319",
+          "size": 4892,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "7d44ec2e082ab4faf38260e9706562cd051181667da7462258fac7d4dacaae1e",
+          "size": 5085,
+          "mode": "100644"
+        }
+      },
+      "runtime/web/static/module_management.js": {
+        "previous_identity": {
+          "sha256": "d6d4f7d6ad32fd2e2cf53711e4a680239f827ca7ca221cd963b9a573ddd0a9cd",
+          "size": 85314,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "7c73444b18bd5035ae585b2899f9a106c7db2b20daa57b78480934e141ff8332",
+          "size": 85482,
+          "mode": "100644"
+        }
+      },
+      "runtime/web/static/runtime_ide.js": {
+        "previous_identity": {
+          "sha256": "628a89d36e056132e97fd0a640cad5558f6e448878e89c5dfc2b65f7655f8661",
+          "size": 444099,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "fde7229fb235eb1158183dac247bcd6623446b1d8fc276be6f3fcfc2c74e99cf",
+          "size": 444305,
+          "mode": "100644"
+        }
+      },
+      "runtime/web/templates/module_management.html": {
+        "previous_identity": {
+          "sha256": "26be253f95e194729ede5912364c9b978eee7b13553c78bbdd18dd3a5ba7fcfb",
+          "size": 10283,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "7821afeda2078220c2d917d0fe9ebba4be4390cbc6b4eba305fd606e96c97636",
+          "size": 10294,
+          "mode": "100644"
+        }
+      },
+      "runtime/web/templates/runtime_ide.html": {
+        "previous_identity": {
+          "sha256": "fcf1ff1e42a5adf5f600908e6c3e6f79247c61850919d36db38a3e80e56d20a9",
+          "size": 25254,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "ac7a8b9a83f4b1fd4dd28db80a55b881032293439d309e08031ca2382c25d70e",
+          "size": 25199,
+          "mode": "100644"
+        }
+      },
+      "system/maintenance/plans/2026-10-25-endpoint-routing.md": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "e0743e1be5bdad70ed75d706c59064c6f8054ac288aab303271a992861d2a1e6",
+          "size": 6720,
           "mode": "100644"
         }
       }

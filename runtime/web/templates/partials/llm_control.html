@@ -1,0 +1,40 @@
+        <div class="hero-stack">
+          <article class="status-card">
+            <div class="status-head">
+              <span class="status-title">Runtime Backend</span>
+              <span id="backend-status-dot" class="status-dot idle"></span>
+            </div>
+            <strong id="backend-status-label">vLLM</strong>
+            <p id="backend-status-detail" hidden></p>
+          </article>
+          <article class="status-card">
+            <div class="status-head">
+              <span class="status-title">Agent Work</span>
+              <span id="nemoclaw-status-dot" class="status-dot idle"></span>
+            </div>
+            <strong id="nemoclaw-status-label">Ready</strong>
+            <p id="nemoclaw-status-detail" hidden></p>
+          </article>
+          <article class="status-card stack-wide">
+            <div class="status-head">
+              <span class="status-title">Current Models</span>
+              <span id="registered-model-count" class="status-caption"></span>
+            </div>
+            <div class="model-grid">
+              <div id="registered-model-cards" style="display: contents"></div>
+              <div class="model-chip api-key-chip" id="api-key-chip">
+                <span class="chip-dot"></span>
+                <div class="model-copy api-key-copy">
+                  <button id="api-key-open-btn" class="btn mini api-key-open-btn" type="button">API Key</button>
+                  <strong id="api-key-status-text">not configured</strong>
+                  <small id="api-key-detail">OpenAI API key is stored locally.</small>
+                </div>
+                <div class="model-actions">
+                  <span id="api-key-dot" class="model-load-dot unloaded"></span>
+                  <button id="api-key-load-btn" class="btn mini api-key-load-btn" type="button">Loading</button>
+                  <button id="api-key-unload-btn" class="btn mini api-key-unload-btn" type="button">Unloading</button>
+                </div>
+              </div>
+            </div>
+          </article>
+        </div>

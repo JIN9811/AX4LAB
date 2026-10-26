@@ -27,8 +27,7 @@ system:
   vllm_startup_task_types:
     - orchestrator_plan
   vllm_background_startup_models:
-    - gemma4:e4b-it-nvfp4
-    - gemma4:31b
+    - endpoint:local-main
   prewarm_vllm_on_server_start: false
   force_real_llm_in_test: true
   allow_mock_fallback: false
@@ -65,13 +64,31 @@ openai:
   # and xhigh for reasoning models that support them.
   reasoning_effort: ""
 
+llm_connections:
+  endpoints:
+    local-main:
+      id: local-main
+      label: Local inference
+      provider: vllm
+      base_url: http://127.0.0.1:8001/v1
+      model: gemma4:31b
+      management_id: local-main
+      capabilities: {text: true, vision: true}
+      access_token: null
+    api-main:
+      id: api-main
+      label: OpenAI API
+      provider: openai
+      base_url: https://api.openai.com/v1
+      model: gpt-5.5
+      management_id: ""
+      capabilities: {text: true, vision: true}
+      access_token: null
+
 vllm:
   base_url: http://127.0.0.1:8001/v1
   api_key: EMPTY
   timeout_seconds: 300
-  model_base_urls:
-    gemma4:31b: http://127.0.0.1:8001/v1
-    gemma4:e4b-it-nvfp4: http://127.0.0.1:8002/v1
   nemoclaw_k8s:
     enabled: true
     cluster_container: openshell-cluster-nemoclaw
@@ -80,7 +97,7 @@ vllm:
     startup_timeout_seconds: 1200
     readiness_cache_seconds: 120
     models:
-      gemma4:31b:
+      local-main:
         deployment: vllm-gemma4-31b
         node_port: 31001
         persistent: true
@@ -89,18 +106,6 @@ vllm:
         speculative_method: mtp
         assistant_repo: google/gemma-4-31B-it-assistant
         num_speculative_tokens: 4
-        nvfp4_gemm_backend: marlin
-      gemma4:e4b-it-nvfp4:
-        deployment: vllm-gemma4-e4b
-        node_port: 31002
-        persistent: true
-        hf_repo: bg-digitalservices/Gemma-4-E4B-it-NVFP4
-        quantization: modelopt_fp4
-        # e4b + NVFP4 + MTP repeatedly triggered CUDA device-side asserts in vLLM.
-        # Keep e4b on stable target-only serving; 31B still uses MTP.
-        speculative_method: disabled
-        assistant_repo: ""
-        num_speculative_tokens: 0
         nvfp4_gemm_backend: marlin
 
 server:

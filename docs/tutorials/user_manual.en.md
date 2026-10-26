@@ -42,6 +42,34 @@ Values shown are not universal settings.
 
 ## Exercise 1 — Find the right workspace
 
+### Before using model-backed controls
+
+Open **Connection Settings ↗** on Main. Choose **Local LLM Connection** or **API
+Connection**, then **Add Endpoint**. Enter a unique endpoint ID, display name,
+reachable API base URL and the served model ID manually; add a token if required
+and mark vision capability where supported. **Save Endpoint** stores the registration.
+The same served model ID may appear on different endpoints with separate addresses.
+
+For a local endpoint, choose a **Server management target** only when AX4LAB should
+control that configured server. **Current Mode** retains its **Loading / Unloading**
+buttons. Without a target, the card shows **Registered** and you start/stop the
+external service on its own host. Registration does not load or download a model.
+
+Assign the orchestrator and worker roles to endpoint IDs, replace or clear obsolete
+fallback endpoint assignments, then **Save & Apply** and test each role.
+**Edit** retains the endpoint ID; **Remove** requires replacement role assignments
+and never deletes weights or stops a server. Use `ax4lab backend vllm`; disable API
+routing with **API Key → Unloading** if you intend to use these local endpoints instead.
+For the API route, enable **API Key → Loading** and save any global key only for
+the address shown in its dialog; endpoint-specific tokens can be entered in Add/Edit.
+
+The model service may run on another PC; its weights do not need to be copied
+to AX4LAB. Use an address reachable from the AX4LAB server. See
+[remote endpoint setup](../gui/gui.md#connect-a-model-server-on-another-machine)
+for supported endpoints and troubleshooting. These actions do not start an experiment.
+
+### Workspace navigation
+
 **Goal:** distinguish configuration from the run that consumes it.
 
 1. Open Main and scroll to **Device Workspaces**.
@@ -155,6 +183,13 @@ Do not run a standalone rollout concurrently with a loop-owned manipulation.
 **Goal:** verify the actual target desktop and equipment sequence before admission.
 
 1. Open **Windows Automation** and inspect the selected bridge/worker connection.
+   For another UTM, enter a **Profile name**, then click **New Profile** or press Enter. The panels below
+   switch to that instrument's own setup. Pair its Worker and click **Apply**
+   in **Profile & Worker** before the next run. Selection alone only changes the
+   workspace view; it does not switch an active experiment or start equipment.
+   **Delete Profile** asks for confirmation before removing a custom profile from
+   the list. Built-in and applied profiles are protected; saved settings and past
+   experiment evidence are retained. Deletion is unavailable while a run or Equipment job is active.
 2. Check that the received desktop is the intended UTM application, not a login,
    update or unrelated window. Coordinate with the equipment operator.
 3. Inspect the selected Skills and their evidence without executing them just to

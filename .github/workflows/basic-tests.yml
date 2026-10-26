@@ -22,7 +22,7 @@ jobs:
 
       - name: Install package
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip uv
           python -m pip install -e "./runtime[dev]"
 
       - name: Syntax check
@@ -44,9 +44,14 @@ jobs:
           pytest \
             runtime/tests/unit/test_experiment_runtime.py \
             runtime/tests/unit/test_model_router.py \
+            runtime/tests/unit/test_llm_connections.py \
+            runtime/tests/unit/test_backend_model_config.py \
+            runtime/tests/unit/test_vllm_startup_performance.py \
+            runtime/tests/unit/test_module_multimodal.py \
             runtime/tests/unit/test_printer_tools.py \
             runtime/tests/unit/test_printer_profile.py \
             runtime/tests/unit/test_guardian_agent.py \
+            runtime/tests/unit/test_plc_installation.py \
             runtime/tests/unit/test_distribution_layout.py
 
   windows-bridge:

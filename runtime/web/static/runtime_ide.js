@@ -2541,7 +2541,8 @@ function updateModuleSummary(module) {
         <div class="runtime-module-card-title"><strong>LLM Runtime</strong><small>backend/model override</small></div>
         <label class="runtime-handler-select-label">Backend
           <select id="ide-module-llm-backend" class="text-input">
-            ${["", "vllm", "ollama", "nemoclaw", "mock"].map((item) => `<option value="${item}"${item === (llm.backend || "") ? " selected" : ""}>${item || "inherit"}</option>`).join("")}
+            ${["", "openai", "vllm"].map((item) => `<option value="${item}"${item === (llm.backend || "") ? " selected" : ""}>${item || "inherit"}</option>`).join("")}
+            ${llm.backend && !["openai", "vllm"].includes(llm.backend) ? `<option value="${escapeHtml(llm.backend)}" selected disabled>Unsupported saved backend: ${escapeHtml(llm.backend)}</option>` : ""}
           </select>
         </label>
         <label class="runtime-handler-select-label">Model
@@ -6578,7 +6579,7 @@ async function createModuleFromDesigner() {
   const notes = designerNotesInput?.value?.trim() || "";
   const sourceText = await file.text();
   designerCreateBtn.disabled = true;
-  setDesignerStatus("Gemma 31B is transforming the Python file into an ATR protocol adapter...", "busy");
+  setDesignerStatus("The configured module-designer endpoint is transforming the Python file into an ATR protocol adapter...", "busy");
   try {
     const result = await requestJson("/api/modules", {
       method: "POST",
@@ -6592,7 +6593,6 @@ async function createModuleFromDesigner() {
         source_text: sourceText,
         notes,
         transform_with_llm: true,
-        transform_model: "gemma4:31b",
       }),
     });
     if (!result.ok) {
@@ -6609,7 +6609,7 @@ async function createModuleFromDesigner() {
     renderModuleGraph(result.module);
     await openModuleGraphTab(result.module_id);
     const warningText = Array.isArray(result.warnings) && result.warnings.length ? ` · warnings: ${result.warnings.join("; ")}` : "";
-    setDesignerStatus(`Added ${result.module_id} (${result.transform?.category || "custom"}) using Gemma 31B.${warningText}`, result.warnings?.length ? "warn" : "ok");
+    setDesignerStatus(`Added ${result.module_id} (${result.transform?.category || "custom"}) using the configured module-designer endpoint.${warningText}`, result.warnings?.length ? "warn" : "ok");
     log(`Module Designer added ${result.module_id}; transformed source: ${result.transform?.transformed_source_path || "handler.py"}`, "ok");
   } catch (err) {
     setDesignerStatus(String(err), "error");

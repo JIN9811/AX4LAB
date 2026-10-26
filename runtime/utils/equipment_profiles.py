@@ -3,12 +3,106 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from dataclasses import field
+from contextlib import contextmanager
+from contextvars import ContextVar
+import fcntl
+import json
+import os
+from pathlib import Path
+import tempfile
 from typing import Any
+import uuid
 
 
 DEFAULT_UTM_PROFILE_ID = "utm_windows_v1"
+_PROFILE_SCOPE: ContextVar[str] = ContextVar("equipment_profile", default="")
+
+
+@contextmanager
+def equipment_profile_scope(profile_id: str):
+    """Pin a request/execution without changing another tab or active run."""
+    token = _PROFILE_SCOPE.set(profile_id)
+    try:
+        yield
+    finally:
+        _PROFILE_SCOPE.reset(token)
+
+
+def scoped_equipment_profile_id() -> str:
+    return _PROFILE_SCOPE.get()
+
+
+class EquipmentProfileStore:
+    """Private catalogue; physical settings stay in separate per-device files."""
+
+    def __init__(self, memory_root: Path | None = None):
+        if memory_root is None:
+            from utils.runtime_paths import current_paths
+            memory_root = current_paths().memory_root
+        self.root = Path(memory_root)
+        self.path = self.root / "equipment_profile_catalog.json"
+
+    def read(self) -> dict[str, Any]:
+        if not self.path.exists():
+            return {"profiles": [], "selected_profile_id": DEFAULT_UTM_PROFILE_ID}
+        data = json.loads(self.path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or not isinstance(data.get("profiles"), list):
+            raise ValueError("Invalid equipment profile catalogue")
+        return data
+
+    def selected_id(self) -> str:
+        return str(self.read().get("selected_profile_id") or DEFAULT_UTM_PROFILE_ID)
+
+    @contextmanager
+    def _edit(self):
+        self.root.mkdir(parents=True, exist_ok=True)
+        with (self.root / ".equipment_profiles.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            data = self.read()
+            yield data
+            fd, name = tempfile.mkstemp(prefix=".equipment_profiles-", dir=self.root)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    json.dump(data, stream, ensure_ascii=False, indent=2)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(name, self.path)
+            finally:
+                if os.path.exists(name):
+                    os.unlink(name)
+
+    def create(self, label: str) -> "EquipmentProfile":
+        clean = str(label).strip()
+        if not clean or len(clean) > 80 or any(ord(c) < 32 for c in clean):
+            raise ValueError("Profile name must contain 1–80 printable characters")
+        with self._edit() as data:
+            names = {"utm", "windows desktop macro", *(str(p["label"]).casefold() for p in data["profiles"])}
+            if clean.casefold() in names:
+                raise ValueError("A profile with this name already exists")
+            profile_id = "utm_" + uuid.uuid4().hex[:16]
+            data["profiles"].append({"profile_id": profile_id, "label": clean})
+        return EquipmentProfileRegistry.default(memory_root=self.root).get(profile_id)
+
+    def apply(self, profile_id: str) -> None:
+        with self._edit() as data:
+            EquipmentProfileRegistry.default(memory_root=self.root).get(profile_id)
+            data["selected_profile_id"] = profile_id
+            data["selection_applied"] = True
+
+    def delete(self, profile_id: str) -> None:
+        """Retire a custom profile without erasing its settings or experiment evidence."""
+        with self._edit() as data:
+            if profile_id in {DEFAULT_UTM_PROFILE_ID, "windows_desktop_v1"}:
+                raise ValueError("Built-in equipment profiles cannot be deleted")
+            if profile_id == data.get("selected_profile_id", DEFAULT_UTM_PROFILE_ID):
+                raise ValueError("Apply another profile before deleting the applied profile")
+            profile = next((item for item in data["profiles"] if item["profile_id"] == profile_id), None)
+            if profile is None:
+                raise ValueError(f"Unknown equipment profile: {profile_id}")
+            data["profiles"].remove(profile)
+            data.setdefault("deleted_profiles", []).append(profile)
 
 
 @dataclass(frozen=True)
@@ -78,13 +172,14 @@ class EquipmentExecutionContract:
 class EquipmentProfileRegistry:
     """Immutable registry with an explicit extension boundary for equipment types."""
 
-    def __init__(self, profiles: tuple[EquipmentProfile, ...]) -> None:
+    def __init__(self, profiles: tuple[EquipmentProfile, ...], selected_id: str = DEFAULT_UTM_PROFILE_ID) -> None:
         self._profiles = profiles
         self._by_id = {profile.profile_id: profile for profile in profiles}
+        self.selected_id = selected_id
 
     @classmethod
-    def default(cls) -> "EquipmentProfileRegistry":
-        return cls(
+    def default(cls, *, memory_root: Path | None = None) -> "EquipmentProfileRegistry":
+        registry = cls(
             (
                 EquipmentProfile(
                     profile_id=DEFAULT_UTM_PROFILE_ID,
@@ -128,6 +223,15 @@ class EquipmentProfileRegistry:
                 ),
             )
         )
+        stored = EquipmentProfileStore(memory_root).read()
+        template = registry.get(DEFAULT_UTM_PROFILE_ID)
+        custom = []
+        for item in stored["profiles"]:
+            profile_id = str(item.get("profile_id") or "")
+            if not profile_id.startswith("utm_") or not profile_id[4:].isalnum() or profile_id in registry._by_id:
+                raise ValueError("Invalid custom equipment profile identity")
+            custom.append(replace(template, profile_id=profile_id, label=str(item["label"])))
+        return cls((*registry.list(), *custom), str(stored.get("selected_profile_id") or DEFAULT_UTM_PROFILE_ID))
 
     def list(self) -> tuple[EquipmentProfile, ...]:
         return self._profiles
@@ -143,9 +247,11 @@ class EquipmentProfileRegistry:
         clean_profile = str(profile_id or "").strip()
         if clean_profile:
             return self.get(clean_profile)
+        if self.selected_id != DEFAULT_UTM_PROFILE_ID:
+            return self.get(self.selected_id)
         clean_program = str(program_id or "").strip()
         if clean_program:
-            matches = [profile for profile in self._profiles if clean_program in profile.allowed_program_ids]
+            matches = [profile for profile in self._profiles if profile.profile_id in {DEFAULT_UTM_PROFILE_ID, "windows_desktop_v1"} and clean_program in profile.allowed_program_ids]
             if len(matches) == 1:
                 return matches[0]
             if len(matches) > 1:

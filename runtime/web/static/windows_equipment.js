@@ -88,6 +88,11 @@ const completionAuditStatus = document.getElementById("equipment-completion-audi
 const completionAuditDetail = document.getElementById("equipment-completion-audit-detail");
 const requestAuditCard = document.getElementById("equipment-request-audit-card");
 const profileItems = document.getElementById("equipment-profile-items");
+const profileNameInput = document.getElementById("equipment-profile-name");
+const btnNewProfile = document.getElementById("btn-equipment-new-profile");
+const btnApplyProfile = document.getElementById("btn-equipment-apply-profile");
+const btnDeleteProfile = document.getElementById("btn-equipment-delete-profile");
+const profileApplyStatus = document.getElementById("equipment-profile-apply-status");
 const profileConnectionStatus = document.getElementById("equipment-profile-connection-status");
 const profileEvidenceStatus = document.getElementById("equipment-profile-evidence-status");
 const profileRuntimeStatus = document.getElementById("equipment-profile-runtime-status");
@@ -169,20 +174,25 @@ let latestRequestAudit = {};
 let latestProofVerification = {};
 let latestCompletionAudit = {};
 let latestVisionProofDraft = {};
-let selectedEquipmentProfileId = "utm_windows_v1";
+let selectedEquipmentProfileId = new URLSearchParams(window.location.search).get("profile_id")
+  || document.body.dataset.equipmentProfile || "utm_windows_v1";
+function profileJobKey(key) {
+  // Preserve legacy UTM job restoration; new devices cannot inherit its job IDs.
+  return selectedEquipmentProfileId === "utm_windows_v1" ? key : `${key}.${selectedEquipmentProfileId}`;
+}
 let equipmentRuntime = { execution: null, projection: null };
 let selectedBridgeId = "";
 let selectedRecordingId = "";
 let workerRecordings = [];
 let recordingListLoading = false;
 let selectedEquipmentSkill = null;
-let activeSkillAuthoringJobId = window.localStorage.getItem("atr.equipment.skillAuthoringJobId") || "";
+let activeSkillAuthoringJobId = window.localStorage.getItem(profileJobKey("atr.equipment.skillAuthoringJobId")) || "";
 let skillAuthoringPollTimer = null;
 let finalizedSkillAuthoringJobId = "";
-let skillStoryboardJobId = window.localStorage.getItem("atr.equipment.lastSkillAuthoringJobId") || "";
+let skillStoryboardJobId = window.localStorage.getItem(profileJobKey("atr.equipment.lastSkillAuthoringJobId")) || "";
 let skillStoryboardCursor = 0;
 let skillStoryboardNextCursor = null;
-let activeSkillDeploymentJobId = window.localStorage.getItem("atr.equipment.skillDeploymentJobId") || "";
+let activeSkillDeploymentJobId = window.localStorage.getItem(profileJobKey("atr.equipment.skillDeploymentJobId")) || "";
 let skillDeploymentPollTimer = null;
 let finalizedSkillDeploymentJobId = "";
 let equipmentSkillFlow = null;
@@ -366,7 +376,8 @@ function skillIdentity(manifest) {
 }
 
 function renderEquipmentSkills(payload) {
-  const skills = Array.isArray(payload && payload.skills) ? payload.skills : [];
+  const skills = (Array.isArray(payload && payload.skills) ? payload.skills : [])
+    .filter((skill) => skill.target_profile === selectedEquipmentProfileId);
   if (!skillList) return;
   skillList.innerHTML = "";
   if (!skills.length) {
@@ -480,7 +491,7 @@ function openSelectedSkillWorkflowEditor() {
   const skillId = String(selectedEquipmentSkill.skill_id || "");
   const version = String(selectedEquipmentSkill.version || "");
   const worker = String(skillWorkerIdInput && skillWorkerIdInput.value || selectedBridgeId || "").trim();
-  const url = `/equipment/skills/${encodeURIComponent(skillId)}/${encodeURIComponent(version)}/workflow-editor?worker=${encodeURIComponent(worker)}`;
+  const url = `/equipment/skills/${encodeURIComponent(skillId)}/${encodeURIComponent(version)}/workflow-editor?worker=${encodeURIComponent(worker)}&profile_id=${encodeURIComponent(selectedEquipmentProfileId)}`;
   window.open(url, `atr-skill-${skillId}-${version}`, "popup=yes,width=1440,height=920,resizable=yes,scrollbars=yes");
 }
 
@@ -500,8 +511,8 @@ async function importEquipmentRecording() {
     });
     activeSkillAuthoringJobId = String(data.job && data.job.job_id || "");
     if (!activeSkillAuthoringJobId) throw new Error("Skill authoring start did not return a job ID.");
-    window.localStorage.setItem("atr.equipment.skillAuthoringJobId", activeSkillAuthoringJobId);
-    window.localStorage.setItem("atr.equipment.lastSkillAuthoringJobId", activeSkillAuthoringJobId);
+    window.localStorage.setItem(profileJobKey("atr.equipment.skillAuthoringJobId"), activeSkillAuthoringJobId);
+    window.localStorage.setItem(profileJobKey("atr.equipment.lastSkillAuthoringJobId"), activeSkillAuthoringJobId);
     skillStoryboardJobId = activeSkillAuthoringJobId;
     skillStoryboardCursor = 0;
     if (skillStoryboardPreview) skillStoryboardPreview.hidden = true;
@@ -588,7 +599,7 @@ async function pollSkillAuthoringJob() {
     return job;
   }
   activeSkillAuthoringJobId = "";
-  window.localStorage.removeItem("atr.equipment.skillAuthoringJobId");
+  window.localStorage.removeItem(profileJobKey("atr.equipment.skillAuthoringJobId"));
   if (String(job.status || "").toUpperCase() === "COMPLETED" && finalizedSkillAuthoringJobId !== jobId) {
     finalizedSkillAuthoringJobId = jobId;
     if (recordingStatus) recordingStatus.textContent = `Annotated Skill ${job.skill_id}@${job.version} is ready to compile.`;
@@ -612,7 +623,7 @@ async function restoreSkillAuthoringJob() {
     return await pollSkillAuthoringJob();
   } catch (err) {
     activeSkillAuthoringJobId = "";
-    window.localStorage.removeItem("atr.equipment.skillAuthoringJobId");
+    window.localStorage.removeItem(profileJobKey("atr.equipment.skillAuthoringJobId"));
     renderSkillAuthoringJob({ status: "FAILED", stage: "RESTORE", progress: 0, status_text: err.message });
     return null;
   }
@@ -676,7 +687,7 @@ async function pollSkillDeploymentJob() {
     return job;
   }
   activeSkillDeploymentJobId = "";
-  window.localStorage.removeItem("atr.equipment.skillDeploymentJobId");
+  window.localStorage.removeItem(profileJobKey("atr.equipment.skillDeploymentJobId"));
   if (String(job.status || "").toUpperCase() === "COMPLETED" && finalizedSkillDeploymentJobId !== jobId) {
     finalizedSkillDeploymentJobId = jobId;
     writeLog(job.result || data);
@@ -691,7 +702,7 @@ async function restoreSkillDeploymentJob() {
     return await pollSkillDeploymentJob();
   } catch (err) {
     activeSkillDeploymentJobId = "";
-    window.localStorage.removeItem("atr.equipment.skillDeploymentJobId");
+    window.localStorage.removeItem(profileJobKey("atr.equipment.skillDeploymentJobId"));
     renderSkillDeploymentJob({ status: "FAILED", stage: "RESTORE", progress: 0, status_text: err.message });
     return null;
   }
@@ -709,7 +720,7 @@ async function startSkillDeployment() {
     });
     activeSkillDeploymentJobId = String(data.job && data.job.job_id || "");
     if (!activeSkillDeploymentJobId) throw new Error("Skill deployment start did not return a job ID.");
-    window.localStorage.setItem("atr.equipment.skillDeploymentJobId", activeSkillDeploymentJobId);
+    window.localStorage.setItem(profileJobKey("atr.equipment.skillDeploymentJobId"), activeSkillDeploymentJobId);
     renderSkillDeploymentJob(data.job);
     scheduleSkillDeploymentPoll();
   } catch (err) {
@@ -736,17 +747,82 @@ async function stopSkillDeployment() {
 function renderEquipmentProfiles(payload) {
   const profiles = Array.isArray(payload && payload.profiles) ? payload.profiles : [];
   if (!profiles.some((profile) => profile.profile_id === selectedEquipmentProfileId)) {
-    selectedEquipmentProfileId = String((payload && payload.selected_profile_id) || "utm_windows_v1");
+    throw new Error("Selected equipment profile is unavailable. Select a registered profile.");
   }
   if (!profileItems) return;
   profileItems.innerHTML = profiles.map((profile) => {
     const selected = profile.profile_id === selectedEquipmentProfileId ? " selected" : "";
-    return `<option value="${profile.profile_id}"${selected}>${profile.label}</option>`;
+    return `<option value="${escapeHtml(profile.profile_id)}"${selected}>${escapeHtml(profile.label)}</option>`;
   }).join("") || '<option value="utm_windows_v1" selected>UTM</option>';
   profileItems.onchange = () => {
-    selectedEquipmentProfileId = profileItems.value || "utm_windows_v1";
-    Promise.all([loadEquipmentProfileState(), loadEquipmentSkillFlow(), refreshAgenticRunCapability()]).catch((err) => writeLog({ ok: false, error: err.message }));
+    openEquipmentProfile(profileItems.value);
   };
+  if (profileApplyStatus) profileApplyStatus.textContent = payload.selected_profile_id === selectedEquipmentProfileId
+    ? "Applied profile" : "Not applied · this profile is open for setup";
+  if (btnDeleteProfile) {
+    const builtIn = ["utm_windows_v1", "windows_desktop_v1"].includes(selectedEquipmentProfileId);
+    const applied = payload.selected_profile_id === selectedEquipmentProfileId;
+    btnDeleteProfile.disabled = builtIn || applied;
+    btnDeleteProfile.title = builtIn ? "Built-in profiles cannot be deleted"
+      : applied ? "Apply another profile before deleting this one" : "Delete this profile from the list";
+  }
+}
+
+function openEquipmentProfile(profileId) {
+  const url = new URL(window.location.href);
+  url.searchParams.set("profile_id", profileId);
+  window.location.assign(url.href);
+}
+
+async function createEquipmentProfile() {
+  if (btnNewProfile && btnNewProfile.disabled) return;
+  const label = profileNameInput ? profileNameInput.value.trim() : "";
+  if (!label) {
+    if (profileApplyStatus) profileApplyStatus.textContent = "Enter a profile name.";
+    if (profileNameInput) profileNameInput.focus();
+    return;
+  }
+  setBusy(btnNewProfile, true);
+  if (profileApplyStatus) profileApplyStatus.textContent = "Creating profile…";
+  try {
+    const result = await apiJson("/api/equipment/profiles", {method: "POST", body: JSON.stringify({label})});
+    openEquipmentProfile(result.profile.profile_id);
+  } catch (err) {
+    if (profileApplyStatus) profileApplyStatus.textContent = err.message;
+    setBusy(btnNewProfile, false);
+  }
+}
+
+async function applyEquipmentProfile() {
+  setBusy(btnApplyProfile, true);
+  try {
+    const result = await apiJson(`/api/equipment/profiles/${encodeURIComponent(selectedEquipmentProfileId)}/apply`, {
+      method: "POST", body: JSON.stringify({worker_id: selectedBridgeId}),
+    });
+    await refreshConfig({logResult: false});
+    if (profileApplyStatus) profileApplyStatus.textContent = `Applied · ${result.worker_id} · used by the next execution`;
+  } catch (err) {
+    if (profileApplyStatus) profileApplyStatus.textContent = err.message;
+  } finally {
+    setBusy(btnApplyProfile, false);
+  }
+}
+
+async function deleteEquipmentProfile() {
+  if (!btnDeleteProfile || btnDeleteProfile.disabled) return;
+  const label = profileItems?.selectedOptions[0]?.textContent || selectedEquipmentProfileId;
+  if (!window.confirm(`Delete profile "${label}"?\n\nIt will be removed from the profile list. Saved settings and past experiment data will be preserved.`)) return;
+  setBusy(btnDeleteProfile, true);
+  if (profileApplyStatus) profileApplyStatus.textContent = "Deleting profile…";
+  try {
+    const result = await apiJson(`/api/equipment/profiles/${encodeURIComponent(selectedEquipmentProfileId)}`, {
+      method: "DELETE", body: JSON.stringify({confirmed: true}),
+    });
+    openEquipmentProfile(result.selected_profile_id);
+  } catch (err) {
+    if (profileApplyStatus) profileApplyStatus.textContent = err.message;
+    setBusy(btnDeleteProfile, false);
+  }
 }
 
 async function loadEquipmentProfileState() {
@@ -1032,7 +1108,7 @@ function setBusy(button, busy) {
 }
 
 function rememberButtonLabels() {
-  [btnScan, btnRefresh, btnTest, btnProgram1, btnUtm, btnAbort, btnScreenshot, btnListLocators, btnCaptureLocator, btnLoadUtmProfile, btnSaveUtmProfile, btnOpenBridgeGui, btnLocalStart, btnLocalStop, btnLocalHealth, btnLocalSelect, btnReadiness, btnLivePreflight, btnLiveValidation, btnVisionProofDraft, btnLivePhysicalValidation, btnEvidenceAudit, btnProofPackage, btnVerifyProofPackage, btnCompletionAudit, btnRequestLog, btnAgenticRun, btnAgenticStop].forEach((button) => {
+  [btnNewProfile, btnApplyProfile, btnDeleteProfile, btnScan, btnRefresh, btnTest, btnProgram1, btnUtm, btnAbort, btnScreenshot, btnListLocators, btnCaptureLocator, btnLoadUtmProfile, btnSaveUtmProfile, btnOpenBridgeGui, btnLocalStart, btnLocalStop, btnLocalHealth, btnLocalSelect, btnReadiness, btnLivePreflight, btnLiveValidation, btnVisionProofDraft, btnLivePhysicalValidation, btnEvidenceAudit, btnProofPackage, btnVerifyProofPackage, btnCompletionAudit, btnRequestLog, btnAgenticRun, btnAgenticStop].forEach((button) => {
     if (button && !button.dataset.originalText) {
       button.dataset.originalText = button.textContent;
     }
@@ -1243,7 +1319,7 @@ function setConnectionStatus(connection) {
     selectedRecordingId = "";
     renderWorkerRecordings([]);
   }
-  if (skillWorkerIdInput && selectedBridgeId) {
+  if (skillWorkerIdInput) {
     skillWorkerIdInput.value = selectedBridgeId;
   }
   if (connectionDot) {
@@ -1264,7 +1340,9 @@ function setConnectionStatus(connection) {
 }
 
 async function apiJson(url, options = {}) {
-  const response = await fetch(url, {
+  const scoped = new URL(url, window.location.origin);
+  scoped.searchParams.set("profile_id", selectedEquipmentProfileId);
+  const response = await fetch(scoped.pathname + scoped.search, {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
     ...options,
   });
@@ -1711,6 +1789,7 @@ function hydrateUtmProfile(data) {
   if (utmStableInput && profile.stable_for_sec) utmStableInput.value = profile.stable_for_sec;
   if (utmExpectedExportPathInput && profile.expected_export_path) utmExpectedExportPathInput.value = profile.expected_export_path;
   if (utmTargetWindowInput) {
+    utmTargetWindowInput.value = "";
     if (profile.target_window_regex) utmTargetWindowInput.value = `regex:${profile.target_window_regex}`;
     else if (profile.target_window) utmTargetWindowInput.value = profile.target_window;
   }
@@ -1726,8 +1805,8 @@ function hydrateUtmProfile(data) {
   if (utmSimulateInput && Object.prototype.hasOwnProperty.call(profile, "simulate_utm_protocol")) {
     utmSimulateInput.checked = Boolean(profile.simulate_utm_protocol);
   }
-  if (utmLocatorsInput && profile.locators && typeof profile.locators === "object") {
-    utmLocatorsInput.value = JSON.stringify(profile.locators, null, 2);
+  if (utmLocatorsInput) {
+    utmLocatorsInput.value = JSON.stringify(profile.locators || {}, null, 2);
   }
   if (utmProfileStatus) {
     const source = data && data.source ? data.source : "active";
@@ -1737,7 +1816,7 @@ function hydrateUtmProfile(data) {
 }
 
 function openSelectedBridgeGui() {
-  window.open("/equipment/windows/console", "_blank", "noopener,noreferrer");
+  window.open(`/equipment/windows/console?profile_id=${encodeURIComponent(selectedEquipmentProfileId)}`, "_blank", "noopener,noreferrer");
   setActionStatus("Windows GUI opened", "Opened locally; bridge connectivity is checked only when a console action is requested.", "ok");
 }
 
@@ -2146,6 +2225,15 @@ async function runUtmAbort() {
 }
 
 rememberButtonLabels();
+if (btnNewProfile) btnNewProfile.addEventListener("click", createEquipmentProfile);
+if (profileNameInput) profileNameInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.isComposing) {
+    event.preventDefault();
+    createEquipmentProfile();
+  }
+});
+if (btnApplyProfile) btnApplyProfile.addEventListener("click", applyEquipmentProfile);
+if (btnDeleteProfile) btnDeleteProfile.addEventListener("click", deleteEquipmentProfile);
 document.querySelectorAll("[data-equipment-proxy]").forEach((proxy) => {
   proxy.addEventListener("click", () => {
     const targetId = proxy.getAttribute("data-equipment-proxy");

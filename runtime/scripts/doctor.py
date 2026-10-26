@@ -29,7 +29,7 @@ from utils.runtime_paths import RuntimePaths, current_paths  # noqa: E402
 CORE_IMPORTS = [
     "fastapi", "uvicorn", "pydantic", "langgraph", "yaml", "httpx", "json_repair",
     "dotenv", "jinja2", "numpy", "matplotlib", "scipy", "pyarrow", "h5py", "PIL",
-    "skimage", "trimesh", "rtree", "gpytorch", "botorch", "paho",
+    "skimage", "trimesh", "rtree", "gpytorch", "botorch", "paho", "pymcprotocol",
 ]
 DISTRIBUTIONS = {"yaml": "PyYAML", "dotenv": "python-dotenv", "PIL": "Pillow",
                  "skimage": "scikit-image", "paho": "paho-mqtt", "json_repair": "json-repair"}
@@ -354,6 +354,10 @@ class Doctor:
             except (OSError, ValueError) as exc:
                 self.fail(check.__name__, f"{type(exc).__name__}: local inspection failed; error text suppressed")
         loaded = self.load_config()
+        self.add("warn", "LLM readiness",
+                 "Not verified by offline installation checks; model services and API authorization are separate.",
+                 "Enable the intended API route or load the configured local models, then verify an actual response before experiments.",
+                 status="unverified")
         if loaded:
             try:
                 self.check_endpoints()

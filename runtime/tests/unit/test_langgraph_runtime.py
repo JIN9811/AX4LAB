@@ -4048,7 +4048,7 @@ async def test_module_runtime_context_applies_llm_model_prompt_and_metadata() ->
             "metadata": {
                 "task_type": "module_reasoning",
                 "requested_task_type": "design_reasoning",
-                "role": "e4b",
+                "role": "worker",
                 "stage": "design",
                 "module_id": "design",
                 "module_config_applied": True,
@@ -4056,7 +4056,7 @@ async def test_module_runtime_context_applies_llm_model_prompt_and_metadata() ->
         }
     ]
     assert base_ctx.model_call_events == [
-        {"task_type": "module_reasoning", "model": "module-model", "role": "e4b", "backend": "vllm"}
+        {"task_type": "module_reasoning", "model": "module-model", "role": "worker", "backend": "vllm"}
     ]
     assert base_ctx.notifications == []
 
@@ -4100,11 +4100,11 @@ async def test_module_runtime_context_uses_backend_fallback_after_active_models_
     assert response.model == "gpt-5.5"
     assert [call["model"] for call in local_backend.calls] == ["local-primary", "local-fallback"]
     assert openai_backend.calls[-1]["model"] == "gpt-5.5"
-    assert openai_backend.calls[-1]["metadata"]["role"] == "e4b:backend_fallback"
+    assert openai_backend.calls[-1]["metadata"]["role"] == "worker:backend_fallback"
     assert base_ctx.model_call_events[-1] == {
         "task_type": "design_reasoning",
         "model": "gpt-5.5",
-        "role": "e4b:backend_fallback",
+        "role": "worker:backend_fallback",
         "backend": "openai",
     }
 
@@ -4253,7 +4253,7 @@ async def test_module_runtime_context_preserves_python_task_when_llm_role_empty(
     assert base_ctx.model_call_events[-1] == {
         "task_type": "analysis_reasoning",
         "model": "analysis-model",
-        "role": "e4b",
+        "role": "worker",
         "backend": "vllm",
     }
 

@@ -30,14 +30,14 @@ including the separate private-state approval and deployed ROS rebuild gates.
 
 AX4LAB supports two inference modes:
 
-- Local-first: use `vllm`, `ollama`, or `nemoclaw` first, then fall back to the
-  OpenAI API when `configs/models.yaml` sets `backend.fallback: openai`.
-- API-only: set `AX4LAB_BACKEND=openai` in `.env` to skip local AI entirely.
+- Local: select `vllm`, `ollama`, or `nemoclaw`, and unload the Main GUI API-key
+  control. The selected local service must be running and its models loaded.
+- API: load the saved key in the Main GUI. OpenAI becomes the first route, with
+  the selected local backend as fallback. Select `openai` for API-only use.
 
-`openai` is intentionally the lowest-priority static fallback unless the
-operator explicitly selects it as the active backend or enables the Main GUI
-`API Key` Loading control. When that API-key cell is loaded, OpenAI becomes the
-first inference route until it is unloaded again.
+The saved API-key enabled state takes precedence over the static fallback in
+`configs/models.yaml`. A registered but unloaded key stays disabled after restart;
+copying credentials does not activate inference.
 
 ## Recommended Fresh-Install Flow
 
@@ -107,15 +107,21 @@ uv export --frozen --project runtime --no-dev --no-emit-project --output-file ru
 ```
 
 The source launcher imports this checkout from `runtime/`; setup does not build
-or install an editable/wheel distribution. Core retains BoTorch/GPyTorch/Torch
-for existing Bayesian optimization. The locked PyPI Torch build can download
+or install an editable/wheel distribution. Core includes the Mitsubishi PLC
+client (`pymcprotocol`) in the server environment and BoTorch/GPyTorch/Torch
+for Bayesian optimization. No separate PLC Conda environment is required.
+`doctor --core-only` checks that the PLC package is present without importing it
+or contacting a PLC; this is not a hardware connection test.
+The locked PyPI Torch build can download
 several GB of CUDA dependencies even for CPU use; GPU compatibility is not implied.
 Python 3.11+ is declared by the project; actual platform acceptance must be recorded
 separately. Native/hardware compatibility is not established by lock resolution.
 
 `--with-piper` selects the `tts` extra only (no voice download or synthesis),
-`--with-local-pyautogui` selects `desktop`, `--with-realsense` selects `realsense`,
-and `--with-plc` selects `plc`. These extras are locked but not certified on every
+`--with-local-pyautogui` selects `desktop`, and `--with-realsense` selects `realsense`.
+`--with-plc` and the `plc` extra remain compatible with older setup commands,
+but PLC dependencies are now installed even without that flag.
+The optional extras are locked but not certified on every
 architecture. Each setup sync selects exactly the requested extras; repeat their
 flags on subsequent setup runs to retain them. `--with-system-packages` separately
 opts into apt network/system changes for X11 tools. Development and graph extras
@@ -521,6 +527,35 @@ ax4lab model load 31b
 ax4lab model unload e4b
 ax4lab model unload 31b
 ```
+
+### Verify inference before the first experiment
+
+`ax4lab doctor --core-only` checks packages and paths offline. It does **not**
+certify an API key, start a model server, or confirm an inference response.
+
+1. For API use, open **Current Models → API Key** and use **Loading**. A
+   `registered` key is only stored; its enabled state must also be on.
+2. For an existing OpenAI-compatible model server on this or another PC, open
+   **Connection Settings ↗ → Local LLM Connection**. Enter its base URL, use
+   **Read Models → Add Selected**, assign both roles and update any fallbacks.
+   Test each role, then **Save & Apply**. The model weights and serving software
+   stay on the model host; AX4LAB needs only network access and credentials.
+   Follow [remote endpoint setup](../../docs/gui/gui.md#connect-a-model-server-on-another-machine).
+3. If using the supplied managed deployment instead, inspect `ax4lab models`.
+   Its configured container must already be running. In this deployment it is
+   `openshell-cluster-nemoclaw`; if it is stopped, start that existing container
+   with `docker start openshell-cluster-nemoclaw`. A fresh machine must provision
+   the model service separately—Python installation does not create this cluster.
+   Load the configured models, then check `ax4lab models` again. Both role aliases
+   must agree with the served model names. This managed deployment is not required
+   for the remote-endpoint route above.
+4. Request a short greeting in Live GUI without approving an experiment. Confirm
+   an actual response, not just a green package check. To test the local path,
+   unload the API-key control first so API fallback cannot hide a local failure.
+
+Backend-specific model settings in `configs/models.yaml` take precedence over
+legacy global model variables. Use `AUTONOMOUS_VLLM_E4B_MODEL` for an explicit
+vLLM override, for example; do not reuse an Ollama alias for vLLM.
 
 Live GUI chat API:
 

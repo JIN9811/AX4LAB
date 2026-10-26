@@ -21,7 +21,7 @@ Usage: bash runtime/install/bootstrap_linux.sh [options]
   --with-piper           Install locked TTS Python dependencies only; no voice download/test.
   --with-local-pyautogui  Install locked desktop Python dependencies only.
   --with-realsense        Select the optional native RealSense Python wheel.
-  --with-plc              Select the optional PLC Python dependencies.
+  --with-plc              Compatibility flag; PLC dependencies are included by default.
   --with-system-packages  Opt in to sudo apt-get for X11 tools (network/system changes).
 Environment: PYTHON_BIN (default python3), UV_BIN (default uv).
 Requires uv already installed. Core includes BoTorch/Torch; downloads can be large.

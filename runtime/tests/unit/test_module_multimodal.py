@@ -38,12 +38,12 @@ def _context(primary, fallback, *, leased: bool, separate_backend: bool = True):
 @pytest.mark.parametrize(
     ("success_model", "expected_models", "separate_backend"),
     [
-        ("primary", ["primary"], True),
-        ("secondary", ["primary", "secondary"], True),
-        ("remote-primary", ["primary", "secondary", "remote-primary"], True),
+        ("primary", ["remote-primary", "remote-secondary", "primary"], True),
+        ("secondary", ["remote-primary", "remote-secondary", "primary", "secondary"], True),
+        ("remote-primary", ["remote-primary"], True),
         (
             "remote-secondary",
-            ["primary", "secondary", "remote-primary", "remote-secondary"],
+            ["remote-primary", "remote-secondary"],
             True,
         ),
         ("secondary", ["primary", "secondary", "secondary"], False),
@@ -106,6 +106,68 @@ async def test_module_images_reach_each_selected_model_and_fallback(
         ]
     if leased:
         assert base.llm_lease.status()["last_owner"] == "module:vision:vision_reasoning"
+
+
+@pytest.mark.parametrize("llm", [{"backend": "vllm"}, {"model": "module-owned-model"}])
+async def test_explicit_module_route_remains_authoritative(llm):
+    class Backend:
+        async def complete(self, *, model, **kwargs):
+            return LLMResponse(text="actual result", model=model)
+
+    _, base = _context(Backend(), Backend(), leased=False)
+    ctx = ModuleRuntimeContext(base, {"id": "vision", "llm": llm}, Stage.VISION)
+    response = await ctx.complete("vision_reasoning", "text only")
+    assert response.model == llm.get("model", "primary")
+
+
+@pytest.mark.parametrize("override", ["ollama", "nemoclaw", "missing-endpoint-backend"])
+def test_explicit_unregistered_module_backend_fails_before_active_backend_fallback(override):
+    class Backend:
+        async def complete(self, **kwargs):
+            pytest.fail("An unsupported module backend must not call the active provider")
+
+    provider = Backend()
+    _, base = _context(provider, provider, leased=False)
+    base.primary_backends = {"vllm": provider, "openai": provider}
+    with pytest.raises(ValueError, match="Unsupported module inference backend"):
+        ModuleRuntimeContext(base, {"id": "vision", "llm": {"backend": override}}, Stage.VISION)
+
+
+def test_standalone_context_does_not_treat_unknown_override_as_active_backend():
+    provider = MockLLMBackend()
+    _, base = _context(provider, provider, leased=False)
+    assert base.primary_backends == {}
+    with pytest.raises(ValueError, match="Unsupported module inference backend"):
+        ModuleRuntimeContext(base, {"id": "vision", "llm": {"backend": "unknown"}}, Stage.VISION)
+
+
+async def test_registered_module_backend_override_uses_that_provider():
+    class Backend:
+        def __init__(self, label):
+            self.label = label
+
+        async def complete(self, *, model, **kwargs):
+            return LLMResponse(text=self.label, model=model)
+
+    local, api = Backend("local"), Backend("api")
+    _, base = _context(local, api, leased=False)
+    base.primary_backends = {"vllm": local, "openai": api}
+    ctx = ModuleRuntimeContext(base, {"id": "vision", "llm": {"backend": "openai"}}, Stage.VISION)
+    response = await ctx.complete("vision_reasoning", "text only")
+    assert response.text == "api"
+    assert response.model == "remote-primary"
+
+
+async def test_empty_module_response_falls_back_instead_of_reporting_success():
+    class Backend:
+        async def complete(self, *, model, **kwargs):
+            return LLMResponse(text="  " if model == "primary" else "recovered", model=model)
+
+    backend = Backend()
+    ctx, _ = _context(backend, backend, leased=False, separate_backend=False)
+    response = await ctx.complete("vision_reasoning", "text only")
+    assert response.text == "recovered"
+    assert response.model == "secondary"
 
 
 @pytest.mark.parametrize("images", [None, []])

@@ -329,6 +329,7 @@ class WindowsPyAutoGUIBridgeConfig:
     registered_programs: dict[str, dict[str, Any]] = field(default_factory=lambda: dict(DEFAULT_REGISTERED_PROGRAMS))
     connection_memory_path: Path = DEFAULT_CONNECTION_MEMORY
     utm_profile_memory_path: Path = DEFAULT_UTM_PROFILE_MEMORY
+    equipment_profile_id: str = "utm_windows_v1"
 
     @classmethod
     def from_devices_config(
@@ -337,6 +338,7 @@ class WindowsPyAutoGUIBridgeConfig:
         *,
         repo_root: Path | None = None,
         paths: RuntimePaths | None = None,
+        profile_id: str = "",
     ) -> "WindowsPyAutoGUIBridgeConfig":
         """Build config from the project devices config."""
         if paths is not None and repo_root is not None and Path(repo_root).resolve() != paths.repository_root:
@@ -349,11 +351,30 @@ class WindowsPyAutoGUIBridgeConfig:
             equipment = {}
         bridge_raw = equipment.get("windows_pyautogui", {})
         bridge = bridge_raw if isinstance(bridge_raw, dict) else {}
+        from utils.equipment_profiles import EquipmentProfileRegistry, EquipmentProfileStore, scoped_equipment_profile_id
+        memory_root = paths.memory_root if paths is not None else root / "memory"
+        selected_profile = profile_id or scoped_equipment_profile_id() or EquipmentProfileStore(memory_root).selected_id()
+        EquipmentProfileRegistry.default(memory_root=memory_root).get(selected_profile)
+        custom_profile = selected_profile not in {"utm_windows_v1", "windows_desktop_v1"}
+        catalogue = EquipmentProfileStore(memory_root).read()
+        if catalogue.get("selection_applied") and catalogue.get("selected_profile_id") == selected_profile:
+            # Explicit Apply takes precedence over a legacy host environment route.
+            bridge = {**bridge, "bridge_url_env": "", "token_env": ""}
+        if custom_profile:
+            # No machine coordinates, programs, environment credentials or host inherited.
+            bridge = {key: value for key, value in bridge.items() if key in {
+                "request_timeout_sec", "discovery_timeout_sec", "discovery_port", "token_header", "limits"
+            }}
+            profile_root = memory_root / "equipment_profiles" / selected_profile
+            bridge.update(connection_memory_path=str(profile_root / "connection.json"),
+                          utm_profile_memory_path=str(profile_root / "equipment_utm_profile.json"),
+                          bridge_url_env="", token_env="",
+                          artifact_dir=str((paths.artifact_root if paths else root / "artifacts") / "equipment" / selected_profile))
 
         artifact_dir = Path(str(bridge.get("artifact_dir", paths.artifact_root / "equipment" if paths is not None else "artifacts/equipment")))
         if not artifact_dir.is_absolute():
             artifact_dir = root / artifact_dir
-        memory_path = Path(str(bridge.get("connection_memory_path", paths.memory_root / "windows_pyautogui_connection.json" if paths is not None else DEFAULT_CONNECTION_MEMORY)))
+        memory_path = Path(str(bridge.get("connection_memory_path", memory_root / "windows_pyautogui_connection.json")))
         if not memory_path.is_absolute():
             memory_path = root / memory_path
         raw_utm_profile_path = bridge.get("utm_profile_memory_path")
@@ -379,6 +400,7 @@ class WindowsPyAutoGUIBridgeConfig:
         registered_programs = _apply_utm_profile_to_programs(registered_programs, _read_json_object(utm_profile_path))
 
         return cls(
+            equipment_profile_id=selected_profile,
             mode=str(equipment.get("mode", bridge.get("mode", "simulator"))).strip().lower() or "simulator",
             provider=str(equipment.get("provider", "windows_pyautogui")),
             enabled=bool(bridge.get("enabled", True)),

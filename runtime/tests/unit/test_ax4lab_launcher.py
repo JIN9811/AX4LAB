@@ -62,6 +62,17 @@ def test_installer_coexists_with_old_atr_without_modifying_or_executing_it(check
     assert 'AX4LAB_URL' in help_result.stdout
 
 
+@pytest.mark.parametrize('endpoint', ['local-main', 'custom-endpoint', 'e4b'])
+def test_model_load_cli_preserves_endpoint_identity_without_model_aliases(checkout, endpoint):
+    prepare_cli(checkout)
+    result = cli(checkout, 'model', 'load', endpoint)
+    assert result.returncode == 0, result.stderr
+    arguments = calls(checkout).splitlines()
+    payload = json.loads(arguments[arguments.index('-d') + 1])
+    assert payload == {'endpoint_id': endpoint}
+    assert 'http://127.0.0.1:7861/api/runtime/models/load' in arguments
+
+
 @pytest.mark.parametrize('config,dotenv,overrides,want', [
     ({}, '', {'ATR_URL': 'http://127.0.0.1:7860', 'AUTONOMOUS_PORT': '7860'}, 'http://127.0.0.1:7861/api/state'),
     ({'port': 9123}, '', {}, 'http://127.0.0.1:9123/api/state'),

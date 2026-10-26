@@ -30,6 +30,7 @@ dependencies = [
   "botorch>=0.17.0",
   "gpytorch>=1.14.0",
   "paho-mqtt>=2.1.0",
+  "pymcprotocol>=0.3.0,<0.4.0",
 ]
 
 [project.optional-dependencies]
@@ -40,6 +41,7 @@ desktop = [
   "python3-xlib>=0.15; sys_platform == 'linux'",
   "pynput>=1.7.7,<2",
 ]
+# Compatibility extra: PLC transport support is included in the default install.
 plc = ["pymcprotocol>=0.3.0,<0.4.0"]
 dev = [
   "pytest>=8.0.0",

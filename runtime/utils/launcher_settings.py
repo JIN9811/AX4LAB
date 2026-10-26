@@ -12,14 +12,16 @@ from dotenv import dotenv_values
 import yaml
 
 
-SUPPORTED_BACKENDS = ('openai', 'nemoclaw', 'ollama', 'vllm')
+SUPPORTED_BACKENDS = ('openai', 'vllm')
 
 
 def normalize_backend_name(value: str | None, default: str = 'vllm') -> str:
-    """Preserve the runtime's case-insensitive names and OpenAI aliases."""
+    """Normalize the endpoint-backed runtime names and existing API aliases."""
     name = str(value or default).strip().lower()
     if name in {'api', 'cloud', 'openai-api'}:
         name = 'openai'
+    if name in {'nemoclaw', 'ollama'}:
+        raise ValueError('Runtime backend must be vllm or openai; standalone adapters are not selectable.')
     return name if name in SUPPORTED_BACKENDS else default
 
 
@@ -31,14 +33,16 @@ def select_backend_name(system_config: Mapping, *,
     if public:
         selected = normalize_backend_name(public, default='')
         if not selected:
-            raise ValueError('AX4LAB_BACKEND must be vllm, nemoclaw, ollama or openai')
+            raise ValueError('AX4LAB_BACKEND must be vllm or openai')
         return selected
     system = system_config.get('system') or {}
     runtime_env = system_config.get('runtime_env') or {}
-    default = normalize_backend_name(system.get('inference_backend'))
-    # Invalid legacy values retain the existing config-default fallback.
-    return normalize_backend_name(env.get('AUTONOMOUS_BACKEND')
-                                  or runtime_env.get('AUTONOMOUS_BACKEND'), default)
+    configured = (env.get('AUTONOMOUS_BACKEND') or runtime_env.get('AUTONOMOUS_BACKEND')
+                  or system.get('inference_backend') or 'vllm')
+    selected = normalize_backend_name(configured, default='')
+    if not selected:
+        raise ValueError('Runtime backend must be vllm or openai; check AUTONOMOUS_BACKEND or system configuration.')
+    return selected
 
 
 @dataclass(frozen=True)

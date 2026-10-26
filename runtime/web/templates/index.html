@@ -44,70 +44,9 @@ Modification guide:
         </div>
         <div class="panel-title-row main-llm-control-title">
           <h2>LLM Control</h2>
+          <a id="btn-open-llm-connections" class="btn mini" href="/llm-connections" target="ax4lab-llm-connections" rel="noopener">Connection Settings ↗</a>
         </div>
-        <div class="hero-stack">
-          <article class="status-card">
-            <div class="status-head">
-              <span class="status-title">Runtime Backend</span>
-              <span id="backend-status-dot" class="status-dot idle"></span>
-            </div>
-            <strong id="backend-status-label">NemoClaw standby</strong>
-            <p id="backend-status-detail">Ready to route through the authenticated proxy.</p>
-          </article>
-          <article class="status-card">
-            <div class="status-head">
-              <span class="status-title">Nemoclaw Agent Work</span>
-              <span id="nemoclaw-status-dot" class="status-dot idle"></span>
-            </div>
-            <strong id="nemoclaw-status-label">Waiting</strong>
-            <p id="nemoclaw-status-detail">No active inference-backed agent cycle.</p>
-          </article>
-          <article class="status-card stack-wide">
-            <div class="status-head">
-              <span class="status-title">Current Models</span>
-              <span class="status-caption">31B / E4B</span>
-            </div>
-            <div class="model-grid">
-              <div class="model-chip" id="model-orchestrator-chip" data-model="gemma4:31b">
-                <span class="chip-dot"></span>
-                <div class="model-copy">
-                  <small>31B</small>
-                  <strong>gemma4:31b</strong>
-                </div>
-                <div class="model-actions">
-                  <span class="model-load-dot" data-model-dot="gemma4:31b"></span>
-                  <button class="btn mini model-load-btn" data-model="gemma4:31b">Loading</button>
-                  <button class="btn mini model-unload-btn" data-model="gemma4:31b">Unloading</button>
-                </div>
-              </div>
-              <div class="model-chip" id="model-e4b-chip" data-model="gemma4:e4b-it-nvfp4">
-                <span class="chip-dot"></span>
-                <div class="model-copy">
-                  <small>E4B</small>
-                  <strong>gemma4:e4b-it-nvfp4</strong>
-                </div>
-                <div class="model-actions">
-                  <span class="model-load-dot" data-model-dot="gemma4:e4b-it-nvfp4"></span>
-                  <button class="btn mini model-load-btn" data-model="gemma4:e4b-it-nvfp4">Loading</button>
-                  <button class="btn mini model-unload-btn" data-model="gemma4:e4b-it-nvfp4">Unloading</button>
-                </div>
-              </div>
-              <div class="model-chip api-key-chip" id="api-key-chip">
-                <span class="chip-dot"></span>
-                <div class="model-copy api-key-copy">
-                  <button id="api-key-open-btn" class="btn mini api-key-open-btn" type="button">API Key</button>
-                  <strong id="api-key-status-text">not configured</strong>
-                  <small id="api-key-detail">OpenAI API key is stored locally.</small>
-                </div>
-                <div class="model-actions">
-                  <span id="api-key-dot" class="model-load-dot unloaded"></span>
-                  <button id="api-key-load-btn" class="btn mini api-key-load-btn" type="button">Loading</button>
-                  <button id="api-key-unload-btn" class="btn mini api-key-unload-btn" type="button">Unloading</button>
-                </div>
-              </div>
-            </div>
-          </article>
-        </div>
+        {% include "partials/llm_control.html" %}
       </section>
 
       <section class="panel controls">
@@ -136,8 +75,8 @@ Modification guide:
           <label id="run-inference-field">
             Inference
             <select id="backend-select">
-              <option value="nemoclaw">Ollama / NemoClaw</option>
-              <option value="vllm" selected>NemoClaw / vLLM</option>
+              <option value="nemoclaw">Ollama</option>
+              <option value="vllm" selected>vLLM</option>
             </select>
           </label>
           <label id="run-fault-field">
@@ -254,33 +193,12 @@ Modification guide:
       </section>
     </main>
 
-    <dialog id="api-key-dialog" class="api-key-dialog" aria-labelledby="api-key-dialog-title">
-      <form id="api-key-form" class="api-key-form" method="dialog">
-        <div class="api-key-dialog-head">
-          <div>
-            <h3 id="api-key-dialog-title">OpenAI API Key</h3>
-            <p>Saved locally to <code>memory/api_keys.json</code>. The file is ignored by git.</p>
-          </div>
-          <button id="api-key-close-btn" class="btn mini" type="button">Close</button>
-        </div>
-        <label>
-          API key
-          <input id="api-key-input" type="password" autocomplete="off" placeholder="sk-..." />
-        </label>
-        <label class="api-key-checkbox">
-          <input id="api-key-enable-input" type="checkbox" checked />
-          Enable after saving
-        </label>
-        <p id="api-key-dialog-status" class="api-key-dialog-status">Current key is never displayed in full.</p>
-        <div class="api-key-dialog-actions">
-          <button id="api-key-save-btn" class="btn primary" type="submit">Save API Key</button>
-        </div>
-      </form>
-    </dialog>
+    {% include "partials/api_key_dialog.html" %}
 
     <script src="/static/runtime_graph_geometry.js?v=atr-ui-20260812-graph-layout-4"></script>
     <script src="/static/runtime_cycle.js?v=20260919-cycle-identity-1"></script>
     <script src="/static/run_review_picker.js?v=3" defer></script>
-    <script src="/static/app.js?v=20260919-display-projection-1" defer></script>
+  <script src="/static/llm_model_cards.js?v=2" defer></script>
+    <script src="/static/app.js?v=20261025-llm-endpoints-2" defer></script>
   </body>
 </html>

@@ -40,8 +40,7 @@ def test_launcher_accepts_existing_openai_backend_aliases(checkout, key, alias):
     ('', {'AUTONOMOUS_BACKEND': 'cloud'}, 'openai'),
     ('', {'AUTONOMOUS_BACKEND': 'openai-api'}, 'openai'),
     ('', {'AUTONOMOUS_BACKEND': ' OPENAI '}, 'openai'),
-    ('', {'AUTONOMOUS_BACKEND': 'unknown-legacy-value'}, 'ollama'),
-    ('', {}, 'ollama'),
+    ('', {}, 'vllm'),
 ])
 def test_direct_bootstrap_uses_public_backend_and_legacy_normalization(
         disposable_paths, tmp_path, monkeypatch, dotenv, environment, want):
@@ -54,7 +53,7 @@ def test_direct_bootstrap_uses_public_backend_and_legacy_normalization(
     original_loader = bootstrap._load_configs
     def configs(selected):
         cfg = deepcopy(original_loader(selected))
-        cfg['system']['system']['inference_backend'] = 'ollama'
+        cfg['system']['system']['inference_backend'] = 'vllm'
         cfg['system']['runtime_env'] = {}
         return cfg
     monkeypatch.setattr(bootstrap, '_load_configs', configs)
@@ -70,3 +69,52 @@ def test_direct_bootstrap_uses_public_backend_and_legacy_normalization(
     assert controller._deps.agent_context.active_backend == want
     assert controller._deps.runtime_profile['backend']['name'] == want
     assert controller._run_task is None
+    assert set(controller._deps.agent_context.primary_backends) == {'vllm', 'openai'}
+
+
+@pytest.mark.parametrize('key', ['AUTONOMOUS_BACKEND', 'AX4LAB_BACKEND'])
+@pytest.mark.parametrize('backend', ['ollama', 'nemoclaw', 'unknown-legacy-value'])
+def test_launcher_rejects_unsupported_explicit_backend_before_request(checkout, key, backend):
+    prepare_cli(checkout)
+    result = cli(checkout, 'run', 'start', 'test', 'backend rejection', **{key: backend})
+    assert result.returncode != 0
+    assert calls(checkout) == ''
+
+
+@pytest.mark.parametrize('backend', ['ollama', 'nemoclaw'])
+def test_backend_switch_cli_rejects_retired_adapters_before_request(checkout, backend):
+    prepare_cli(checkout)
+    result = cli(checkout, 'backend', backend)
+    assert result.returncode != 0
+    assert 'vllm' in result.stderr and 'openai' in result.stderr
+    assert calls(checkout) == ''
+
+
+@pytest.mark.parametrize('source', ['public', 'legacy', 'runtime_env', 'system'])
+@pytest.mark.parametrize('backend', ['ollama', 'nemoclaw'])
+def test_backend_selection_never_silently_falls_back_from_retired_adapter(source, backend):
+    from utils.launcher_settings import select_backend_name
+    cfg, env = {'system': {'inference_backend': 'vllm'}, 'runtime_env': {}}, {}
+    if source == 'public':
+        env['AX4LAB_BACKEND'] = backend
+    elif source == 'legacy':
+        env['AUTONOMOUS_BACKEND'] = backend
+    elif source == 'runtime_env':
+        cfg['runtime_env']['AUTONOMOUS_BACKEND'] = backend
+    else:
+        cfg['system']['inference_backend'] = backend
+    with pytest.raises(ValueError, match='vllm.*openai'):
+        select_backend_name(cfg, environ=env)
+
+
+@pytest.mark.parametrize('schema_name', ['StartRunRequest', 'PlanningMessageRequest',
+    'PlanningBootstrapRequest', 'BackendSwitchRequest', 'RuntimeAgentMessageRequest'])
+def test_request_schemas_reject_retired_runtime_backends(schema_name):
+    from app import main
+    from pydantic import ValidationError
+    schema = getattr(main, schema_name)
+    for backend in ('ollama', 'nemoclaw'):
+        with pytest.raises(ValidationError):
+            schema.model_validate({'backend': backend, 'message': 'test request'})
+    for backend in ('vllm', 'openai'):
+        assert schema.model_validate({'backend': backend, 'message': 'test request'}).backend == backend

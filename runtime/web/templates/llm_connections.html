@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ title }}</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+  <link rel="stylesheet" href="/static/styles.css?v=20260918-replay-controls-1" />
+  <link rel="stylesheet" href="/static/llm_connections.css?v=5" />
+</head>
+<body class="connections-page">
+  <main class="page connections-shell">
+    <header class="panel connections-heading">
+      <div><span class="eyebrow">AX4LAB · RUNTIME</span><h1>LLM Connections</h1>
+        <p>Manage inference connections without starting an experiment.</p></div>
+      <a class="btn mini" href="/" target="_blank" rel="noopener">Dashboard ↗</a>
+    </header>
+    <section class="panel connections-toolbar">
+      <label>View<select id="connections-view">
+        <option value="current">Current Mode</option>
+        <option value="openai">API Connection</option>
+        <option value="vllm">Local LLM Connection</option>
+      </select></label>
+      <button class="btn" id="connections-refresh" type="button">Load Current Mode</button>
+      <span id="connections-route" class="badge idle">Loading current settings…</span>
+    </section>
+    <p id="connections-status" role="status" aria-live="polite"></p>
+    <section id="connections-current" class="panel connections-current">
+      <div class="panel-title-row"><h2>LLM Control</h2><span class="status-caption">Current Mode</span></div>
+      {% include "partials/llm_control.html" %}
+      <dl id="connections-endpoints" class="connections-endpoints"></dl>
+    </section>
+    <section id="connections-editor" class="panel" hidden>
+      <div class="panel-title-row"><h2 id="connections-editor-title">Connection settings</h2></div>
+      <section id="endpoint-catalog">
+        <div class="panel-title-row"><h3>Registered Endpoints</h3><button id="endpoint-add" class="btn mini" type="button">Add Endpoint</button></div>
+        <div id="catalog-registered"></div>
+        <p class="connections-note">Each endpoint has its own address and served model ID. Remove only unregisters it; model files and running servers are unchanged. Save replacement role assignments before removing an assigned endpoint.</p>
+      </section>
+      <form id="connections-form">
+        <h3>Role Assignments</h3>
+        <div class="connections-fields">
+          <label>Orchestrator endpoint<select id="connection-orchestrator" required></select></label>
+          <label>Worker / vision endpoint<select id="connection-worker" required></select></label>
+        </div>
+        <p class="connections-note">Select by endpoint registration. Endpoints may serve the same model while retaining separate addresses, credentials, and server controls.</p>
+        <details><summary>Optional fallback endpoints</summary>
+          <div class="connections-fields">
+            <label>Orchestrator fallback<select id="connection-orchestrator-fallback"></select></label>
+            <label>Worker fallback<select id="connection-worker-fallback"></select></label>
+          </div>
+        </details>
+        <div id="connection-api-key-row" class="connections-key-row" hidden>
+          <span id="connection-key-note">API key status</span>
+          <button id="connections-api-key" class="btn mini" type="button">API Key</button>
+        </div>
+        <div class="connections-actions">
+          <label>Test role<select id="connection-test-role"><option value="worker">Worker / vision</option><option value="orchestrator">Orchestrator</option></select></label>
+          <button id="connection-test" class="btn" type="button">Test Connection</button>
+          <button id="connection-save" class="btn primary" type="submit">Save &amp; Apply</button>
+        </div>
+        <p class="connections-note">Testing sends a short text request to this model only. It does not save settings, load a model, or start an experiment. API requests may incur a small charge.</p>
+        <p class="connections-note">Save &amp; Apply updates role assignments, not the selected inference mode. Current Mode retains server Loading / Unloading and API enable / disable controls.</p>
+        <pre id="connection-result" class="connections-result" role="status" hidden></pre>
+      </form>
+    </section>
+  </main>
+  <dialog id="endpoint-dialog" class="api-key-dialog endpoint-dialog" aria-labelledby="endpoint-dialog-title">
+    <form id="endpoint-form" class="api-key-form">
+      <div class="api-key-dialog-head"><h3 id="endpoint-dialog-title">Add Endpoint</h3><button id="endpoint-close" type="button" class="btn mini">Close</button></div>
+      <div class="connections-fields">
+        <label>Endpoint ID<input id="endpoint-id" required maxlength="128" placeholder="office-gpu" autocomplete="off" /></label>
+        <label>Display name<input id="endpoint-label" required maxlength="256" placeholder="Office GPU" /></label>
+        <label class="connections-wide">API base URL<input id="endpoint-url" type="url" required maxlength="2048" placeholder="http://127.0.0.1:8000/v1" /></label>
+        <label class="connections-wide">Served model ID<input id="endpoint-model" required maxlength="256" placeholder="Model ID accepted by this server" /></label>
+        <label id="endpoint-management-field" class="connections-wide">Server management target<select id="endpoint-management"></select></label>
+        <label class="connections-wide">Endpoint access token<input id="endpoint-token" type="password" autocomplete="off" maxlength="4096" placeholder="Optional; blank keeps a stored token only for the same address" /></label>
+      </div>
+      <label class="api-key-checkbox"><input id="endpoint-vision" type="checkbox" />Supports vision input</label>
+      <p class="connections-note">Use a base URL, usually ending in /v1, not /chat/completions. A management target enables Loading / Unloading for that configured server. API endpoints can use their own token or the matching API Key control.</p>
+      <p id="endpoint-status" class="connections-note" role="status" aria-live="polite"></p>
+      <div class="api-key-dialog-actions"><button id="endpoint-save" class="btn primary" type="submit">Save Endpoint</button></div>
+    </form>
+  </dialog>
+  {% include "partials/api_key_dialog.html" %}
+  <script src="/static/llm_model_cards.js?v=2" defer></script>
+  <script src="/static/llm_connections.js?v=6" defer></script>
+</body>
+</html>

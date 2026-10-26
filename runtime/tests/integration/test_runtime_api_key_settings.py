@@ -13,6 +13,22 @@ from fastapi.testclient import TestClient
 import app.main as main_module
 
 
+def test_api_key_toggle_does_not_replace_other_providers_credentials(tmp_path, monkeypatch):
+    """A cloud credential must never be sent to a local/custom inference endpoint."""
+    monkeypatch.setattr(main_module, "API_KEY_SETTINGS_PATH", tmp_path / "api_keys.json")
+    ctx = main_module.controller._deps.agent_context
+    local = ctx.primary_backends["vllm"]
+    monkeypatch.setattr(local, "_api_key", "local-endpoint-token")
+    client = TestClient(main_module.app)
+    enabled = client.post("/api/runtime/api-key", json={"api_key": "cloud-test-key", "enabled": True}).json()
+    assert enabled["enabled"] is True
+    assert local._api_key == "local-endpoint-token"
+    assert ctx.primary_backends["openai"]._api_key == "cloud-test-key"
+    client.post("/api/runtime/api-key/unload", json={})
+    assert local._api_key == "local-endpoint-token"
+    assert ctx.primary_backends["openai"]._api_key == ""
+
+
 def test_runtime_api_key_settings_import_env_and_toggle_usage(tmp_path: Path, monkeypatch) -> None:
     settings_path = tmp_path / "memory" / "api_keys.json"
     monkeypatch.setattr(main_module, "API_KEY_SETTINGS_PATH", settings_path)

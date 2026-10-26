@@ -15,7 +15,7 @@ class PLCTransportError(RuntimeError):
 
 
 class PLCTransportImportError(PLCTransportError):
-    """Raised when the optional pymcprotocol dependency is unavailable."""
+    """Raised when the required live transport dependency is unavailable."""
 
 
 class PLCConnectionError(PLCTransportError):

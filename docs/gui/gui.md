@@ -24,7 +24,7 @@ dock. Completed-session data; private values redacted.*
 Web dashboard panels:
 - global run metrics
 - run control buttons
-- current NemoClaw/vLLM model cells with per-model Loading/Unloading controls and status dots
+- registered local endpoint cards, with Loading/Unloading controls for configured managed servers
 - Device Workspaces panel with dedicated launchers for 3D Printer, Windows Automation, Manipulation, Bayesian Optimization, PLC Safety, Vision, and Knowledge; device evidence lives in those workspaces and run-owned Live reports
 - live loop timeline
 - agent status
@@ -32,6 +32,91 @@ Web dashboard panels:
 - structured log viewer
 
 Real-time updates are streamed via SSE endpoint `/api/events/stream`.
+
+### LLM Connections window
+
+Open **Connection Settings ↗** in the Main GUI's LLM Control panel. The separate
+window reuses the existing cards instead of introducing another run-control page.
+
+- **Current Mode:** shows the current runtime, model status, API key status and
+  resolved endpoints. **Load Current Mode** refreshes this view. Viewing it does
+  not change the inference route.
+- **API Connection / Local LLM Connection:** register and edit endpoints in the
+  corresponding provider view. **Add Endpoint** takes a unique **Endpoint ID**,
+  display name, API base URL, manually entered **Served model ID**, optional access
+  token and vision capability. There is no automatic model discovery. Two endpoints
+  may serve the same model ID while keeping distinct addresses and credentials.
+- **Role Assignments:** select registered endpoint IDs for **Orchestrator** and
+  **Worker / vision**. Optional fallback selectors also refer to endpoint IDs;
+  leave them at **None** when no fallback is intended.
+- **Server management target:** links a local endpoint to an operator-configured
+  server for Loading/Unloading. It is separate from the served model ID. External
+  servers without a target show **Registered** and must be started on their hosts.
+- **Edit / Remove:** edits keep the endpoint ID stable. Remove only unregisters
+  an endpoint; it does not stop its server or delete model files. Save replacement
+  role and fallback assignments before removing an assigned endpoint.
+- **Runtime Backend / Agent Work:** show the selected runtime and **Ready** (or **Working**).
+- **Test Connection:** sends one short request to the chosen role's endpoint, without
+  fallback, saving settings, loading models or starting an experiment. API tests
+  can incur a small charge. Load a local model before testing it.
+- **Save Endpoint / Save & Apply:** the first saves the endpoint registration;
+  the second saves role assignments for future requests. Settings survive refresh
+  and server restart. Neither action changes the selected inference mode.
+  Active runs and LLM requests block editing the runtime connection.
+- **API Key:** uses the existing private key store. After changing the API
+  address, save its role assignments and explicitly register a key for the address
+  shown in the dialog. A key belonging to another address is not sent to it.
+  Per-endpoint tokens can instead be entered in Add/Edit Endpoint. Use API Key
+  Loading / Unloading to enable or disable API routing, including API endpoints
+  with their own tokens.
+
+The window is also available at `/llm-connections`. Connection settings stay in
+the local, Git-ignored `memory/llm_connections.json`; do not share this file if it
+contains an endpoint token.
+
+#### Connect a model server on another machine
+
+AX4LAB can use an existing OpenAI-compatible model server without installing
+its model weights or GPU runtime on the AX4LAB PC. The endpoint must be reachable
+**from the AX4LAB server**, not just from the browser. It must support chat
+completions (`POST /v1/chat/completions`).
+
+1. Start the model service on its host. Obtain its API base URL, exact served model
+   ID and token, if authentication is enabled.
+2. Open **Connection Settings ↗ → Local LLM Connection** (or **API Connection**
+   for the API route), then **Add Endpoint**. Choose a stable, unique endpoint ID
+   and enter the display name, URL and served model ID manually. Do not append
+   `/models` or `/chat/completions` to the base URL. Enter a token if required and
+   enable **Supports vision input** only when the server supports it.
+3. Leave **Server management target** at **External server** for a server managed
+   elsewhere. Select a configured target only when AX4LAB should control that
+   specific server's Loading/Unloading. Click **Save Endpoint**.
+4. Choose the saved endpoint in **Orchestrator endpoint** and/or **Worker / vision
+   endpoint**, and replace or clear obsolete fallback assignments. One endpoint
+   can serve both roles if it supports the required tasks. Use **Save & Apply**;
+   if using the global API key, register it for the address shown by **API Key**.
+5. Choose each role in **Test role** and click **Test Connection**. Text replies
+   confirm connectivity, not vision/task accuracy.
+6. Use `ax4lab backend vllm` for registered local endpoints. If API routing is enabled, use
+   **API Key → Unloading** to stop preferring the external API. Verify the selected
+   route in **Current Mode** before starting an experiment.
+
+**Checkpoint:** after reopening the window, the registrations and role assignments
+remain saved, and each selected endpoint returns a test reply. External endpoint cards
+show **Registered**, not a claim that the remote model is healthy. Start and stop
+those services on their own hosts; AX4LAB's Loading/Unloading buttons apply only
+to their configured management targets. The CLI equivalents are
+`ax4lab model load <endpoint-id>` and `ax4lab model unload <endpoint-id>`.
+No repository-local model path is needed.
+
+| Symptom | Check |
+|---|---|
+| Connection test fails | Host/port, service binding and firewall. `127.0.0.1` refers to the AX4LAB server itself; use the model host's reachable address for another PC. |
+| HTTP 401/403 | Endpoint token and permission. Tokens are not reused across different addresses. |
+| Text works but image tasks fail | The worker must accept image inputs; a text-only model is insufficient for vision agents. |
+
+Use a trusted LAN, VPN or authenticated HTTPS endpoint. Do not expose an
+unauthenticated model server publicly or copy private connection files into Git.
 
 ### Test Mode Settings: run length
 
@@ -105,7 +190,7 @@ Live GUI chat route:
 Korean phrases below are literal supported chat aliases, not untranslated instructions: `실험 수행` means “run experiment,” `실제 시험 수행` means “run a real test,” `테스트 모드` means “test mode,” `가상 브릿지` means “virtual bridge,” `설치 프린터` means “installed printer,” and `실제 출력` means “physical print.” Combined aliases retain those meanings.
 
 - The Live GUI conversation is the operator-facing surface for orchestrator discussion and handoff execution.
-- Opening Live GUI does not automatically load NemoClaw/vLLM models. Operators must use the main dashboard Loading buttons or `ax4lab model load <model>` before sending model-backed chat/workflow requests.
+- Opening Live GUI does not automatically load local models. Operators must use the main dashboard Loading buttons or `ax4lab model load <endpoint-id>` for configured management targets, or start external servers on their hosts, before sending model-backed chat/workflow requests.
 - Server startup, Live GUI open, backend switching, and planning bootstrap are side-effect free with respect to Kubernetes vLLM scale-up.
 - Agent tabs and report descriptors are backend-manifest first. On startup `web/static/planning.js` calls `/api/runtime/agent-manifests`, merges graph/module/UI descriptor data into `LIVE_AGENTS`, and uses `DEFAULT_LIVE_AGENTS` only as a fallback if the manifest request fails.
 - Module-local `graphs/modules/<module_id>/ui.yaml` files control presentation-only fields such as short label, icon path, report title, descriptor cards, and report section selectors. They do not change handlers, graph routing, tool allowlists, or live execution authority.
@@ -121,7 +206,7 @@ Korean phrases below are literal supported chat aliases, not untranslated instru
 - `ui.renderer` / custom renderer manifest ids are active only as a bounded presentation profile. `/api/modules/{module_id}/ui` normalizes `renderer.dashboard`, `renderer.report`, and `renderer.fallback` against the built-in allowlist (`descriptor`, `generic`, and the `<agent>_reference` profiles). `/api/runtime/agent-manifests` exposes the normalized object with `supported`, `execution_scope=presentation_only`, and `blocked_reason`. `planning.js` ingests this field through `LIVE_RENDERER_PROFILES` and uses it to choose the agent-specific report detail renderer and dashboard card renderer, but it does not load arbitrary external renderer code. Use `cards[]`, `report_sections[]`, descriptor charts, workspace handoff actions, and the allowlisted renderer profiles for current module-local presentation.
 - Chat history is server-backed. `MainController` appends compacted entries to `runs/<active_run_id>/live_planning_transcript.jsonl`, keeps only a recent in-memory window, and exposes older pages through `/api/planning/messages?before=<index>&limit=<n>`. Browser refresh or a newly opened Live GUI tab should restore state from `/api/planning/session` and transcript pages, not from independent local-only chat memory.
 - Live GUI message payloads are compacted before storage and SSE delivery. The compact form preserves operator-facing fields such as `experiment_spec`, `specimen`, `selected_printer`, `device_screen`, `preprint_gate`, `readiness_levels`, `operator_actions`, `analysis`, `bo_result`, and `module_runtime`; raw geometry/report internals are intentionally omitted.
-- Live GUI orchestrator calls retry once internally before surfacing a chat failure, because the 31B MTP/NVFP4 server and the E4B NVFP4 server may JIT kernels on the first real generation after readiness. Current code does not auto-load those deployments when the page opens.
+- Live GUI orchestrator calls retry once internally before surfacing a chat failure, because configured local servers may JIT kernels on the first real generation after readiness. Current code does not auto-load their deployments when the page opens.
 - `실험 수행` must not fabricate missing design values. If required values are missing, the chat must show current confirmed values, missing values, and one concrete example input.
 - Required values before Design Agent handoff are experiment objective/metric, material, specimen size, and geometry/domain.
 
@@ -263,10 +348,13 @@ Windows PyAutoGUI Bridge GUI route:
 - Main dashboard launcher: `Windows Automation` / `Workspace`
 - Route: `/equipment/windows`
 - Hardware workspace entry points, including Windows Bridge, live under Main GUI Device Workspaces, not Live GUI.
-- Saved bridge candidates are still persisted in `memory/windows_pyautogui_connection.json` and are shared by all GUI windows.
+- **Profile & Worker:** enter a **Profile name**, then click **New Profile** or press Enter to save another UTM profile. Creating or selecting a profile reloads the lower panels for that instrument: connection, recordings, Skills, settings and execution evidence. New profiles do not inherit the original machine's coordinates, credentials or Skills.
+- **Delete Profile:** confirm the displayed profile name to remove a custom profile from the list. Built-in and applied profiles are protected, and deletion is blocked during an active run or Equipment job. Saved settings and experiment evidence are retained.
+- Pair and select the instrument's Worker under **Saved Workers**, then click **Apply** to make that profile/Worker combination the default for future execution. Apply does not start equipment and is unavailable while a run or equipment job is active. Browsing another profile does not change the applied selection.
+- The original UTM keeps its existing files. Additional profiles use separate files under `memory/equipment_profiles/<profile_id>/`; browser tabs are scoped by `profile_id` rather than sharing their current selection.
 - The Workspace also exposes a manually controlled `local_development` target
   at `127.0.0.1:8767`. Start registers it as standby, Health verifies X11 and
-  PyAutoGUI, Select switches the shared candidate, and Stop terminates only the
+  PyAutoGUI, Select saves it for the viewed profile, and Stop terminates only the
   AX4LAB-owned local process. It uses the same proxied console and Program Manager
   as Windows; `8766` remains reserved for Isaac Sim OMX mirror.
 

@@ -526,7 +526,9 @@
     "utils/windows_bridge_release.py",
     "utils/yaml_cache.py",
     "utils/installation_manifest.py",
-    "utils/launcher_settings.py"
+    "utils/launcher_settings.py",
+    "app/llm_connections.py",
+    "backends/endpoint_routes.py"
   ],
   "bound_resources": [
     "agents/analysis/frontend/live_report.js",
@@ -734,7 +736,13 @@
     "web/templates/test_mode_settings.html",
     "web/templates/vision_utm_device_bridge.html",
     "web/templates/windows_equipment.html",
-    "web/templates/workspace_boot.html"
+    "web/templates/workspace_boot.html",
+    "web/static/llm_model_cards.js",
+    "web/static/llm_connections.js",
+    "web/static/llm_connections.css",
+    "web/templates/llm_connections.html",
+    "web/templates/partials/api_key_dialog.html",
+    "web/templates/partials/llm_control.html"
   ],
   "sdist": [
     "LICENSE",
@@ -2053,6 +2061,8 @@
     "install/venv_guard.sh",
     "tests/unit/test_portable_bootstrap.py",
     "tests/unit/test_portable_doctor.py",
+    "tests/unit/test_backend_model_config.py",
+    "tests/unit/test_plc_installation.py",
     "tests/unit/test_installation_manifest.py",
     "tests/unit/test_windows_bootstrap_paths.py",
     "tests/integration/test_portable_installation.py",
@@ -2063,7 +2073,20 @@
     "tests/unit/test_ax4lab_process_isolation.py",
     "tests/unit/test_ax4lab_server_settings.py",
     "tests/unit/test_ax4lab_audit_endpoints.py",
-    "tests/unit/test_ax4lab_backend_selection.py"
+    "tests/unit/test_ax4lab_backend_selection.py",
+    "app/llm_connections.py",
+    "web/static/llm_model_cards.js",
+    "web/static/llm_connections.js",
+    "web/static/llm_connections.css",
+    "web/templates/llm_connections.html",
+    "web/templates/partials/api_key_dialog.html",
+    "web/templates/partials/llm_control.html",
+    "tests/unit/test_llm_connections.py",
+    "tests/unit/test_llm_connections_frontend.py",
+    "tests/integration/test_llm_connections_api.py",
+    "backends/endpoint_routes.py",
+    "tests/unit/test_endpoint_connections.py",
+    "tests/unit/test_endpoint_routing.py"
   ],
   "optional_tts": "Existing tracked Piper assets are sdist-only; no wheel source fallback."
 }

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from backends.endpoint_routes import normalize_roles
 
 
 @dataclass(slots=True)
@@ -37,14 +38,16 @@ class ModelRouter:
     """Model selection router driven by YAML configuration."""
 
     def __init__(self, config: dict[str, Any]) -> None:
-        self._cfg = config
-        self._models = config.get("models", {})
-        self._task_routes = config.get("task_routes", {})
+        self._cfg = normalize_roles(config)
+        self._models = self._cfg.get("models", {})
+        self._task_routes = self._cfg.get("task_routes", {})
 
     def select(self, task_type: str) -> ModelSelection:
         """Resolve model role and model ids for the given task type."""
-        role = str(self._task_routes.get(task_type, "e4b"))
+        role = str(self._task_routes.get(task_type, "worker"))
         role_cfg = self._models.get(role, {})
-        primary = str(role_cfg.get("primary", "qwen2.5:3b"))
+        primary = str(role_cfg.get("primary") or '').strip()
+        if not primary:
+            raise ValueError(f'No connection is assigned to role {role!r} for task {task_type!r}.')
         fallback = role_cfg.get("fallback")
         return ModelSelection(role=role, primary=primary, fallback=str(fallback) if fallback else None)

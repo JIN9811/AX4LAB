@@ -27,6 +27,7 @@ from typing import Any
 import httpx
 
 from backends.llm_backend import BaseLLMBackend, LLMImageInput, LLMResponse, openai_user_content
+from backends.endpoint_routes import resolve_endpoint, endpoint_token
 OPENAI_MAX_COMPLETION_TOKENS_BY_TASK = {
     "orchestrator_plan": 1800,
     "design_reasoning": 1200,
@@ -57,6 +58,8 @@ class OpenAIBackend(BaseLLMBackend):
         self._base_url = base_url.rstrip("/")
         self._timeout_s = timeout_s
         self._api_key = api_key or os.getenv("OPENAI_API_KEY", "")
+        self._api_key_base_url = self._base_url
+        self._metadata_base_url = self._base_url
         self._organization = organization or os.getenv("OPENAI_ORG_ID", "")
         self._project = project or os.getenv("OPENAI_PROJECT_ID", "")
         self._reasoning_effort = (reasoning_effort or os.getenv("OPENAI_REASONING_EFFORT", "")).strip()
@@ -104,11 +107,18 @@ class OpenAIBackend(BaseLLMBackend):
         metadata: dict[str, Any] | None = None,
         images: list[LLMImageInput] | None = None,
     ) -> LLMResponse:
-        if not self._api_key:
+        endpoint = resolve_endpoint(self, model)
+        token = endpoint_token(self, endpoint)
+        if not getattr(self, '_api_routing_enabled', True):
+            raise RuntimeError('API routing is disabled.')
+        if not token:
             raise RuntimeError("OPENAI_API_KEY is required for the openai backend.")
+        if images and endpoint is not None and not endpoint.get('capabilities', {}).get('vision', False):
+            raise ValueError('This endpoint is not configured for image input.')
+        base_url = endpoint['base_url'].rstrip('/') if endpoint is not None else self._base_url
 
         payload: dict[str, Any] = {
-            "model": model,
+            "model": endpoint['model'] if endpoint is not None else model,
             "stream": False,
             "messages": [
                 {"role": "developer", "content": system_prompt},
@@ -130,17 +140,17 @@ class OpenAIBackend(BaseLLMBackend):
                 raise RuntimeError("OPENAI_TEMPERATURE must be a number when set.")
 
         headers = {
-            "Authorization": f"Bearer {self._api_key}",
+            "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
         }
-        if self._organization:
+        if self._organization and base_url == self._metadata_base_url:
             headers["OpenAI-Organization"] = self._organization
-        if self._project:
+        if self._project and base_url == self._metadata_base_url:
             headers["OpenAI-Project"] = self._project
 
-        async with httpx.AsyncClient(timeout=self._timeout_s) as client:
+        async with httpx.AsyncClient(timeout=self._timeout_s, follow_redirects=False) as client:
             response = await client.post(
-                f"{self._base_url}/chat/completions",
+                f"{base_url}/chat/completions",
                 json=payload,
                 headers=headers,
             )

@@ -11387,12 +11387,18 @@ class MainController:
             "status": await self.runtime_model_statuses(),
         }
 
-    async def apply_openai_api_key(self, api_key: str, *, enabled: bool, emit_event: bool = True) -> dict[str, Any]:
+    async def apply_openai_api_key(self, api_key: str, *, enabled: bool, emit_event: bool = True,
+                                 base_url: str | None = None) -> dict[str, Any]:
         """Apply the saved OpenAI API key and update backend fallback priority."""
         clean_key = str(api_key or "").strip()
-        use_api_key = bool(enabled and clean_key)
+        from backends.endpoint_routes import has_endpoint_credentials, role_endpoint_references
+        api_router = self._deps.agent_context.model_routers.get('openai')
+        api_backend = self._deps.agent_context.primary_backends.get('openai')
+        endpoint_key = bool(api_router and api_backend and has_endpoint_credentials(api_backend,
+            role_endpoint_references(api_router)))
+        use_api_key = bool(enabled and (clean_key or endpoint_key))
         effective_key = clean_key if use_api_key else ""
-        if use_api_key:
+        if use_api_key and clean_key:
             os.environ["OPENAI_API_KEY"] = clean_key
         else:
             os.environ.pop("OPENAI_API_KEY", None)
@@ -11409,8 +11415,12 @@ class MainController:
                 if ident in seen:
                     continue
                 seen.add(ident)
-                if hasattr(backend, "_api_key"):
+                # Cloud credentials belong only to the OpenAI client. Local or
+                # custom vLLM endpoints must retain their own authentication.
+                if backend is self._deps.agent_context.primary_backends.get("openai"):
                     setattr(backend, "_api_key", effective_key)
+                    setattr(backend, "_api_key_base_url", (base_url or backend._base_url).rstrip('/'))
+                    setattr(backend, "_api_routing_enabled", use_api_key)
                     touched += 1
 
         openai_backend = self._deps.agent_context.primary_backends.get("openai")

@@ -79,25 +79,17 @@ Required for the main GUI/API:
 - `curl` for CLI/API checks.
 - Python virtual environment support and an installed `uv` executable; the
   bootstrap creates the checkout-local environment using frozen dependencies.
+- The Mitsubishi PLC client, `pymcprotocol`, is included in those core dependencies.
+  It runs inside the AX4LAB server environment; no separate PLC Conda environment
+  is required. `doctor --core-only` detects a missing package without contacting
+  the PLC. Connection and safety checks remain separate; see the
+  [PLC safety bridge](../../system/device_bridges/plc_safety_bridge.md).
 - API key based inference, normally through `OPENAI_API_KEY`, when local AI is
   unavailable or intentionally skipped.
 
 Optional but commonly used:
 
 - `conda` or Miniconda for LeRobot-specific environments.
-- Mitsubishi PLC diagnostics use the validated Conda environment named `plc`
-  with `pymcprotocol 0.3.0`. The AX4LAB server imports the compatible declared
-  `pymcprotocol` package in-process; it does not launch a Conda process for
-  each PLC poll. A missing package or transport failure is surfaced to the PLC
-  service as a typed error and never selects the virtual transport in Live mode.
-  Verify the non-connecting diagnostic environment with:
-  ```bash
-  conda run -n plc python -c 'import importlib.metadata as m, pymcprotocol; print(m.version("pymcprotocol")); print(pymcprotocol.__file__)'
-  ```
-  Connection, recovery, offline behavior, and the operator-gated physical
-  D100-D102 checklist are documented in
-  `docs/device_bridges/plc_safety_bridge.md`. PLC validation does not authorize
-  printer, robot, UTM, or other downstream motion.
 - `nvidia-smi` and NVIDIA driver stack for local GPU runtime checks.
 - Docker for PrusaSlicer or local vLLM/NemoClaw paths. Retired CalculiX/Neo4j
   experiments are not dependencies of the active application.
@@ -284,8 +276,10 @@ bash runtime/install/bootstrap_linux.sh
 ```
 
 The core includes FastAPI, HTTP clients, YAML parsing, the TPMS/STL geometry
-stack (`numpy`, `scikit-image`, `trimesh`) and BoTorch/GPyTorch. RealSense, PLC,
-desktop automation and TTS are explicit extras; see the installer's flags.
+stack (`numpy`, `scikit-image`, `trimesh`), BoTorch/GPyTorch and the PLC client
+(`pymcprotocol`). RealSense, desktop automation and TTS are explicit extras;
+see the installer's flags. The legacy `--with-plc` flag is accepted but no longer
+required.
 Testing/browser dependencies belong to the `dev` extra, not core. Windows bridge
 dependencies are installed separately by its native installer above.
 

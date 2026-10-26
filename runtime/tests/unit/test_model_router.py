@@ -20,7 +20,7 @@ def test_model_router_selects_task_role() -> None:
     assert selection.fallback == "b"
 
 
-def test_vllm_orchestrator_defaults_to_31b() -> None:
+def test_vllm_orchestrator_selects_registered_local_endpoint() -> None:
     cfg = load_yaml(resolve_runtime_path("configs/models.yaml"))
     vllm_cfg = dict(cfg)
     vllm_cfg["models"] = dict(cfg["backend_models"]["vllm"])
@@ -28,8 +28,12 @@ def test_vllm_orchestrator_defaults_to_31b() -> None:
 
     selection = router.select("orchestrator_plan")
 
-    assert selection.primary == "gemma4:31b"
-    assert selection.fallback == "gemma4:e4b-it-nvfp4"
+    assert selection.primary == "endpoint:local-main"
+    assert selection.fallback is None
+    endpoints = load_yaml(resolve_runtime_path("configs/system.yaml"))["llm_connections"]["endpoints"]
+    record = endpoints[selection.primary.removeprefix("endpoint:")]
+    assert record["provider"] == "vllm" and record["model"]
+    assert record["management_id"] == "local-main"
 
 
 def test_backend_fallback_defaults_to_openai() -> None:
@@ -37,7 +41,9 @@ def test_backend_fallback_defaults_to_openai() -> None:
 
     assert cfg["backend"]["default"] == "vllm"
     assert cfg["backend"]["fallback"] == "openai"
-    assert cfg["backend_models"]["openai"]["orchestrator"]["primary"] == "gpt-5.5"
+    assert cfg["backend_models"]["openai"]["orchestrator"]["primary"] == "endpoint:api-main"
+    endpoints = load_yaml(resolve_runtime_path("configs/system.yaml"))["llm_connections"]["endpoints"]
+    assert endpoints["api-main"]["provider"] == "openai" and endpoints["api-main"]["model"]
 
 import pytest
 

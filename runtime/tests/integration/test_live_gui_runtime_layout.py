@@ -921,7 +921,11 @@ def test_windows_equipment_opens_the_saved_windows_bridge_console_in_a_separate_
     assert 'id="equipment-saved-candidates" class="equipment-candidates equipment-saved-candidates-scroll"' in response.text
     assert 'id="equipment-bridge-console-frame"' not in response.text
     script = client.get("/static/windows_equipment.js").text
-    assert 'window.open("/equipment/windows/console", "_blank", "noopener,noreferrer")' in script
+    function = script[script.index("function openSelectedBridgeGui() {"):script.index("async function checkReadiness()")]
+    _run_javascript("const assert = require('node:assert/strict');" +
+                    "const selectedEquipmentProfileId = 'utm_second'; const setActionStatus = () => {};" +
+                    "let opened; const window = {open: (...args) => opened = args};" + function +
+                    "openSelectedBridgeGui(); assert.deepEqual(opened, ['/equipment/windows/console?profile_id=utm_second', '_blank', 'noopener,noreferrer']);")
 
 
 def test_windows_equipment_saved_workers_expose_bounded_update_controls() -> None:
@@ -3218,7 +3222,6 @@ def test_windows_equipment_gui_exposes_utm_calibration_controls() -> None:
         "hydrateUtmProfile",
             "openSelectedBridgeGui",
             "selectedBridgeUrl",
-            'window.open("/equipment/windows/console"',
         "mergeLocatorOverride",
         "renderUtmReadiness",
         "checkReadiness",

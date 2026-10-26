@@ -22,6 +22,7 @@ Modification guide:
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import subprocess
 from dataclasses import dataclass, field
@@ -61,7 +62,6 @@ class NemoClawVLLMRuntime:
         self._models = models or {}
         self._locks: dict[str, asyncio.Lock] = {model: asyncio.Lock() for model in self._models}
         self._scale_lock = asyncio.Lock()
-        self._cached_node_host: str | None = None
         self._ready_until: dict[str, float] = {}
 
     @classmethod
@@ -350,23 +350,29 @@ class NemoClawVLLMRuntime:
     async def _resolve_node_host(self) -> str:
         if self._node_host.lower() != "auto":
             return self._node_host
-        if self._cached_node_host:
-            return self._cached_node_host
+        # Docker may change the address after a restart. Inspect on each request;
+        # never cache an invalid or stale address for the server's lifetime.
         out = await self._run(
             [
                 "docker",
                 "inspect",
                 "-f",
-                "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+                '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{"\\n"}}{{end}}',
                 self._cluster_container,
             ],
             timeout_s=20,
         )
-        node_host = out.strip()
-        if not node_host:
-            raise RuntimeError(f"Could not resolve NemoClaw container IP: {self._cluster_container}")
-        self._cached_node_host = node_host
-        return node_host
+        for candidate in out.splitlines():
+            try:
+                address = ipaddress.ip_address(candidate.strip())
+            except ValueError:
+                continue
+            if not address.is_unspecified:
+                return f"[{address}]" if address.version == 6 else str(address)
+        raise RuntimeError(
+            f"Could not resolve a usable NemoClaw container IP: {self._cluster_container}. "
+            "Check that the configured container is running and attached to a network."
+        )
 
     async def _kubectl(self, *args: str, timeout_s: float) -> str:
         cmd = ["docker", "exec", self._cluster_container, "kubectl", "-n", self._namespace, *args]

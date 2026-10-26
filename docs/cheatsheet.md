@@ -42,6 +42,8 @@ bash runtime/install/bootstrap_linux.sh --install-cli
 ```
 
 Open a new terminal if the installer added `~/.local/bin` to `PATH`.
+The default install includes the PLC client in the AX4LAB server environment;
+no `--with-plc` flag or separate PLC Conda environment is needed.
 For an already installed environment, add only the command with
 `bash runtime/install/install_cli.sh`.
 
@@ -81,15 +83,46 @@ Default address: **http://127.0.0.1:7861**. Replace the host and port below if c
 | Task | Command |
 |---|---|
 | Inspect current backend state | `ax4lab backend` |
+| Edit/test API and local endpoints | Main GUI → **Connection Settings ↗** |
 | Switch to external API | `ax4lab backend openai` |
 | Switch to local vLLM | `ax4lab backend vllm` |
-| Inspect managed models | `ax4lab models` |
-| Load a configured model | `ax4lab model load <model-alias>` |
-| Unload a configured model | `ax4lab model unload <model-alias>` |
+| Inspect registered endpoints and server status | `ax4lab models` |
+| Load an endpoint's configured managed server | `ax4lab model load <endpoint-id>` |
+| Unload an endpoint's configured managed server | `ax4lab model unload <endpoint-id>` |
 
 Configure credentials before using an API. Backend switches affect runtime state;
 model loading consumes memory. Avoid switching or unloading during an active run.
-`ollama` and `nemoclaw` are also supported backend names.
+Runtime connections use `vllm` or `openai`; legacy backend overrides must be
+replaced explicitly rather than silently selecting another server.
+
+**Connection Settings** opens a separate window. **Current Mode** shows the
+existing model and API-key controls; **Load Current Mode** refreshes their state.
+In **API Connection** or **Local LLM Connection**, use **Add Endpoint** to enter a
+unique endpoint ID, label, API base URL and served model ID manually. Add an optional
+token and set vision capability where supported. **Save Endpoint** stores the
+registration; **Edit** keeps its ID stable. Identical served model IDs can belong
+to different endpoints without sharing their address or token.
+
+Assign **Orchestrator** and **Worker / vision** to endpoint IDs, choose optional
+fallback endpoint IDs, then **Save & Apply**. **Test Connection** checks the selected
+role's endpoint only. These settings survive restart; saving and testing require an
+idle runtime and do not start an experiment or load a model. **Remove** unregisters
+only, after assigned roles/fallbacks are replaced; it does not stop a server or delete files.
+
+Choose a **Server management target** only for the configured server AX4LAB should
+control. Its Current Mode card retains **Loading / Unloading**. An external endpoint
+without a management target is marked **Registered**; start/stop its server on its host.
+
+For another PC's model service, use its reachable `http(s)://host:port/v1`
+address, not this PC's `localhost`. AX4LAB does not need that host's model files.
+See [remote endpoint setup](gui/gui.md#connect-a-model-server-on-another-machine)
+for role assignment, routing and connection checks.
+
+**First-use check:** a registered API key must also be enabled with **API Key →
+Loading**. For local inference, the model service must be running and the models
+loaded. `doctor --core-only` is offline, not an inference test. Verify a short
+Live GUI reply before approving an experiment; unload the API key when checking
+the local path. See the [inference checks](../runtime/install/README.md#verify-inference-before-the-first-experiment).
 
 ## Run control
 

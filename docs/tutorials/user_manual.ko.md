@@ -43,6 +43,37 @@ Linux 체크아웃 최상위에서 `bash runtime/install/run_local.sh`를 실행
 
 ## Exercise 1 — 올바른 워크스페이스 찾기
 
+### 모델을 사용하는 기능 실행 전
+
+Main의 **Connection Settings ↗**에서 **Local LLM Connection** 또는
+**API Connection**을 선택하고 **Add Endpoint**를 누릅니다. 고유한 엔드포인트 ID,
+표시 이름, 접속 가능한 API 기본 주소, 서버가 받는 **Served model ID**를 직접 입력합니다.
+필요하면 토큰을 넣고, 이미지 입력을 지원하는 경우 **Supports vision input**을 선택한 뒤
+**Save Endpoint**로 등록합니다. 같은 모델 ID라도 주소가 다르면 별도의 엔드포인트로 등록할 수 있습니다.
+
+로컬 엔드포인트의 **Server management target**은 AX4LAB이 시작·중지할
+설정된 서버에만 연결합니다. 이 경우 **Current Mode**의 **Loading / Unloading**을
+계속 사용합니다. 관리 대상을 지정하지 않은 외부 서버는 **Registered**로 표시되며,
+서버가 있는 PC에서 직접 시작·중지합니다. 엔드포인트 등록 자체는 모델을 로드하거나 내려받지 않습니다.
+
+오케스트레이터·워커 역할에는 모델 이름 대신 엔드포인트 ID를 선택합니다.
+이전 fallback 엔드포인트도 교체하거나 비운 뒤 **Save & Apply**로 저장하고 각 역할을 테스트합니다.
+**Edit**는 기존 ID를 유지하며, **Remove**는 역할과 fallback을 다른 엔드포인트로 바꾼 후에만
+가능합니다. 등록을 제거해도 모델 파일은 삭제되지 않고 서버도 중지되지 않습니다.
+`ax4lab backend vllm`을 선택하고 로컬 엔드포인트를 우선 사용하려면
+**API Key → Unloading**으로 API 우선 경로를 해제합니다. API를 사용할 때는
+**API Key → Loading**을 활성화하고, 공용 키는 대화상자에 표시된 주소용으로만 저장합니다.
+엔드포인트별 토큰은 Add/Edit에서 입력할 수 있습니다.
+
+모델 서버는 다른 PC에 있어도 됩니다. 모델 파일을 AX4LAB PC로 복사할 필요는 없으며,
+브라우저가 아닌 **AX4LAB 서버에서 접속할 수 있는 주소**를 사용합니다.
+다른 PC라면 `localhost` 대신 해당 PC의 접속 가능한 주소를 넣습니다.
+비전 에이전트용 워커는 이미지 입력도 지원해야 합니다. 연결 테스트는 짧은 텍스트
+응답만 확인하며 실험이나 장비를 실행하지 않습니다.
+자세한 조건과 오류별 확인 사항은 [원격 엔드포인트 연결 안내](../gui/gui.md#connect-a-model-server-on-another-machine)를 봅니다.
+
+### 워크스페이스 이동
+
 **목표:** 설정 화면과 그 설정을 사용하는 실험 런을 구분합니다.
 
 1. Main에서 **Device Workspaces**로 스크롤합니다.
@@ -152,6 +183,13 @@ Linux 체크아웃 최상위에서 `bash runtime/install/run_local.sh`를 실행
 **목표:** 실행 승인 전에 실제 대상 화면과 장비 순서를 확인합니다.
 
 1. **Windows Automation**에서 브릿지·worker 연결을 확인합니다.
+   다른 UTM을 추가하려면 **Profile name**에 이름을 입력하고 **New Profile**을 누르거나 Enter를 누릅니다.
+   아래 패널은 새 장비의 설정으로 전환됩니다. 해당 Worker를 페어링한 뒤
+   **Profile & Worker → Apply**로 다음 실행에 사용할 조합을 저장합니다.
+   프로파일 선택만으로 실행 중인 실험의 장비가 바뀌거나 장비가 작동하지는 않습니다.
+   **Delete Profile**은 확인창에서 승인해야 사용자 프로파일을 목록에서 삭제합니다.
+   기본·적용 중인 프로파일은 삭제할 수 없으며, 런이나 장비 작업 중에도 삭제가 차단됩니다.
+   저장된 설정과 과거 실험 산출물은 보존합니다.
 2. 수신 화면이 로그인·업데이트·다른 창이 아닌 의도한 UTM 앱인지 확인합니다.
    장비 운영자와 조율합니다.
 3. 사용할 Skills와 증거를 읽습니다. 화면을 채우려는 목적으로 실행하지 않습니다.

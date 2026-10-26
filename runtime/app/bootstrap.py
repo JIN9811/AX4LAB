@@ -39,6 +39,7 @@ from app.controller import ControllerDeps, MainController
 from backends.mock_llm import MockLLMBackend
 from backends.llm_lease import LLMLeaseCoordinator
 from backends.model_router import ModelRouter
+from backends.endpoint_routes import endpoint_ref, normalize_roles, resolve_endpoint
 from backends.nemoclaw_client import NemoClawBackend
 from backends.nemoclaw_vllm_runtime import NemoClawVLLMRuntime
 from backends.ollama_client import OllamaBackend
@@ -90,30 +91,65 @@ def _env_flag(name: str, default: bool) -> bool:
 
 
 def _apply_model_env_overrides(models_cfg: dict[str, Any], *, backend_name: str = "") -> dict[str, Any]:
-    cfg = dict(models_cfg)
+    cfg = normalize_roles(models_cfg)
     models = dict(cfg.get("models", {}))
-    for role in ("orchestrator", "e4b"):
-        models[role] = dict(models.get(role, {}))
-
-    prefix = f"AUTONOMOUS_{backend_name.upper()}_" if backend_name else ""
-    override_map = {
-        "orchestrator": os.getenv(f"{prefix}ORCHESTRATOR_MODEL") or os.getenv("AUTONOMOUS_ORCHESTRATOR_MODEL"),
-        "e4b": os.getenv(f"{prefix}E4B_MODEL") or os.getenv("AUTONOMOUS_E4B_MODEL"),
-    }
-    for role, value in override_map.items():
+    prefix = f"AUTONOMOUS_{backend_name.upper()}_" if backend_name else "AUTONOMOUS_"
+    # Explicit per-backend routes own their aliases. A legacy Ollama model in
+    # .env must not replace the configured vLLM/OpenAI served model.
+    legacy_defaults = backend_name not in cfg.get("backend_models", {})
+    for role in ("orchestrator", "worker"):
+        endpoint = os.getenv(f"{prefix}{role.upper()}_ENDPOINT") or (
+            os.getenv(f"AUTONOMOUS_{role.upper()}_ENDPOINT") if legacy_defaults else None
+        )
+        value = os.getenv(f"{prefix}{role.upper()}_MODEL") or (
+            os.getenv(f"AUTONOMOUS_{role.upper()}_MODEL") if legacy_defaults else None
+        )
+        if endpoint and endpoint.strip():
+            value = endpoint_ref(endpoint.strip().removeprefix("endpoint:"))
         if value:
-            models[role]["primary"] = value
+            models.setdefault(role, {})["primary"] = value.strip()
     cfg["models"] = models
     return cfg
 
 
 def _models_cfg_for_backend(models_cfg: dict[str, Any], backend_name: str) -> dict[str, Any]:
     """Build a model-router config for one inference backend branch."""
-    cfg = dict(models_cfg)
-    backend_models = dict(models_cfg.get("backend_models", {}))
+    cfg = normalize_roles(models_cfg)
+    backend_models = dict(cfg.get("backend_models", {}))
     if backend_name in backend_models:
         cfg["models"] = dict(backend_models[backend_name])
     return _apply_model_env_overrides(cfg, backend_name=backend_name)
+
+
+def _configured_endpoints(cfg: dict[str, Any], provider: str) -> dict[str, dict[str, Any]]:
+    """Validate deployment endpoint records before handing them to a client."""
+    from app.llm_connections import EndpointRecord
+
+    connection_cfg = cfg.get("system", {}).get("llm_connections", cfg.get("llm_connections", {}))
+    records = connection_cfg.get("endpoints", {})
+    if not isinstance(records, dict):
+        raise ValueError("Configured endpoints must be an identity-keyed mapping.")
+    endpoints = {}
+    for ident, raw in records.items():
+        record = EndpointRecord.model_validate(raw).model_dump()
+        if record["id"] != ident:
+            raise ValueError("Configured endpoint identity does not match its mapping key.")
+        if record["provider"] == provider:
+            endpoints[ident] = record
+    return endpoints
+
+
+def _bind_model_endpoints(models_cfg: dict[str, Any], backend: Any) -> dict[str, Any]:
+    """Resolve compatible concrete environment values to registered identities."""
+    cfg = deepcopy(models_cfg)
+    if not hasattr(backend, "_endpoint_routes"):
+        return cfg
+    for role in cfg.get("models", {}).values():
+        for key in ("primary", "fallback"):
+            if role.get(key):
+                endpoint = resolve_endpoint(backend, str(role[key]))
+                role[key] = endpoint_ref(endpoint["id"])
+    return cfg
 
 
 def _build_backend(
@@ -124,7 +160,7 @@ def _build_backend(
 ) -> OpenAIBackend | OllamaBackend | NemoClawBackend | VLLMBackend:
     if backend_name == "openai":
         openai_cfg = cfg.get("system", {}).get("openai", cfg.get("openai", {}))
-        return OpenAIBackend(
+        backend = OpenAIBackend(
             base_url=str(
                 os.getenv("OPENAI_BASE_URL", openai_cfg.get("base_url", "https://api.openai.com/v1"))
             ),
@@ -136,6 +172,8 @@ def _build_backend(
                 os.getenv("OPENAI_REASONING_EFFORT", openai_cfg.get("reasoning_effort", ""))
             ),
         )
+        backend._endpoint_routes = _configured_endpoints(cfg, backend_name)
+        return backend
     if backend_name == "nemoclaw":
         nemoclaw_cfg = cfg.get("system", {}).get("nemoclaw", cfg.get("nemoclaw", {}))
         return NemoClawBackend(
@@ -150,13 +188,21 @@ def _build_backend(
         )
     if backend_name == "vllm":
         vllm_cfg = cfg.get("system", {}).get("vllm", cfg.get("vllm", {}))
-        return VLLMBackend(
+        backend = VLLMBackend(
             base_url=str(os.getenv("VLLM_BASE_URL", vllm_cfg.get("base_url", "http://127.0.0.1:8000/v1"))),
             timeout_s=float(os.getenv("VLLM_TIMEOUT_S", vllm_cfg.get("timeout_seconds", 300))),
             api_key=str(os.getenv("VLLM_API_KEY", vllm_cfg.get("api_key", "EMPTY"))),
             model_base_urls=dict(vllm_cfg.get("model_base_urls", {})),
             nemoclaw_runtime=NemoClawVLLMRuntime.from_config(vllm_cfg.get("nemoclaw_k8s", {})),
         )
+        backend._endpoint_routes = _configured_endpoints(cfg, backend_name)
+        for record in backend._endpoint_routes.values():
+            target = record["management_id"]
+            # API-only installations may retain local configuration while its
+            # manager is disabled. Only an enabled manager can validate targets.
+            if target and backend._nemoclaw_runtime is not None and target not in backend._nemoclaw_runtime._models:
+                raise ValueError(f"Unknown endpoint management target: {target}")
+        return backend
     ollama_cfg = cfg.get("system", {}).get("ollama", cfg.get("ollama", {}))
     ollama_timeout_s = float(os.getenv("OLLAMA_TIMEOUT_S", ollama_cfg.get("timeout_seconds", 300)))
     return OllamaBackend(
@@ -172,21 +218,22 @@ def _build_runtime_profile(
     backend_cfg: dict[str, Any],
     models_cfg: dict[str, Any],
     router: ModelRouter,
+    endpoints: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Assemble backend/model metadata for GUI status panels."""
     labels = {
         "openai": "OpenAI API",
-        "nemoclaw": "Ollama / NemoClaw",
+        "nemoclaw": "Ollama",
         "ollama": "Ollama",
-        "vllm": "NemoClaw / vLLM",
+        "vllm": "vLLM",
     }
     role_routes = {
         "orchestrator": "orchestrator_plan",
-        "e4b": "design_reasoning",
+        "worker": "design_reasoning",
     }
     selected_models: dict[str, dict[str, Any]] = {}
     role_capabilities = (
-        models_cfg.get("role_capabilities")
+        normalize_roles(models_cfg).get("role_capabilities")
         if isinstance(models_cfg.get("role_capabilities"), dict)
         else {}
     )
@@ -197,6 +244,9 @@ def _build_runtime_profile(
             if isinstance(role_capabilities.get(role), dict)
             else {}
         )
+        if selection.primary.startswith("endpoint:"):
+            endpoint = (endpoints or {}).get(selection.primary.removeprefix("endpoint:"), {})
+            raw_capabilities = endpoint.get("capabilities", {})
         selected_models[role] = {
             "task_type": task_type,
             "primary": selection.primary,
@@ -280,7 +330,10 @@ def load_runtime(*, paths: RuntimePaths | None = None) -> MainController:
         "AUTONOMOUS_USE_REAL_LLM_IN_TEST",
         bool(system_cfg.get("force_real_llm_in_test", True)),
     )
-    models_by_backend = {name: _models_cfg_for_backend(base_models_cfg, name) for name in SUPPORTED_BACKENDS}
+    models_by_backend = {
+        name: _bind_model_endpoints(_models_cfg_for_backend(base_models_cfg, name), backend_registry[name])
+        for name in SUPPORTED_BACKENDS
+    }
     router_registry = {name: ModelRouter(models_by_backend[name]) for name in SUPPORTED_BACKENDS}
     router = router_registry[backend_name]
     backend_cfg_by_name = {
@@ -295,6 +348,7 @@ def load_runtime(*, paths: RuntimePaths | None = None) -> MainController:
             backend_cfg=backend_cfg_by_name.get(name, {}),
             models_cfg=models_by_backend[name],
             router=router_registry[name],
+            endpoints=getattr(backend_registry[name], "_endpoint_routes", None),
         )
         for name in SUPPORTED_BACKENDS
     }

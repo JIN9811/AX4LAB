@@ -70,7 +70,7 @@ Usage:
   ax4lab doctor [--core-only] [--hardware] [--json]
   ax4lab status
   ax4lab events
-  ax4lab backend [vllm|nemoclaw|ollama|openai]
+  ax4lab backend [vllm|openai]
   ax4lab graphs
   ax4lab graph show|validate|compile|dry-run|gate|versions <graph-id>
   ax4lab graph version <graph-id> <version-id>
@@ -82,7 +82,7 @@ Usage:
   ax4lab run pause|resume|stop|safe-stop
   ax4lab gpu clear
   ax4lab models
-  ax4lab model load|unload <e4b|31b|model-alias>
+  ax4lab model load|unload <endpoint-id>
   ax4lab modules
   ax4lab knowledge graph health|import|query|neo4j-start|neo4j-stop|print-env [options]
   ax4lab knowledge graphify-scan [options]
@@ -104,7 +104,7 @@ Commands:
   doctor      Run non-actuating fresh-install diagnostics for Python deps, CLI binding, ignored secrets, slicers, LeRobot, RealSense, and model config.
   status      Print /api/state.
   events      Print recent structured events.
-  backend     Show current state, or switch inference backend when an argument is given.
+  backend     Show current state, or select the vllm/local or openai/API endpoint branch.
   graphs      List Runtime IDE graph configs from /api/graphs.
   graph show  Print one active graph payload.
   graph validate
@@ -126,8 +126,8 @@ Commands:
   run safe-stop
               Request safe stop.
   gpu clear   Run the same GPU Clear action as the GUI.
-  models      Print managed NemoClaw/vLLM model status.
-  model load  Load one managed vLLM model.
+  models      Print registered local endpoint loading status.
+  model load  Load one managed local endpoint (for example, local-main).
   model unload
               Unload one managed vLLM model.
   modules     List Runtime IDE module catalog entries.
@@ -332,14 +332,6 @@ print("Stopped AX4LAB GUI server process(es): " + ", ".join(str(pid) for pid in 
 '
 }
 
-model_alias() {
-  case "\${1}" in
-    orchestrator|e4b) printf '%s\n' "gemma4:e4b-it-nvfp4" ;;
-    31b) printf '%s\n' "gemma4:31b" ;;
-    *) printf '%s\n' "\${1}" ;;
-  esac
-}
-
 json_backend() {
   local py="\$(require_python)"
   ATR_BACKEND_VALUE="\${1}" "\${py}" -c 'import json, os; print(json.dumps({"backend": os.environ["ATR_BACKEND_VALUE"]}))'
@@ -347,7 +339,7 @@ json_backend() {
 
 json_model() {
   local py="\$(require_python)"
-  ATR_MODEL_VALUE="\${1}" "\${py}" -c 'import json, os; print(json.dumps({"model": os.environ["ATR_MODEL_VALUE"]}))'
+  ATR_ENDPOINT_VALUE="\${1}" "\${py}" -c 'import json, os; print(json.dumps({"endpoint_id": os.environ["ATR_ENDPOINT_VALUE"]}))'
 }
 
 json_module_create() {
@@ -461,6 +453,10 @@ case "\${1:-}" in
     if [[ "\$#" -eq 1 ]]; then
       api_get "/api/state"
     elif [[ "\$#" -eq 2 ]]; then
+      case "\${2}" in
+        vllm|openai) ;;
+        *) echo "Runtime backend must be vllm or openai." >&2; exit 2 ;;
+      esac
       api_post "/api/runtime/backend" "\$(json_backend "\${2}")"
     else
       usage
@@ -600,11 +596,11 @@ case "\${1:-}" in
     ;;
   model)
     if [[ "\${2:-}" == "load" && -n "\${3:-}" && "\$#" -eq 3 ]]; then
-      api_post "/api/runtime/models/load" "\$(json_model "\$(model_alias "\${3}")")"
+      api_post "/api/runtime/models/load" "\$(json_model "\${3}")"
       exit 0
     fi
     if [[ "\${2:-}" == "unload" && -n "\${3:-}" && "\$#" -eq 3 ]]; then
-      api_post "/api/runtime/models/unload" "\$(json_model "\$(model_alias "\${3}")")"
+      api_post "/api/runtime/models/unload" "\$(json_model "\${3}")"
       exit 0
     fi
     ;;

@@ -766,7 +766,8 @@ function renderConfigSummary(modulePayload = activeModulePayload) {
         <div class="runtime-module-card-title"><strong>LLM Runtime</strong><small>backend/model override</small></div>
         <label class="runtime-handler-select-label">Backend
           <select id="mm-config-llm-backend" class="text-input">
-            ${["", "vllm", "ollama", "nemoclaw", "mock"].map((item) => `<option value="${item}"${item === (llm.backend || "") ? " selected" : ""}>${item || "inherit"}</option>`).join("")}
+            ${["", "openai", "vllm"].map((item) => `<option value="${item}"${item === (llm.backend || "") ? " selected" : ""}>${item || "inherit"}</option>`).join("")}
+            ${llm.backend && !["openai", "vllm"].includes(llm.backend) ? `<option value="${escapeHtml(llm.backend)}" selected disabled>Unsupported saved backend: ${escapeHtml(llm.backend)}</option>` : ""}
           </select>
         </label>
         <label class="runtime-handler-select-label">Model
@@ -1488,7 +1489,7 @@ async function createModule() {
   const moduleId = designerModuleIdInput.value.trim();
   const label = designerLabelInput.value.trim();
   if (!moduleId || !label) throw new Error("Module ID and Label are required.");
-  designerStatus.textContent = "Creating module with Gemma 31B transform...";
+  designerStatus.textContent = "Creating module with the configured module-designer endpoint...";
   const sourceText = await file.text();
   const result = await requestJson("/api/modules", {
     method: "POST",
@@ -1502,7 +1503,6 @@ async function createModule() {
       source_text: sourceText,
       notes: designerNotesInput.value.trim(),
       transform_with_llm: true,
-      transform_model: "gemma4:31b",
     }),
   });
   if (!result.ok) {
