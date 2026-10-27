@@ -853,7 +853,8 @@ def test_recording_import_start_returns_persistent_background_job(monkeypatch, t
     assert restored.json()["job"]["skill_id"] == "equipment_demonstration"
 
 
-def test_recording_import_background_job_completes_real_transfer_build_and_validation(monkeypatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("needs_review", [False, True])
+def test_recording_import_background_job_completes_real_transfer_build_and_validation(monkeypatch, tmp_path: Path, needs_review) -> None:
     _client(monkeypatch, tmp_path)
     recording = _recording()
     calls: list[dict] = []
@@ -875,7 +876,7 @@ def test_recording_import_background_job_completes_real_transfer_build_and_valid
                         "step_id": step["step_id"],
                         "label": f"Reviewed {step['label']}",
                         "confidence": 0.97,
-                        "review_required": False,
+                        "review_required": needs_review,
                     }
                     for step in package["workflow"]["steps"]
                 ]
@@ -901,8 +902,14 @@ def test_recording_import_background_job_completes_real_transfer_build_and_valid
     assert completed["stage"] == "COMPLETED"
     assert completed["progress"] == 100
     assert completed["result"]["manifest"]["skill_id"] == "equipment_demonstration"
-    assert completed["result"]["manifest"]["lifecycle"] == "annotated"
-    assert completed["result"]["annotations"]["status"] == "reviewed"
+    assert completed["result"]["manifest"]["lifecycle"] == ("review_required" if needs_review else "annotated")
+    assert completed["result"]["annotations"]["status"] == ("review_required" if needs_review else "reviewed")
+    assert completed["result"]["review_required"] is needs_review
+    runtime = completed["result"]["equipment_runtime_execution"]
+    assert runtime["handoff"]["status"] == ("skill_review_required" if needs_review else "skill_ready_for_compile")
+    assert runtime["metadata"]["agentic_progress"] == ("REVIEW_REQUIRED" if needs_review else "READY")
+    if needs_review:
+        assert "review" in completed["status_text"].lower()
     assert completed["result"]["annotations"]["model_snapshot"]["model"] == "annotation-model"
     assert completed["result"]["equipment_runtime_projection"]["status"] == "verified_complete"
     assert len(annotation_calls) == 1
@@ -1569,7 +1576,9 @@ def test_selected_skill_annotation_backend_receives_pre_click_frame_and_returns_
                 }
             ],
         },
-        "annotations": {"steps": [{"step_id": "step-001"}]},
+        "annotations": {"steps": [{"step_id": "step-001", "locator": {
+            "image_candidates": [{"png_base64": "duplicate-from-prior-annotation", "sha256": "old"}],
+        }}]},
         "manifest": {"recording_evidence": {}},
         "recording": {
             "events": [
@@ -1862,7 +1871,99 @@ def test_equipment_skill_annotation_payload_backfills_missing_steps_without_chan
     assert completed["steps"][0]["label"] == "set_input_language"
     assert completed["workflow_summary"]["intent"] == "Replay the recording."
     assert fallback_count == 2
+    assert all(item["review_required"] for item in completed["steps"])
+    assert all("model_annotation_missing" in item["review_reasons"] for item in completed["steps"])
     assert workflow["steps"][0]["action"]["layout_id"] == "00000412"
+
+
+@pytest.mark.parametrize("many_events", [False, True])
+def test_model_authoring_api_samples_full_recording_and_requires_review_for_proposals(monkeypatch, tmp_path: Path, many_events) -> None:
+    client = _client(monkeypatch, tmp_path)
+    artifact_root = tmp_path / "artifacts" / "equipment"
+    artifact_root.mkdir(parents=True)
+    image = artifact_root / "source.jpg"
+    Image.new("RGB", (200, 100), "white").save(image)
+    digest = hashlib.sha256(image.read_bytes()).hexdigest()
+    recording = _recording()
+    if many_events:
+        recording["events"].extend({"kind": "key_press", "at_ms": 500 + number * 180, "key": "enter"}
+                                   for number in range(150))
+    frames = [{"frame_id": f"f-{number}", "at_ms": round(number * 1000 / 15),
+               "artifact_path": str(image), "sha256": digest, "reason": "periodic"}
+              for number in range(450)]
+    recording["time_series_evidence"] = {"fps": 15, "frames": frames, "evidence_complete": True}
+    calls = []
+
+    class Backend:
+        async def complete(self, **kwargs):
+            calls.append(kwargs)
+            prompt = json.loads(kwargs["user_prompt"])
+            if kwargs["metadata"]["task_type"] == "equipment_skill_timeline_chunk":
+                return LLMResponse(text=json.dumps({"source_frame_ids": [tile["frame_id"]
+                    for tile in prompt["chunk"]["tiles"]], "state_transitions": [], "summary": "Idle screen"}),
+                    model="vision-model")
+            return LLMResponse(text=json.dumps({"steps": [{
+                "step_id": "step-001", "confidence": 0.98, "review_required": False,
+                "intent": "Choose specimen", "target_semantics": "Specimen selector",
+                "preconditions": ["Idle"], "postconditions": ["Specimen selected"],
+                "success_evidence": ["Selected label"], "failure_evidence": ["Warning dialog"],
+                "proposed_variables": [{"name": "specimen_id", "type": "string", "recorded_value": "S1"}],
+                "locator": {"region_normalized": [0.1, 0.2, 0.3, 0.4]},
+            }]}), model="vision-model")
+
+    monkeypatch.setitem(main_module.controller._deps.agent_context.primary_backends, "vllm", Backend())
+    monkeypatch.setattr(main_module, "_equipment_skill_model_snapshot", lambda: {
+        "provider": "vllm", "model": "vision-model", "role": "e4b", "capabilities": {"vision": True}})
+    monkeypatch.setattr(main_module, "RUNTIME_PATHS", replace(main_module.RUNTIME_PATHS, artifact_root=artifact_root.parent))
+    monkeypatch.setattr(main_module, "_manual_knowledge_context", lambda *_args, **_kwargs: {
+        "schema": "manual_prompt_context.v1", "context_hash": "test", "chunks": []})
+    created = client.post("/api/equipment/skills/drafts", json={"recording": recording,
+        "skill_id": "sampled_demo", "version": "1.0.0", "target_profile": "local_program1"})
+    created.raise_for_status()
+
+    response = client.post("/api/equipment/skills/sampled_demo/1.0.0/annotate", json={"use_model": True})
+    response.raise_for_status()
+    result = response.json()
+    assert result["manifest"]["lifecycle"] == "review_required"
+    assert result["workflow"] == created.json()["workflow"]
+    saved = result["annotations"]["steps"][0]
+    assert saved["intent"] == "Choose specimen"
+    assert saved["preconditions"] == ["Idle"]
+    assert saved["proposed_variables"][0]["status"] == "proposed"
+    assert saved["locator_status"] == "proposed"
+    assert result["annotations"]["steps"][1]["review_required"] is True
+    snapshot = result["annotations"]["model_snapshot"]
+    assert snapshot["timeline_source_frame_count"] == 450
+    assert snapshot["timeline_selected_frame_count"] <= 128
+    assert snapshot["timeline_event_coverage_complete"] is (not many_events)
+    assert bool(snapshot["timeline_omitted_event_numbers"]) is many_events
+    if many_events:
+        assert all("incomplete_model_event_coverage" in step["review_reasons"]
+                   for step in result["annotations"]["steps"])
+    assert len(calls) <= 9
+    chunks = [json.loads(call["user_prompt"])["chunk"] for call in calls[:-1]]
+    assert any(tile["event"].get("kind") == "mouse_click" for chunk in chunks for tile in chunk["tiles"])
+    assert result["manifest"]["recording_evidence"]["frames"] == frames
+    assert main_module._equipment_skill_registry().get_recording("sampled_demo", "1.0.0") == recording
+    compiled = client.post("/api/equipment/skills/sampled_demo/1.0.0/compile")
+    compiled.raise_for_status()
+    blocked = client.post("/api/equipment/skills/sampled_demo/1.0.0/validate")
+    assert blocked.status_code == 400
+
+
+def test_model_payload_keeps_semantics_but_rejects_silent_action_rewrites() -> None:
+    workflow = {"steps": [{"step_id": "step-001", "action": {"action": "press", "key": "enter"}}]}
+    completed, _ = main_module._complete_equipment_annotation_payload(
+        {"steps": [{"step_id": "step-001", "intent": "Confirm", "confidence": 0.95,
+                    "review_required": False, "preconditions": ["Dialog visible"],
+                    "action": {"action": "press", "key": "delete"}}]},
+        workflow=workflow, current_annotations={"steps": []})
+    assert completed["steps"][0]["intent"] == "Confirm"
+    assert completed["steps"][0]["preconditions"] == ["Dialog visible"]
+    assert completed["steps"][0]["review_required"] is True
+    assert "model_action_change_ignored" in completed["steps"][0]["review_reasons"]
+    assert "action" not in completed["steps"][0]
+    assert workflow["steps"][0]["action"]["key"] == "enter"
 
 
 def test_selected_skill_annotation_stops_after_persisting_the_current_timeline_chunk(

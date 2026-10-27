@@ -666,7 +666,7 @@ class _RecordingMouseCapture:
                 }
             )
         else:
-            target_locator = dict(source_locator)
+            target_locator = source_locator
             target_locator["locator_id"] = f"evt-{event_number:04d}-target"
             target_locator["recorded_coordinate"] = [end_x, end_y]
             self.manager.record_event(
@@ -934,7 +934,7 @@ class RecordingOverlayController:
                     self._visible = False
                     self._error = f"{exc.__class__.__name__}: {str(exc)[:160]}"
 class RecordingFrameBuffer:
-    """Disk-backed low-rate recording timeline with a bounded recent-frame cache."""
+    """Disk timeline with separate acquisition and bounded encoding/storage work."""
 
     SCHEMA = "atr.equipment_recording_frames.v1"
     DISK_WARNING_BYTES = 2 * 1024 * 1024 * 1024
@@ -944,15 +944,31 @@ class RecordingFrameBuffer:
         self,
         *,
         screenshot_provider: Callable[[], Any],
-        fps: float = 2.0,
+        fps: float = 15.0,
         retention_sec: float = 20.0,
         max_bytes: int = 64 * 1024 * 1024,
+        queue_max_frames: int = 32,
+        queue_max_bytes: int = 128 * 1024 * 1024,
     ) -> None:
         self._screenshot_provider = screenshot_provider
-        self.fps = max(2.0, min(float(fps), 5.0))
+        self.fps = max(2.0, min(float(fps), 30.0))
         self.retention_sec = max(20.0, min(float(retention_sec), 30.0))
         self.max_bytes = max(4 * 1024 * 1024, min(int(max_bytes), 256 * 1024 * 1024))
         self._lock = threading.RLock()
+        self._capture_lock = threading.Lock()
+        self.queue_max_frames = max(1, int(queue_max_frames))
+        self.queue_max_bytes = max(1, int(queue_max_bytes))
+        self._writes: queue.Queue[Any] = queue.Queue(maxsize=self.queue_max_frames)
+        self._writer_thread: threading.Thread | None = None
+        self._writer_stop = threading.Event()
+        self._pending_write_count = 0
+        self._pending_write_bytes = 0
+        self._queue_high_water_count = 0
+        self._queue_high_water_bytes = 0
+        self._dropped_frame_count = 0
+        self._dropped_evidence_count = 0
+        self._missed_capture_intervals = 0
+        self._write_errors = 0
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._recording_id = ""
@@ -994,7 +1010,79 @@ class RecordingFrameBuffer:
             "exception_window_count": 0,
             "exception_windows": [],
             "capture_errors": 0,
+            **self._pipeline_status(),
         }
+
+    def _pipeline_status(self) -> dict[str, Any]:
+        return {
+            "queue_max_frames": self.queue_max_frames,
+            "queue_max_bytes": self.queue_max_bytes,
+            "pending_write_count": self._pending_write_count,
+            "pending_write_bytes": self._pending_write_bytes,
+            "queue_high_water_count": self._queue_high_water_count,
+            "queue_high_water_bytes": self._queue_high_water_bytes,
+            "dropped_frame_count": self._dropped_frame_count,
+            "dropped_evidence_count": self._dropped_evidence_count,
+            "missed_capture_intervals": self._missed_capture_intervals,
+            "write_errors": self._write_errors,
+        }
+
+    def _mark_error(self, exc: Exception, *, capture: bool = False) -> None:
+        with self._lock:
+            if capture:
+                self._capture_errors += 1
+            else:
+                self._write_errors += 1
+            self._last_error = f"{exc.__class__.__name__}: {str(exc)[:160]}"
+            self._writer_status = "incomplete"
+
+    def submit_write(self, operation: Callable[[], Any], *, image: Any = None,
+                     wait: bool = False, periodic: bool = False, retained_bytes: int = 0) -> bool:
+        """Reserve image memory and enqueue without waiting on encoding or disk."""
+        size = getattr(image, "size", (0, 0))
+        # Conservative RGBA accounting, including the job currently being encoded.
+        image_bytes = (int(size[0]) * int(size[1]) * 4 if isinstance(size, tuple) else 0) + retained_bytes
+        done = threading.Event()
+        result: list[bool] = []
+        with self._lock:
+            if (self._writer_thread is None or self._writer_stop.is_set()
+                    or self._pending_write_count >= self.queue_max_frames
+                    or self._pending_write_bytes + image_bytes > self.queue_max_bytes):
+                if periodic:
+                    self._dropped_frame_count += 1
+                else:
+                    self._dropped_evidence_count += 1
+                self._last_error = "recording writer queue capacity exceeded or writer stopped"
+                self._writer_status = "incomplete"
+                return False
+            self._pending_write_count += 1
+            self._pending_write_bytes += image_bytes
+            self._queue_high_water_count = max(self._queue_high_water_count, self._pending_write_count)
+            self._queue_high_water_bytes = max(self._queue_high_water_bytes, self._pending_write_bytes)
+            self._writes.put_nowait((operation, image_bytes, done, result))
+        if wait:
+            done.wait()
+            return bool(result and result[0])
+        return True
+
+    def _writer_loop(self) -> None:
+        while not self._writer_stop.is_set() or not self._writes.empty():
+            try:
+                operation, image_bytes, done, result = self._writes.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            try:
+                result.append(operation() is not False)
+            except Exception as exc:
+                self._mark_error(exc)
+                result.append(False)
+            finally:
+                operation = None  # Do not retain the previous image between jobs.
+                with self._lock:
+                    self._pending_write_count -= 1
+                    self._pending_write_bytes -= image_bytes
+                done.set()
+                self._writes.task_done()
 
     def start(self, recording_id: str, started_monotonic: float, recording_dir: Path | None = None) -> None:
         self.stop()
@@ -1014,13 +1102,23 @@ class RecordingFrameBuffer:
             self._storage_state = "healthy"
             self._disk_free_bytes = -1
             self._capture_errors = 0
+            self._write_errors = 0
+            self._dropped_frame_count = 0
+            self._dropped_evidence_count = 0
+            self._missed_capture_intervals = 0
+            self._pending_write_count = self._pending_write_bytes = 0
+            self._queue_high_water_count = self._queue_high_water_bytes = 0
             self._last_error = ""
             self._pinned_exception_windows = {}
             self._stop_event.clear()
+            self._writer_stop.clear()
             if self._recording_dir is not None:
                 (self._recording_dir / "frames" / "periodic").mkdir(parents=True, exist_ok=True)
                 self._timeline_path.parent.mkdir(parents=True, exist_ok=True)
                 self._timeline_path.write_text("", encoding="utf-8")
+        self._writer_thread = threading.Thread(target=self._writer_loop,
+                                               name="atr-recording-writer", daemon=True)
+        self._writer_thread.start()
         self._thread = threading.Thread(
             target=self._capture_loop,
             name=f"atr-recording-frames-{recording_id[-8:]}",
@@ -1028,38 +1126,66 @@ class RecordingFrameBuffer:
         )
         self._thread.start()
 
-    def stop(self) -> None:
+    def stop_capture(self) -> None:
         self._stop_event.set()
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=max(1.0, 2.0 / self.fps))
+            thread.join()
         self._thread = None
+
+    def drain(self) -> None:
+        """Wait for accepted encoding/storage jobs without holding either owner lock."""
+        self._writes.join()
+
+    def stop(self) -> None:
+        self.stop_capture()
+        self._writer_stop.set()
+        writer = self._writer_thread
+        if writer is not None and writer is not threading.current_thread():
+            writer.join()
+        self._writer_thread = None
         with self._lock:
-            if self._writer_status == "recording":
+            missing_posts = [item for item in self._pending_event_links if not item.get("post_frame_id")]
+            if missing_posts:
+                self._writer_status = "incomplete"
+                self._last_error = "one or more events have no post-action evidence"
+                for item in missing_posts:
+                    item.update(status="incomplete", failure_code="EVENT_POST_FRAME_MISSING")
+            if self._writer_status in {"recording", "warning"}:
                 self._writer_status = "stopped"
 
-    def capture_once(self) -> bool:
+    def capture_once(self, *, wait: bool = True) -> bool:
+        """Acquire now; only explicit diagnostic callers wait for persistence."""
+        with self._capture_lock:
+            return self._acquire_periodic(wait=wait)
+
+    def _acquire_periodic(self, *, wait: bool) -> bool:
         with self._lock:
             started = self._started_monotonic
             recording_dir = self._recording_dir
         if not started:
             return False
-        if recording_dir is not None and not self._check_storage_health(recording_dir):
-            return False
         try:
             image = self._screenshot_provider()
-            raw, media_type, suffix, width, height = self._encode_frame(image)
         except Exception as exc:
-            with self._lock:
-                self._capture_errors += 1
-                self._last_error = f"{exc.__class__.__name__}: {str(exc)[:160]}"
+            self._mark_error(exc, capture=True)
             return False
         captured = time.monotonic()
+        captured_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        return self.submit_write(
+            lambda: self._write_periodic(image, captured, captured_at, started),
+            image=image, wait=wait, periodic=True,
+        )
+
+    def _write_periodic(self, image: Any, captured: float, captured_at: str, started: float) -> bool:
         with self._lock:
             frame_number = self._next_frame_number
             self._next_frame_number += 1
             recording_dir = self._recording_dir
             timeline_path = self._timeline_path
+        if recording_dir is not None and not self._check_storage_health(recording_dir):
+            return False
+        raw, media_type, suffix, width, height = self._encode_frame(image)
         frame_id = f"frame-{frame_number:08d}"
         artifact_path = ""
         if recording_dir is not None and timeline_path is not None:
@@ -1071,16 +1197,15 @@ class RecordingFrameBuffer:
                 artifact_path = str(artifact)
             except Exception as exc:
                 temporary.unlink(missing_ok=True)
-                with self._lock:
-                    self._capture_errors += 1
-                    self._last_error = f"{exc.__class__.__name__}: {str(exc)[:160]}"
-                    self._writer_status = "incomplete"
+                self._mark_error(exc)
                 return False
         frame = {
             "frame_id": frame_id,
             "at_ms": max(0, int((captured - started) * 1000)),
             "captured_monotonic": captured,
-            "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "captured_at": captured_at,
+            "stored_monotonic": time.monotonic(),
+            "stored_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "media_type": media_type,
             "suffix": suffix,
             "width": width,
@@ -1091,22 +1216,18 @@ class RecordingFrameBuffer:
             "bytes": raw,
         }
         if timeline_path is not None:
-            timeline_row = {key: value for key, value in frame.items() if key not in {"bytes", "suffix", "captured_monotonic"}}
+            timeline_row = {key: value for key, value in frame.items() if key not in {"bytes", "suffix"}}
             try:
                 with timeline_path.open("a", encoding="utf-8") as handle:
                     handle.write(json.dumps(timeline_row, ensure_ascii=True, separators=(",", ":")) + "\n")
             except Exception as exc:
                 Path(artifact_path).unlink(missing_ok=True)
-                with self._lock:
-                    self._capture_errors += 1
-                    self._last_error = f"{exc.__class__.__name__}: {str(exc)[:160]}"
-                    self._writer_status = "incomplete"
+                self._mark_error(exc)
                 return False
         with self._lock:
             self._frames.append(frame)
             self._total_bytes += len(raw)
             self._persisted_frame_count += 1
-            self._persist_pending_exception_frame_locked(frame)
             cutoff = captured - self.retention_sec
             while self._frames and (
                 float(self._frames[0]["captured_monotonic"]) < cutoff or self._total_bytes > self.max_bytes
@@ -1115,9 +1236,11 @@ class RecordingFrameBuffer:
                 self._total_bytes -= len(removed["bytes"])
             start_boundary_pending = self._start_boundary_pending
             self._start_boundary_pending = False
+        self._persist_pending_exception_frame_locked(frame)
         if start_boundary_pending:
-            self._persist_boundary_image(image, "recording_start", at_ms=0)
-        self._persist_pending_event_posts(image, captured)
+            self._persist_boundary_image(image, "recording_start", at_ms=frame["at_ms"],
+                                         captured_monotonic=captured, captured_at=captured_at)
+        self._persist_pending_event_posts(image, captured, captured_at)
         return True
 
     def _check_storage_health(self, recording_dir: Path) -> bool:
@@ -1164,7 +1287,9 @@ class RecordingFrameBuffer:
         with self._lock:
             self._supplemental_frames.append(frame)
 
-    def _persist_boundary_image(self, image: Any, reason: str, *, at_ms: int) -> dict[str, Any] | None:
+    def _persist_boundary_image(self, image: Any, reason: str, *, at_ms: int,
+                                captured_monotonic: float | None = None,
+                                captured_at: str | None = None) -> dict[str, Any] | None:
         if reason not in {"recording_start", "recording_stop"}:
             raise ValueError("unsupported recording boundary")
         with self._lock:
@@ -1184,7 +1309,9 @@ class RecordingFrameBuffer:
             frame = {
                 "frame_id": frame_id,
                 "at_ms": frame_at_ms,
-                "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "captured_at": captured_at or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "captured_monotonic": captured_monotonic,
+                "stored_monotonic": time.monotonic(),
                 "media_type": "image/png",
                 "width": width,
                 "height": height,
@@ -1195,10 +1322,7 @@ class RecordingFrameBuffer:
             self._append_supplemental_frame(frame)
             return frame
         except Exception as exc:
-            with self._lock:
-                self._capture_errors += 1
-                self._last_error = f"{exc.__class__.__name__}: {str(exc)[:160]}"
-                self._writer_status = "incomplete"
+            self._mark_error(exc)
             return None
 
     def capture_boundary_frame(self, reason: str, *, at_ms: int | None = None) -> dict[str, Any] | None:
@@ -1215,8 +1339,18 @@ class RecordingFrameBuffer:
                 self._last_error = f"{exc.__class__.__name__}: {str(exc)[:160]}"
                 self._writer_status = "incomplete"
             return None
-        frame_at_ms = max(0, int(at_ms if at_ms is not None else (time.monotonic() - started) * 1000))
-        return self._persist_boundary_image(image, reason, at_ms=frame_at_ms)
+        captured = time.monotonic()
+        frame_at_ms = max(0, int((captured - started) * 1000))
+        captured_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        result: dict[str, Any] = {}
+        def persist() -> bool:
+            frame = self._persist_boundary_image(image, reason, at_ms=frame_at_ms,
+                                                 captured_monotonic=captured, captured_at=captured_at)
+            if frame:
+                result.update(frame)
+            return frame is not None
+        self.submit_write(persist, image=image)
+        return result
 
     def persist_event_frame(
         self,
@@ -1226,23 +1360,46 @@ class RecordingFrameBuffer:
         event_at_ms: int,
         max_delta_ms: int = 1000,
     ) -> dict[str, Any] | None:
-        """Persist an exact event PNG and link it to pre/post source frames."""
+        """Retain acquired event pixels; encode/write off the input callback."""
+        linkage: dict[str, Any] = {
+            "event_number": int(event_number), "event_at_ms": int(event_at_ms),
+            "at_ms": int(event_at_ms), "status": "pending",
+            "pre_frame_id": "", "pre_frame_sha256": "",
+            "event_frame_id": "", "event_frame_sha256": "", "event_artifact_path": "",
+            "post_frame_id": "", "post_frame_sha256": "", "post_artifact_path": "",
+        }
+        try:
+            image = self._screenshot_provider()
+        except Exception as exc:
+            self._mark_error(exc, capture=True)
+            linkage.update(status="failed", failure_code="EVENT_CAPTURE_FAILED")
+            return linkage
+        captured = time.monotonic()
+        captured_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        def persist() -> None:
+            try:
+                self._write_event_frame(recording_dir, image=image, captured=captured,
+                                        captured_at=captured_at, linkage=linkage, max_delta_ms=max_delta_ms)
+            except Exception:
+                linkage.update(status="failed", failure_code="EVENT_WRITE_FAILED")
+                raise
+        if not self.submit_write(persist, image=image):
+            linkage.update(status="failed", failure_code="RECORDING_QUEUE_OVERLOAD")
+        return linkage
+
+    def _write_event_frame(self, recording_dir: Path, *, image: Any, captured: float,
+                           captured_at: str, linkage: dict[str, Any], max_delta_ms: int) -> None:
+        event_number = int(linkage["event_number"])
+        event_at_ms = int(linkage["event_at_ms"])
         with self._lock:
             frames = list(self._frames)
         pre_candidates = [item for item in frames if int(item["at_ms"]) <= int(event_at_ms)]
         nearest = max(pre_candidates, key=lambda item: int(item["at_ms"])) if pre_candidates else None
-        if nearest is None and frames:
-            nearest = min(frames, key=lambda item: abs(int(item["at_ms"]) - event_at_ms))
         if nearest is None or abs(int(nearest["at_ms"]) - event_at_ms) > max(100, int(max_delta_ms)):
-            return None
-        try:
-            image = self._screenshot_provider()
-            raw, width, height = self._encode_png(image)
-        except Exception as exc:
-            with self._lock:
-                self._capture_errors += 1
-                self._last_error = f"{exc.__class__.__name__}: {str(exc)[:160]}"
-            return None
+            nearest = None
+            self._mark_error(RuntimeError("event has no recent pre-action frame"))
+        raw, width, height = self._encode_png(image)
+        captured_ms = max(0, int((captured - self._started_monotonic) * 1000))
         output_dir = recording_dir / "frames" / "events"
         output_dir.mkdir(parents=True, exist_ok=True)
         event_frame_id = f"event-{event_number:04d}"
@@ -1250,8 +1407,11 @@ class RecordingFrameBuffer:
         path.write_bytes(raw)
         event_frame = {
             "frame_id": event_frame_id,
-            "at_ms": int(event_at_ms),
-            "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "at_ms": captured_ms,
+            "event_at_ms": event_at_ms,
+            "captured_monotonic": captured,
+            "captured_at": captured_at,
+            "stored_monotonic": time.monotonic(),
             "artifact_path": str(path),
             "sha256": hashlib.sha256(raw).hexdigest(),
             "media_type": "image/png",
@@ -1261,7 +1421,7 @@ class RecordingFrameBuffer:
             "event_number": int(event_number),
         }
         self._append_supplemental_frame(event_frame)
-        linkage = {
+        linkage.update({
             "event_number": int(event_number),
             "event_at_ms": int(event_at_ms),
             "at_ms": int(event_at_ms),
@@ -1271,20 +1431,22 @@ class RecordingFrameBuffer:
             "width": width,
             "height": height,
             "reason": "event",
-            "pre_frame_id": str(nearest["frame_id"]),
-            "pre_frame_sha256": str(nearest["sha256"]),
+            "status": "ready" if nearest else "incomplete",
+            "captured_monotonic": captured,
+            "captured_at_ms": captured_ms,
+            "pre_frame_id": str(nearest["frame_id"]) if nearest else "",
+            "pre_frame_sha256": str(nearest["sha256"]) if nearest else "",
             "event_frame_id": event_frame_id,
             "event_frame_sha256": event_frame["sha256"],
             "event_artifact_path": str(path),
             "post_frame_id": "",
             "post_frame_sha256": "",
             "post_artifact_path": "",
-        }
+        })
         with self._lock:
             self._pending_event_links.append(linkage)
-        return linkage
 
-    def _persist_pending_event_posts(self, image: Any, captured_monotonic: float) -> None:
+    def _persist_pending_event_posts(self, image: Any, captured_monotonic: float, captured_at: str) -> None:
         with self._lock:
             started = self._started_monotonic
             recording_dir = self._recording_dir
@@ -1292,12 +1454,13 @@ class RecordingFrameBuffer:
         if not pending or not started or recording_dir is None:
             return
         frame_at_ms = max(0, int((captured_monotonic - started) * 1000))
-        due = [item for item in pending if frame_at_ms > int(item.get("event_at_ms", 0))]
+        due = [item for item in pending if captured_monotonic > float(item.get("captured_monotonic", 0))]
         if not due:
             return
         try:
             raw, width, height = self._encode_png(image)
-        except Exception:
+        except Exception as exc:
+            self._mark_error(exc)
             return
         output_dir = recording_dir / "frames" / "events"
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -1310,7 +1473,9 @@ class RecordingFrameBuffer:
             frame = {
                 "frame_id": frame_id,
                 "at_ms": frame_at_ms,
-                "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "captured_at": captured_at,
+                "captured_monotonic": captured_monotonic,
+                "stored_monotonic": time.monotonic(),
                 "artifact_path": str(path),
                 "sha256": digest,
                 "media_type": "image/png",
@@ -1332,14 +1497,13 @@ class RecordingFrameBuffer:
         pre_sec: float,
         post_sec: float,
     ) -> dict[str, Any]:
-        """Persist exception-adjacent frames immediately so rolling eviction cannot remove them."""
+        """Retain exception-adjacent bytes until the writer persists them."""
         exception_id = str(exception.get("exception_id") or "exception-unknown")[:96]
         exception_at_ms = max(0, int(exception.get("at_ms", 0)))
         pre_window_ms = max(0, min(int(float(pre_sec) * 1000), int(self.retention_sec * 1000)))
         post_window_ms = max(0, min(int(float(post_sec) * 1000), int(self.retention_sec * 1000)))
         with self._lock:
             output_dir = recording_dir / "timeline" / "exception_windows" / exception_id
-            output_dir.mkdir(parents=True, exist_ok=True)
             window = {
                 "exception_id": exception_id,
                 "failure_code": str(exception.get("failure_code") or "RECORDING_EXCEPTION")[:96],
@@ -1359,18 +1523,22 @@ class RecordingFrameBuffer:
             if not candidates and self._frames:
                 candidates = [min(self._frames, key=lambda item: abs(int(item["at_ms"]) - exception_at_ms))]
             self._pinned_exception_windows[exception_id] = window
+        def persist() -> None:
             for frame in candidates:
                 self._persist_exception_frame_locked(window, frame)
-            return {
-                "exception_id": exception_id,
-                "pre_window_ms": pre_window_ms,
-                "post_window_ms": post_window_ms,
-                "pinned_frame_count": len(window["frames"]),
-            }
+        accepted = self.submit_write(persist, retained_bytes=sum(len(frame["bytes"]) for frame in candidates))
+        return {
+            "exception_id": exception_id,
+            "pre_window_ms": pre_window_ms,
+            "post_window_ms": post_window_ms,
+            "pinned_frame_count": len(candidates) if accepted else 0,
+        }
 
     def _persist_pending_exception_frame_locked(self, frame: dict[str, Any]) -> None:
         frame_at_ms = int(frame["at_ms"])
-        for window in self._pinned_exception_windows.values():
+        with self._lock:
+            windows = list(self._pinned_exception_windows.values())
+        for window in windows:
             lower = int(window["at_ms"]) - int(window["pre_window_ms"])
             if lower <= frame_at_ms <= int(window["end_at_ms"]):
                 self._persist_exception_frame_locked(window, frame)
@@ -1381,6 +1549,7 @@ class RecordingFrameBuffer:
         seen_at_ms = window["seen_at_ms"]
         if frame_at_ms in seen_at_ms:
             return
+        Path(window["output_dir"]).mkdir(parents=True, exist_ok=True)
         path = Path(window["output_dir"]) / f"frame-{frame_at_ms:08d}ms{frame['suffix']}"
         path.write_bytes(frame["bytes"])
         seen_at_ms.add(frame_at_ms)
@@ -1661,11 +1830,15 @@ class RecordingFrameBuffer:
         interval = 1.0 / self.fps
         next_capture = time.monotonic() + interval
         while not self._stop_event.wait(max(0.0, next_capture - time.monotonic())):
-            self.capture_once()
+            self.capture_once(wait=False)
             next_capture += interval
             now = time.monotonic()
             if next_capture <= now:
                 missed_intervals = int((now - next_capture) // interval) + 1
+                with self._lock:
+                    self._missed_capture_intervals += missed_intervals
+                    self._writer_status = "incomplete"
+                    self._last_error = "screen acquisition missed scheduled capture intervals"
                 next_capture += missed_intervals * interval
 
     @staticmethod
@@ -1697,7 +1870,7 @@ class RecordingManager:
         screenshot_provider: Callable[[], Any] | None = None,
         input_language_provider: Callable[[], dict[str, str]] | None = None,
         overlay_controller: Any | None = None,
-        frame_buffer_fps: float = 2.0,
+        frame_buffer_fps: float = 15.0,
         frame_buffer_retention_sec: float = 20.0,
         frame_buffer_max_bytes: int = 64 * 1024 * 1024,
         exception_pre_sec: float = 5.0,
@@ -1712,6 +1885,10 @@ class RecordingManager:
         if callable(set_stop_callback):
             set_stop_callback(self.stop)
         self._lock = threading.RLock()
+        self._stop_lock = threading.Lock()
+        self._persist_pending = False
+        self._stopping = False
+        self._mask_regions: list[dict[str, int]] = []
         self._active: dict[str, Any] | None = None
         self._listeners: list[Any] = []
         self._started_monotonic = 0.0
@@ -1764,7 +1941,7 @@ class RecordingManager:
     def record_keyboard_event(self, event: dict[str, Any]) -> bool:
         state = self._input_language_state()
         with self._lock:
-            if self._active is None:
+            if self._active is None or self._stopping:
                 return False
             if self._last_input_language != state:
                 at_ms = max(0, int((time.monotonic() - self._started_monotonic) * 1000))
@@ -1806,8 +1983,9 @@ class RecordingManager:
         return normalized
 
     def _apply_mask_regions(self, image: Any) -> Any:
-        with self._lock:
-            regions = list(self._active.get("mask_regions", [])) if self._active is not None else []
+        # Replaced atomically at start; capture must not need the manager lock
+        # while a listener-start failure or stop is joining the producer.
+        regions = self._mask_regions
         if not regions:
             return image
         frame = image.copy() if callable(getattr(image, "copy", None)) else image
@@ -1839,7 +2017,7 @@ class RecordingManager:
         """Retain one recent pre-action frame without persisting pointer-motion screenshots."""
         now = time.monotonic()
         with self._lock:
-            if self._active is None:
+            if self._active is None or self._stopping:
                 return False
             if self._last_pointer_frame_monotonic and now - self._last_pointer_frame_monotonic < 0.05:
                 return False
@@ -1848,7 +2026,7 @@ class RecordingManager:
         except Exception:
             return False
         with self._lock:
-            if self._active is None:
+            if self._active is None or self._stopping:
                 return False
             self._last_pointer_frame = frame
             self._last_pointer_frame_monotonic = time.monotonic()
@@ -1882,7 +2060,7 @@ class RecordingManager:
             return None
 
     def capture_visual_locator(self, x: int, y: int, *, locator_id: str, frame: Any | None = None) -> dict[str, Any]:
-        """Capture portable pointer-target crops and local full-frame evidence."""
+        """Retain pre-action pixels, then encode locator evidence on the writer."""
         coordinate = [int(x), int(y)]
         unavailable = {
             "locator_id": str(locator_id)[:96],
@@ -1892,7 +2070,7 @@ class RecordingManager:
             "failure_code": "VISUAL_LOCATOR_CAPTURE_FAILED",
         }
         with self._lock:
-            if self._active is None:
+            if self._active is None or self._stopping:
                 return unavailable
             policy = self._active.get("visual_locator_policy") if isinstance(self._active.get("visual_locator_policy"), dict) else {}
             if str(policy.get("mode") or "") != "image_first":
@@ -1908,15 +2086,24 @@ class RecordingManager:
                 if isinstance(item, dict) and item.get("kind") in {"mouse_click", "mouse_drag"}
             )
             if pointer_count >= 200:
+                self._frame_buffer._mark_error(RuntimeError("required visual locator event limit exceeded"))
                 return {
                     **unavailable,
                     "failure_code": "VISUAL_LOCATOR_EVENT_LIMIT",
                     "detail": "image locator limit is 200 pointer events",
                 }
+            directory = self._path(str(self._active["recording_id"])).parent / "visual_evidence"
+        try:
+            frame = frame if frame is not None else self._screenshot()
+        except Exception as exc:
+            self._frame_buffer._mark_error(exc, capture=True)
+            unavailable["detail"] = f"{exc.__class__.__name__}: {str(exc)[:160]}"
+            return unavailable
+        result = {**unavailable, "status": "pending", "failure_code": None}
+
+        def persist() -> None:
             try:
-                frame = frame if frame is not None else self._screenshot()
                 size = tuple(int(value) for value in frame.size)
-                directory = self._path(str(self._active["recording_id"])).parent / "visual_evidence"
                 directory.mkdir(parents=True, exist_ok=True)
                 full_path = directory / f"{_safe_segment(locator_id, 'locator')}-frame.png"
                 frame.save(full_path, format="PNG")
@@ -1936,29 +2123,24 @@ class RecordingManager:
                     if self._visual_locator_bytes + capture_bytes + len(raw) > 32 * 1024 * 1024:
                         raise ValueError("recording visual locator payload exceeds 32 MiB")
                     capture_bytes += len(raw)
-                    candidates.append(
-                        {
-                            "kind": kind,
-                            "png_base64": base64.b64encode(raw).decode("ascii"),
-                            "sha256": hashlib.sha256(raw).hexdigest(),
-                            "width": box[2] - box[0],
-                            "height": box[3] - box[1],
-                            "crop_origin": [box[0], box[1]],
-                            "confidence": confidence,
-                        }
-                    )
+                    candidates.append({
+                        "kind": kind, "png_base64": base64.b64encode(raw).decode("ascii"),
+                        "sha256": hashlib.sha256(raw).hexdigest(), "width": box[2] - box[0],
+                        "height": box[3] - box[1], "crop_origin": [box[0], box[1]],
+                        "confidence": confidence,
+                    })
                 self._visual_locator_bytes += capture_bytes
-                return {
-                    "locator_id": str(locator_id)[:96],
-                    "status": "ready",
-                    "recorded_coordinate": coordinate,
-                    "candidates": candidates,
-                    "full_frame_artifact_path": str(full_path),
-                    "full_frame_sha256": hashlib.sha256(full_path.read_bytes()).hexdigest(),
-                }
+                result.update(status="ready", candidates=candidates, failure_code=None,
+                              full_frame_artifact_path=str(full_path),
+                              full_frame_sha256=hashlib.sha256(full_path.read_bytes()).hexdigest())
             except Exception as exc:
-                unavailable["detail"] = f"{exc.__class__.__name__}: {str(exc)[:160]}"
-                return unavailable
+                result.update(status="unavailable", failure_code="VISUAL_LOCATOR_CAPTURE_FAILED",
+                              detail=f"{exc.__class__.__name__}: {str(exc)[:160]}")
+                raise
+
+        if not self._frame_buffer.submit_write(persist, image=frame):
+            result.update(status="unavailable", failure_code="RECORDING_QUEUE_OVERLOAD")
+        return result
 
     def _path(self, recording_id: str) -> Path:
         clean = str(recording_id or "").strip()
@@ -1971,6 +2153,20 @@ class RecordingManager:
         stable["content_sha256"] = _recording_hash(stable)
         payload["content_sha256"] = stable["content_sha256"]
         _recording_atomic_write(self._path(str(payload["recording_id"])), stable)
+
+    def _queue_persist(self) -> None:
+        """Coalesce input-side manifest writes on the evidence writer."""
+        if self._persist_pending:
+            return
+        self._persist_pending = True
+        def persist() -> None:
+            with self._lock:
+                self._persist_pending = False
+                snapshot = deepcopy(self._active) if self._active is not None else None
+            if snapshot is not None:
+                self._persist(snapshot)
+        if not self._frame_buffer.submit_write(persist):
+            self._persist_pending = False
 
     def start(
         self,
@@ -2018,6 +2214,9 @@ class RecordingManager:
                 "time_series_evidence": self._frame_buffer.empty_manifest(),
             }
             self._started_monotonic = time.monotonic()
+            self._mask_regions = self._active["mask_regions"]
+            self._persist_pending = False
+            self._stopping = False
             self._last_mouse_move_monotonic = 0.0
             self._last_mouse_position = None
             self._last_pointer_frame = None
@@ -2031,6 +2230,7 @@ class RecordingManager:
                 self._started_monotonic,
                 self._path(recording_id).parent,
             )
+            self._active["time_series_evidence"] = self._frame_buffer.empty_manifest()
             try:
                 self._listeners = list(self._listener_factory(self) or [])
                 for listener in self._listeners:
@@ -2075,7 +2275,7 @@ class RecordingManager:
 
     def record_event(self, event: dict[str, Any]) -> bool:
         with self._lock:
-            if self._active is None:
+            if self._active is None or self._stopping:
                 return False
             kind = str(event.get("kind") or "").strip().lower()
             safe: dict[str, Any] = {"kind": kind, "at_ms": max(0, int((time.monotonic() - self._started_monotonic) * 1000))}
@@ -2092,7 +2292,7 @@ class RecordingManager:
                     }
                 )
                 if isinstance(event.get("visual_locator"), dict):
-                    safe["visual_locator"] = dict(event["visual_locator"])
+                    safe["visual_locator"] = event["visual_locator"]
             elif kind == "mouse_move":
                 safe.update({"x": int(event.get("x", 0)), "y": int(event.get("y", 0))})
             elif kind == "mouse_drag":
@@ -2108,7 +2308,7 @@ class RecordingManager:
                 )
                 for key in ("source_visual_locator", "target_visual_locator"):
                     if isinstance(event.get(key), dict):
-                        safe[key] = dict(event[key])
+                        safe[key] = event[key]
             elif kind == "mouse_scroll":
                 safe.update(
                     {
@@ -2138,13 +2338,13 @@ class RecordingManager:
                 if evidence:
                     safe["frame_evidence"] = evidence
             self._active["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            self._persist(self._active)
+            self._queue_persist()
             return True
 
     def record_exception(self, *, failure_code: str, detail: str = "") -> dict[str, Any]:
         """Mark an exception without persisting credentials or the complete desktop stream."""
         with self._lock:
-            if self._active is None:
+            if self._active is None or self._stopping:
                 return {"ok": False, "status": "idle", "failure_code": "SKILL_RECORDING_NOT_ACTIVE"}
             code = re.sub(r"[^A-Z0-9_]+", "_", str(failure_code or "RECORDING_EXCEPTION").upper()).strip("_")
             code = (code or "RECORDING_EXCEPTION")[:96]
@@ -2168,7 +2368,7 @@ class RecordingManager:
             )
             self._active["exceptions"].append(marker)
             self._active["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            self._persist(self._active)
+            self._queue_persist()
             return {"ok": True, "status": "exception_marked", **marker}
 
     def record_mouse_move(self, x: int, y: int) -> bool:
@@ -2188,7 +2388,7 @@ class RecordingManager:
 
     def checkpoint(self, *, label: str, pyautogui: Any | None = None) -> dict[str, Any]:
         with self._lock:
-            if self._active is None:
+            if self._active is None or self._stopping:
                 return {"ok": False, "status": "idle", "failure_code": "SKILL_RECORDING_NOT_ACTIVE"}
             capture = pyautogui
             if capture is None:
@@ -2213,19 +2413,30 @@ class RecordingManager:
             return {"ok": True, "status": "checkpoint_saved", **checkpoint}
 
     def stop(self) -> dict[str, Any]:
-        with self._lock:
-            if self._active is None:
-                if self._last_completed_id:
-                    payload = self.get(self._last_completed_id)
-                    payload["idempotent"] = True
-                    return payload
-                return {"ok": False, "status": "idle", "failure_code": "SKILL_RECORDING_NOT_ACTIVE"}
+        # Serialize repeated STOP requests, never join workers under _lock:
+        # input/manifest workers need that lock to finish their accepted work.
+        with self._stop_lock:
+            with self._lock:
+                if self._active is None:
+                    if self._last_completed_id:
+                        payload = self.get(self._last_completed_id)
+                        payload["idempotent"] = True
+                        return payload
+                    return {"ok": False, "status": "idle", "failure_code": "SKILL_RECORDING_NOT_ACTIVE"}
+                self._stopping = True
             listener_stop_errors: list[str] = []
             for listener in self._listeners:
                 stop = getattr(listener, "stop", None)
                 if callable(stop):
                     try:
                         stop()
+                    except Exception as exc:
+                        listener_stop_errors.append(f"{exc.__class__.__name__}: {str(exc)[:160]}")
+            for listener in self._listeners:
+                join = getattr(listener, "join", None)
+                if callable(join) and listener is not threading.current_thread():
+                    try:
+                        join()
                     except Exception as exc:
                         listener_stop_errors.append(f"{exc.__class__.__name__}: {str(exc)[:160]}")
             consume_stop_request = getattr(self._overlay, "consume_stop_request", None)
@@ -2245,10 +2456,11 @@ class RecordingManager:
                     break
             self._overlay.hide()
             self._listeners = []
-            self._active["status"] = "completed"
             if listener_stop_errors:
                 self._active["listener_stop_errors"] = listener_stop_errors
             self._active["duration_ms"] = max(0, int((time.monotonic() - self._started_monotonic) * 1000))
+            self._frame_buffer.stop_capture()
+            self._frame_buffer.drain()
             # Persist one clean post-action frame after the recording overlay is gone.
             self._frame_buffer.capture_boundary_frame(
                 "recording_stop",
@@ -2272,16 +2484,19 @@ class RecordingManager:
             self._active["time_series_evidence"]["event_frame_count"] = len(event_frames)
             self._active["time_series_evidence"]["event_frames"] = event_frames
             self._frame_buffer.release()
+            self._active["status"] = "completed"
             self._active["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             self._persist(self._active)
             completed = dict(self._active)
             completed["ok"] = True
-            self._last_completed_id = str(self._active["recording_id"])
-            self._active = None
-            self._last_pointer_frame = None
-            self._last_pointer_frame_monotonic = 0.0
-            self._last_pointer_frame_position = None
-            self._pointer_frame_history = []
+            with self._lock:
+                self._last_completed_id = str(self._active["recording_id"])
+                self._active = None
+                self._stopping = False
+                self._last_pointer_frame = None
+                self._last_pointer_frame_monotonic = 0.0
+                self._last_pointer_frame_position = None
+                self._pointer_frame_history = []
             return completed
 
     def shutdown(self) -> None:

@@ -98,6 +98,62 @@ async def test_verified_execution_requires_confirmed_release(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure_code", ["block_timeout", "cancelled"])
+@pytest.mark.parametrize("pending_response", [False, True])
+async def test_interrupted_acquisition_releases_lease_without_dispatch(tmp_path, monkeypatch, failure_code, pending_response):
+    h = harness(tmp_path, monkeypatch)
+    clock = [0.0]
+    interrupted = False
+    response_ready = asyncio.Event()
+    monkeypatch.setattr(runner(), "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    h.ctx.runtime_module_config = lambda: {"timeout_s": 1.0}
+
+    def cancel_requested():
+        if interrupted:
+            response_ready.set()
+        return interrupted and failure_code == "cancelled"
+
+    async def interrupted_acquire(name, payload):
+        nonlocal interrupted
+        result = await h.call_tool(name, payload)
+        if name.endswith("_acquire"):
+            interrupted = True
+            clock[0] = 2.0
+            if pending_response:
+                await response_ready.wait()
+        return result
+
+    h.request["_cancel_requested"] = cancel_requested
+    h.args["call_tool"] = interrupted_acquire
+    result = await runner().run_computer_use(**h.args)
+    assert not result["ok"] and result["failure_code"] == failure_code
+    assert h.worker.state["lease"] is None
+    assert h.desktop.effects == 0 and not h.prompts
+    assert [op for op, _ in h.calls] == ["acquire", "release"]
+    assert result["computer_use"]["cleanup"] == {"status": "released"}
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_acquisition_requires_operator_without_dispatch(tmp_path, monkeypatch):
+    h = harness(tmp_path, monkeypatch)
+
+    async def lost_acquire_response(name, payload):
+        result = await h.call_tool(name, payload)
+        if name.endswith("_acquire"):
+            raise TimeoutError("acquisition response lost")
+        return result
+
+    h.args["call_tool"] = lost_acquire_response
+    result = await runner().run_computer_use(**h.args)
+    assert not result["ok"] and result["failure_code"] == "release_requires_operator"
+    assert result["operator_intervention_required"] is True
+    assert result["computer_use"]["cleanup"] == {"status": "unresolved", "reason": "acquisition_unconfirmed"}
+    assert h.worker.state["lease"] is not None
+    assert h.desktop.effects == 0 and not h.prompts
+    assert [op for op, _ in h.calls] == ["acquire"]
+
+
+@pytest.mark.asyncio
 async def test_enclosing_timeout_after_dispatch_reconciles_same_id(tmp_path, monkeypatch):
     h = harness(tmp_path, monkeypatch, ["act", "complete"])
     h.ctx.runtime_module_config = lambda: {"timeout_s": 0.04}
@@ -339,9 +395,33 @@ async def test_worker_exception_is_effect_unknown_not_success(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_wire_schema_uses_portable_grammar_without_weakening_local_parser(tmp_path, monkeypatch):
+    h = harness(tmp_path, monkeypatch, ["complete"])
+    result = await runner().run_computer_use(**h.args)
+    assert result["ok"]
+    wire = json.dumps(h.prompts[0][0]["response_format"]["json_schema"]["schema"])
+    assert '"uniqueItems"' not in wire
+    assert '"not"' not in wire
+    assert '(?!' not in wire
+    # A provider can return values that its simpler grammar allows. Dispatch
+    # must still reject them through the unchanged authoritative parser.
+    from Pyautogui_server_for_window.bridge.computer_use_contract import parse_decision, ComputerUseError
+    for action in ({"type": "hotkey", "target_id": "button", "keys": ["ctrl", "ctrl"]},
+                   {"type": "scroll", "target_id": "button", "x": 1, "y": 1, "amount": 0},
+                   {"type": "press", "target_id": "button", "key": "enter\n"}):
+        with pytest.raises(ComputerUseError):
+            parse_decision(json.dumps({"schema": "ax4lab.equipment_computer_use.decision.v1",
+                "observation_id": "obs1", "kind": "act", "reason": "invalid", "action": action}), "obs1")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("provider", ["vllm", "openai"])
-async def test_explicit_unsupported_schema_only_uses_json_object_on_same_endpoint(tmp_path, monkeypatch, provider):
-    unsupported = httpx.Response(400, json={"error": {"code": "unsupported_json_schema"}})
+@pytest.mark.parametrize("error", [
+    {"code": "unsupported_json_schema"},
+    {"message": 'Grammar error: Unimplemented keys: ["uniqueItems"]', "type": "BadRequestError", "param": None, "code": 400},
+])
+async def test_explicit_unsupported_schema_only_uses_json_object_on_same_endpoint(tmp_path, monkeypatch, provider, error):
+    unsupported = httpx.Response(400, json={"error": error})
     h = harness(tmp_path, monkeypatch, [unsupported, "complete"])
     if provider == "openai":
         from backends.openai_client import OpenAIBackend
@@ -355,6 +435,20 @@ async def test_explicit_unsupported_schema_only_uses_json_object_on_same_endpoin
     assert [p[0]["response_format"]["type"] for p in h.prompts] == ["json_schema", "json_object"]
     assert "decision_schema" in h.prompts[-1][1]
     assert set(h.urls) == {"http://model.invalid/v1/chat/completions"}
+
+
+@pytest.mark.asyncio
+async def test_grammar_fallback_still_rejects_duplicate_chord_before_dispatch(tmp_path, monkeypatch):
+    def duplicate_chord(prompt):
+        return json.dumps({"schema": "ax4lab.equipment_computer_use.decision.v1",
+            "observation_id": prompt["observation"]["observation_id"], "kind": "act", "reason": "invalid chord",
+            "action": {"type": "hotkey", "target_id": "button", "keys": ["ctrl", "ctrl"]}})
+    unsupported = httpx.Response(400, json={"error": {"message": 'Grammar error: Unimplemented keys: ["uniqueItems"]'}})
+    h = harness(tmp_path, monkeypatch, [unsupported, duplicate_chord])
+    result = await runner().run_computer_use(**h.args)
+    assert not result["ok"] and result["failure_code"] == "invalid_contract"
+    assert h.desktop.effects == 0
+    assert len(h.prompts) == 2
 
 
 @pytest.mark.asyncio

@@ -125,10 +125,30 @@ def _schema_unsupported(exc):
         error = exc.response.json().get("error", {})
         return isinstance(error, dict) and (
             error.get("code") in {"unsupported_json_schema", "unsupported_response_format"}
+            # vLLM/XGrammar reports unsupported schema keywords as a grammar
+            # compiler error without response_format in `param`. Retry JSON-only
+            # on this same endpoint; parse_decision still enforces every rule.
+            or str(error.get("message", "")).startswith("Grammar error: Unimplemented keys:")
             or (error.get("param") in {"response_format", "response_format.json_schema"}
                 and "not supported" in str(error.get("message", "")).lower()))
     except (ValueError, AttributeError):
         return False
+
+
+def _model_decision_schema():
+    """Grammar-compiler subset; parse_decision remains the authority for actions.
+
+    vLLM rejects uniqueItems, not and regex look-around before inference. Keep
+    those restrictions in the local contract, not the provider's guidance.
+    """
+    def portable(value):
+        if isinstance(value, dict):
+            return {key: (item.replace(r"(?![\s\S])", "$") if key == "pattern" else portable(item))
+                    for key, item in value.items() if key not in {"uniqueItems", "not"}}
+        if isinstance(value, list):
+            return [portable(item) for item in value]
+        return value
+    return portable(decision_json_schema())
 
 
 def computer_use_program_hashes(package, policy):
@@ -157,6 +177,7 @@ async def run_computer_use(*, state, ctx, request, package, execution, settings,
     """
     artifacts = None
     credentials = None
+    acquisition_task = None
     uncertain = False
     turns = 0
     metadata = {"schema": "ax4lab.equipment_computer_use.run.v1", "turns": 0}
@@ -195,7 +216,7 @@ async def run_computer_use(*, state, ctx, request, package, execution, settings,
             raise ComputerUseError("block_timeout", "Enclosing execution budget expired")
 
     async def guarded(coro, *, action=False):
-        task = asyncio.create_task(coro)
+        task = asyncio.ensure_future(coro)
         deadline = time.monotonic() + cfg["request_timeout_s"]
         if block_deadline is not None:
             deadline = min(deadline, block_deadline)
@@ -245,14 +266,18 @@ async def run_computer_use(*, state, ctx, request, package, execution, settings,
                         workflow_sha256=package["manifest"].get("workflow_sha256"),
                         programs_sha256=_hash(package["manifest"].get("program_sha256", {})), settings=deepcopy(cfg))
         artifacts = _Artifacts(root, identity, execution.get("sequence_id", ""), metadata)
-        acquired = await guarded(tool("acquire", {"policy": policy, "runtime_values": runtime_values,
-                                                  "program_hashes": program_hashes,
-                                                  "frame_max_age_s": cfg["frame_max_age_s"]}))
+        check_active()
+        # Acquisition mutates worker ownership even when its thread-backed
+        # awaiter is cancelled. Retain the response for cleanup, never dispatch.
+        acquisition_task = asyncio.create_task(tool("acquire", {"policy": policy, "runtime_values": runtime_values,
+                                                               "program_hashes": program_hashes,
+                                                               "frame_max_age_s": cfg["frame_max_age_s"]}))
+        acquired = await guarded(asyncio.shield(acquisition_task))
         if acquired.get("ok") is not True:
             raise ComputerUseError(str(acquired.get("failure_code") or "worker_unavailable"), "Worker acquisition failed")
         credentials = {"session_id": acquired["session_id"], "lease_token": acquired["lease_token"]}
         metadata["worker_id"] = acquired["worker_id"]
-        schema_format = {"type": "json_schema", "json_schema": {"name": "equipment_computer_use", "strict": True, "schema": decision_json_schema()}}
+        schema_format = {"type": "json_schema", "json_schema": {"name": "equipment_computer_use", "strict": True, "schema": _model_decision_schema()}}
         for turns in range(1, cfg["max_turns"] + 1):
             check_active()
             observed = await guarded(tool("observe"))
@@ -378,6 +403,14 @@ async def run_computer_use(*, state, ctx, request, package, execution, settings,
         return fail("computer_use_failed")
     finally:
         image = observation = None
+        cleanup = None
+        if acquisition_task is not None and credentials is None:
+            try:
+                acquired = await asyncio.wait_for(acquisition_task, timeout=min(cfg["request_timeout_s"], 10))
+                if acquired.get("ok") is True:
+                    credentials = {"session_id": acquired["session_id"], "lease_token": acquired["lease_token"]}
+            except (Exception, asyncio.CancelledError):
+                cleanup = {"status": "unresolved", "reason": "acquisition_unconfirmed"}
         if credentials and not uncertain:
             cleanup = {"status": "unresolved", "reason": "release_unconfirmed"}
             try:
@@ -386,6 +419,7 @@ async def run_computer_use(*, state, ctx, request, package, execution, settings,
                     cleanup = {"status": "released"}
             except (Exception, asyncio.CancelledError):
                 cleanup["reason"] = "release_exception"
+        if cleanup is not None:
             try:
                 artifacts.write("release", cleanup)
             except Exception:

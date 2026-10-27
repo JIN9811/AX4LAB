@@ -1782,7 +1782,8 @@ async def test_equipment_skill_rejects_unknown_profile_before_worker(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_equipment_skill_uses_one_exact_model_recovery_then_resumes(tmp_path: Path) -> None:
+@pytest.mark.parametrize("visual_fault", ["", "not_restored", "tampered", "wrong_identity"])
+async def test_equipment_skill_uses_one_exact_model_recovery_then_resumes(tmp_path: Path, visual_fault) -> None:
     tools = _tools(tmp_path)
     registry = EquipmentSkillRegistry(tmp_path / "skills")
     registry.create_draft(
@@ -1829,12 +1830,31 @@ async def test_equipment_skill_uses_one_exact_model_recovery_then_resumes(tmp_pa
 
     tools.register("equipment.pyautogui.run", run)
 
+    from PIL import Image
+    capture_calls = []
+
+    def screenshot(payload):
+        capture_calls.append(dict(payload))
+        path = tmp_path / f"screen-{len(capture_calls)}.png"
+        Image.new("RGB", (80, 60), "red" if len(capture_calls) == 1 else "green").save(path)
+        artifact = {"artifact_id": path.stem, "local_path": str(path), "content_type": "image/png",
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+        if visual_fault == "tampered":
+            artifact["sha256"] = "0" * 64
+        return {"ok": True, "mode": "simulator", "run_id": "wrong" if visual_fault == "wrong_identity" else payload["run_id"],
+                "artifact": artifact, "output_artifacts": [artifact]}
+
+    tools.register("equipment.pyautogui.screenshot", screenshot)
+
     class ExactBackend:
         def __init__(self) -> None:
             self.calls: list[dict[str, Any]] = []
 
         async def complete(self, **kwargs: Any) -> LLMResponse:
             self.calls.append(dict(kwargs))
+            if kwargs["metadata"]["task_type"] == "equipment_skill_recovery_verify":
+                return LLMResponse(text=json.dumps({"restored": visual_fault != "not_restored",
+                    "confidence": 0.95, "observed_evidence": "Program 1 title and ready panel are visible."}), model=kwargs["model"])
             return LLMResponse(
                 text=json.dumps(
                     {
@@ -1869,10 +1889,18 @@ async def test_equipment_skill_uses_one_exact_model_recovery_then_resumes(tmp_pa
 
     result = await LabEquipmentAgent().run(state, ctx)
 
+    if visual_fault:
+        assert result.success is False
+        assert sum(call.get("program_id") == program_id for call in run_calls) == 1
+        assert result.data["equipment_skill_execution"]["state"] == "ESCALATED"
+        return
     assert result.success is True
     assert [call.get("program_id", "recovery") for call in run_calls] == [program_id, "recovery", program_id]
     assert run_calls[1]["sequence"][0]["action"] == "focus_window"
-    assert len(backend.calls) == 1
+    assert len(backend.calls) == 2
+    assert len(capture_calls) == 2
+    assert all(len(call["images"]) == 1 for call in backend.calls)
+    assert backend.calls[0]["images"][0].data != backend.calls[1]["images"][0].data
     assert backend.calls[0]["model"] == "gemma4:e4b-it-nvfp4"
     assert backend.calls[0]["metadata"]["no_fallback"] is True
     recovery_context = json.loads(backend.calls[0]["user_prompt"])
@@ -1886,6 +1914,9 @@ async def test_equipment_skill_uses_one_exact_model_recovery_then_resumes(tmp_pa
     assert ctx.prompts == []
     assert result.data["equipment_skill_execution"]["state"] == "COMPLETED"
     assert result.data["equipment_skill_execution"]["recovery_history"][0]["operation"] == "focus_window"
+    history = result.data["equipment_skill_execution"]["recovery_history"][0]
+    assert history["verification"]["restored"] is True
+    assert history["promotion_status"] == "candidate_only"
 
 
 @pytest.mark.asyncio

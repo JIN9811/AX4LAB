@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from bisect import bisect_left, bisect_right
 from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
@@ -39,9 +40,115 @@ class TemporalStoryboardBundle:
     overview_paths: list[str]
     source_frame_count: int
     covered_frame_ids: list[str]
+    event_coverage_complete: bool
+    omitted_event_numbers: list[int]
 
 
-def _storyboard_event(events: list[dict[str, Any]], at_ms: int, tolerance_ms: int = 250) -> dict[str, Any]:
+def _select_timeline_frames(
+    package: dict[str, Any], max_frames: int,
+) -> tuple[list[dict[str, Any]], int, list[int]]:
+    """Sample metadata before decoding; the immutable full recording stays untouched."""
+    if max_frames < 1:
+        raise ValueError("storyboard frame budget must be positive")
+    manifest = package.get("manifest") or {}
+    evidence = manifest.get("recording_evidence") or {}
+    frames = []
+    by_artifact: dict[tuple[str, str], list[int]] = {}
+    unavailable_events: set[int] = set()
+    event_references: dict[int, set[str]] = {}
+    for source in ("frames", "event_frames"):
+        for number, frame in enumerate(evidence.get(source, []), start=1):
+            if not isinstance(frame, dict):
+                continue
+            event_number = int(frame.get("event_number") or 0)
+            path = str(frame.get("artifact_path") or "")
+            if source == "event_frames":
+                if event_number > 0:
+                    event_references.setdefault(event_number, set()).update(
+                        str(frame[key]) for key in ("pre_frame_id", "post_frame_id") if frame.get(key)
+                    )
+                    if not path or frame.get("status") in {"failed", "pending", "incomplete"}:
+                        unavailable_events.add(event_number)
+                if not path or frame.get("status") in {"failed", "pending"}:
+                    # Failure/linkage metadata is not an image. Keep the partial
+                    # recording reviewable, but never count that event as covered.
+                    continue
+            try:
+                canonical_path = str(Path(path).expanduser().resolve()) if path else ""
+            except (OSError, RuntimeError):
+                canonical_path = path
+            identity = (canonical_path, str(frame.get("sha256") or "").lower())
+            duplicates = by_artifact.get(identity, []) if source == "event_frames" and path else []
+            if duplicates:
+                # Timeline rows own capture time. Event linkages refer to the same
+                # raster but their at_ms is the input event time, not acquisition.
+                captured_ms = int(frame.get("captured_at_ms", frame.get("at_ms", 0)))
+                index = min(duplicates, key=lambda item: abs(int(frames[item].get("at_ms", 0)) - captured_ms))
+                selected_frame = frames[index]
+            else:
+                selected_frame = dict(frame) | {
+                    "frame_id": str(frame.get("frame_id") or frame.get("event_frame_id") or f"{source}-{number:08d}"),
+                    "evidence_source": source,
+                    "reason": str(frame.get("reason") or ("event" if source == "event_frames" else "periodic")),
+                }
+                if source == "event_frames" and frame.get("captured_at_ms") is not None:
+                    selected_frame["at_ms"] = int(frame["captured_at_ms"])
+                by_artifact.setdefault(identity, []).append(len(frames))
+                frames.append(selected_frame)
+            if event_number > 0:
+                selected_frame["linked_event_numbers"] = sorted(
+                    set(selected_frame.get("linked_event_numbers", [])) | {event_number}
+                )
+                selected_frame.setdefault("event_number", event_number)
+                selected_frame.setdefault("event_at_ms", int(frame.get("event_at_ms", frame.get("at_ms", 0))))
+    frames.sort(key=lambda item: (int(item.get("at_ms", 0)), item["frame_id"]))
+    times = [int(item.get("at_ms", 0)) for item in frames]
+    event_frame_indexes: dict[int, set[int]] = {}
+    for index, frame in enumerate(frames):
+        for event_number in frame.get("linked_event_numbers", []):
+            event_frame_indexes.setdefault(event_number, set()).add(index)
+    indexes_by_id = {frame["frame_id"]: index for index, frame in enumerate(frames)}
+    events = (package.get("recording") or {}).get("events", [])
+    requirements: dict[int, set[int]] = {}
+    for event_number, event in enumerate(events, start=1):
+        if not isinstance(event, dict) or event.get("recording_control") or event.get("kind") == "mouse_move":
+            continue
+        at_ms = int(event.get("at_ms", 0))
+        before, after = bisect_left(times, at_ms) - 1, bisect_right(times, at_ms)
+        indexes = {index for index in (before, before + 1, after) if 0 <= index < len(frames)}
+        indexes.update(event_frame_indexes.get(event_number, set()))
+        indexes.update(indexes_by_id[frame_id] for frame_id in event_references.get(event_number, set())
+                       if frame_id in indexes_by_id)
+        if any(frame_id not in indexes_by_id for frame_id in event_references.get(event_number, set())):
+            unavailable_events.add(event_number)
+        requirements[event_number] = indexes
+    selected = {0, len(frames) - 1} if frames else set()
+    selected = set(sorted(selected)[:max_frames])
+    priorities = set().union(*requirements.values()) if requirements else set()
+    priorities.update(index for index, frame in enumerate(frames)
+                      if frame["reason"] in {"boundary", "exception", "state_change", "pre_action", "post_action", "event"})
+    for candidates in (priorities, set(range(len(frames)))):
+        available = sorted(candidates - selected)
+        remaining = max_frames - len(selected)
+        if remaining <= 0:
+            break
+        if len(available) <= remaining:
+            selected.update(available)
+        elif remaining == 1:
+            selected.add(available[len(available) // 2])
+        else:
+            selected.update(available[round(index * (len(available) - 1) / (remaining - 1))]
+                            for index in range(remaining))
+    omitted_events = sorted(unavailable_events | {
+        number for number, indexes in requirements.items() if not indexes or not indexes <= selected
+    })
+    return [frames[index] for index in sorted(selected)], len(frames), omitted_events
+
+
+def _storyboard_event(events: list[dict[str, Any]], at_ms: int, tolerance_ms: int = 250, *, event_number: int = 0) -> dict[str, Any]:
+    if 0 < event_number <= len(events):
+        event = events[event_number - 1]
+        return _event_action_summary(event) | {"at_ms": max(0, int(event.get("at_ms", 0)))}
     nearby = [item for item in events if abs(int(item.get("at_ms", 0)) - at_ms) <= tolerance_ms]
     if not nearby:
         return {}
@@ -104,16 +211,12 @@ def build_temporal_storyboards(
     output_dir: str | Path,
     frames_per_chunk: int = 16,
     columns: int = 4,
+    max_frames: int = 128,
 ) -> TemporalStoryboardBundle:
-    """Build ordered storyboard derivatives while retaining exact source-frame mappings."""
+    """Build bounded ordered derivatives, reporting sampled versus full evidence."""
     if frames_per_chunk < 1 or columns < 1:
         raise ValueError("storyboard dimensions must be positive")
-    manifest = package.get("manifest") if isinstance(package.get("manifest"), dict) else {}
-    evidence = manifest.get("recording_evidence") if isinstance(manifest.get("recording_evidence"), dict) else {}
-    frames = sorted(
-        [item for item in evidence.get("frames", []) if isinstance(item, dict)],
-        key=lambda item: (int(item.get("at_ms", 0)), str(item.get("frame_id") or "")),
-    )
+    frames, source_frame_count, omitted_events = _select_timeline_frames(package, max_frames)
     recording = package.get("recording") if isinstance(package.get("recording"), dict) else {}
     events = [item for item in recording.get("events", []) if isinstance(item, dict)]
     verified: list[tuple[Image.Image, dict[str, Any]]] = []
@@ -124,8 +227,9 @@ def build_temporal_storyboards(
         _path, raw, _size = checked
         with Image.open(BytesIO(raw)) as image:
             source = image.convert("RGB").copy()
+            source.thumbnail((320, 180), Image.Resampling.LANCZOS)
         role = str(frame.get("reason") or "periodic")
-        if role not in {"pre_action", "event", "post_action", "boundary", "exception"}:
+        if role not in {"pre_action", "event", "post_action", "boundary", "exception", "state_change"}:
             role = "periodic"
         metadata = {
             "frame_id": str(frame.get("frame_id") or f"frame-{len(verified) + 1:08d}"),
@@ -133,7 +237,10 @@ def build_temporal_storyboards(
             "role": role,
             "source_sha256": str(frame.get("sha256") or ""),
             "source_path": str(frame.get("artifact_path") or ""),
-            "event": _storyboard_event(events, max(0, int(frame.get("at_ms", 0)))),
+            "evidence_source": frame["evidence_source"],
+            "event": _storyboard_event(events, max(0, int(frame.get("at_ms", 0))),
+                                       event_number=int(frame.get("event_number") or 0)),
+            "event_numbers": list(frame.get("linked_event_numbers", [])),
         }
         verified.append((source, metadata))
 
@@ -191,8 +298,10 @@ def build_temporal_storyboards(
         chunks=chunks,
         overview_images=overview_images,
         overview_paths=overview_paths,
-        source_frame_count=len(verified),
+        source_frame_count=source_frame_count,
         covered_frame_ids=[str(metadata["frame_id"]) for _source, metadata in verified],
+        event_coverage_complete=not omitted_events,
+        omitted_event_numbers=omitted_events,
     )
 
 
@@ -391,11 +500,8 @@ def collect_visual_annotation_evidence(
         visual_steps.append(candidate)
         visual_action_times.append((at_ms, step_id))
 
-    manifest = package.get("manifest") if isinstance(package.get("manifest"), dict) else {}
-    recording_evidence = (
-        manifest.get("recording_evidence") if isinstance(manifest.get("recording_evidence"), dict) else {}
-    )
-    state_frames = [item for item in recording_evidence.get("frames", []) if isinstance(item, dict)]
+    selected_frames, _, _ = _select_timeline_frames(package, 128)
+    state_frames = [item for item in selected_frames if item["evidence_source"] == "frames"]
     for frame_index, frame in enumerate(sorted(state_frames, key=lambda item: int(item.get("at_ms", 0)))):
         verified = _verified_image(frame.get("artifact_path"), frame.get("sha256"), allowed_roots)
         if verified is None:
@@ -421,7 +527,7 @@ def collect_visual_annotation_evidence(
             }
         )
 
-    for frame in recording_evidence.get("event_frames", []):
+    for frame in (item for item in selected_frames if item["evidence_source"] == "event_frames" or item.get("linked_event_numbers")):
         if not isinstance(frame, dict):
             continue
         verified = _verified_image(frame.get("artifact_path"), frame.get("sha256"), allowed_roots)

@@ -60,6 +60,8 @@ if (typeof module !== "undefined" && module.exports) {
   const state = {
     workflow: null,
     workflowSha256: "",
+    annotations: { steps: [] },
+    reviewDrafts: {},
     editable: false,
     dirty: false,
     expandedStepId: "",
@@ -102,9 +104,96 @@ if (typeof module !== "undefined" && module.exports) {
 
   function setBusy(busy) {
     state.busy = busy;
-    [elements.check, elements.save, elements.add].forEach((button) => {
+    [elements.check, elements.save, elements.add, elements.addAction, elements.computerUsePolicy, elements.applyComputerUsePolicy].forEach((button) => {
       if (button) button.disabled = busy || (!state.editable && button !== elements.check);
     });
+    if (busy) elements.list.querySelectorAll("input, select, textarea, button").forEach((control) => { control.disabled = true; });
+  }
+
+  function hasUnsavedChanges() {
+    return state.dirty || Object.keys(state.reviewDrafts).length > 0;
+  }
+
+  function annotationFor(stepId) {
+    return (state.annotations.steps || []).find((annotation) => annotation.step_id === stepId);
+  }
+
+  const reviewFields = [
+    ["intent", "Intent"], ["target_semantics", "Target meaning"],
+    ["preconditions", "Preconditions", true], ["postconditions", "Postconditions", true],
+    ["success_evidence", "Success evidence", true], ["failure_evidence", "Failure evidence", true],
+    ["ambiguity", "Ambiguity / uncertainty"],
+  ];
+
+  function reviewMarkup(step) {
+    const annotation = annotationFor(step.step_id);
+    if (!annotation) return "";
+    const draft = state.reviewDrafts[step.step_id] || {};
+    const disabled = !state.editable || state.busy ? "disabled" : "";
+    const pendingLocator = annotation.locator_status === "proposed" && annotation.locator;
+    const fields = reviewFields.map(([key, label, list]) => {
+      const value = draft[key] ?? (list ? (annotation[key] || []).join("\n") : annotation[key] || "");
+      return `<label>${label}${list ? " <small>(one item per line)</small>" : ""}<textarea class="text-input" rows="2" data-step-id="${escapeHtml(step.step_id)}" data-review-field="${key}" ${list ? "" : 'maxlength="1000"'} ${disabled}>${escapeHtml(value)}</textarea></label>`;
+    }).join("");
+    const reasons = (annotation.review_reasons || []).map((reason) => escapeHtml(String(reason).replaceAll("_", " "))).join(" · ");
+    const variables = (annotation.proposed_variables || []).map((variable) => `<li><strong>${escapeHtml(variable.name)}</strong> <span>${escapeHtml(variable.type || "string")}</span><br>Recorded: <code>${escapeHtml(variable.recorded_value)}</code> · Field: ${escapeHtml(variable.action_field || "unspecified")}<br>${escapeHtml(variable.description)}</li>`).join("");
+    const locator = pendingLocator || {};
+    const previewBase64 = locator.image_candidates?.[0]?.png_base64;
+    const locatorPreview = typeof previewBase64 === "string" && /^[A-Za-z0-9+/=]+$/.test(previewBase64)
+      ? `<img src="data:image/png;base64,${previewBase64}" alt="Proposed locator preview for ${escapeHtml(step.label || step.step_id)}">` : "";
+    const region = locator.region_normalized || locator.region;
+    const locatorDetails = [locator.locator_backend, Array.isArray(region) ? `Region: ${region.join(", ")}` : "", locator.window_title || locator.target_window || locator.target_window_regex,
+      Array.isArray(locator.image_candidates) ? `${locator.image_candidates.length} image candidate(s)` : ""].filter(Boolean).map(escapeHtml).join(" · ");
+    return `<section class="skill-semantic-review" aria-label="Semantic review for ${escapeHtml(step.label || step.step_id)}">
+      <div class="skill-semantic-review-heading"><strong>Semantic Review</strong><span class="badge ${annotation.review_required ? "warning" : "ok"}">${annotation.review_required ? "Review required" : "Reviewed"}</span><small>Source: ${escapeHtml(annotation.source || "manual")}</small></div>
+      ${reasons ? `<p class="skill-semantic-review-note">Review reasons: ${reasons}</p>` : ""}
+      <div class="skill-semantic-review-fields">${fields}</div>
+      ${variables ? `<details class="skill-semantic-proposals"><summary>Variable proposals (${annotation.proposed_variables.length}) — not execution bindings</summary><p>Recorded values remain unchanged. Reviewing this step does not bind or substitute variables.</p><ul>${variables}</ul></details>` : ""}
+      ${pendingLocator ? `<div class="skill-semantic-locator"><strong>Proposed locator — not applied</strong>${locatorPreview}<p>${locatorDetails || "Model-proposed target locator"}</p><label><input type="checkbox" data-step-id="${escapeHtml(step.step_id)}" data-accept-locator ${draft.acceptLocator ? "checked" : ""} ${disabled}> Also accept this locator and update the saved workflow</label><small>Unchecked: save semantic review only; locator review stays pending. Acceptance requires a separate confirmation and invalidates compiled artifacts.</small><div class="button-row"><button class="btn mini" type="button" data-step-id="${escapeHtml(step.step_id)}" data-step-command="reject-locator" ${disabled || (state.dirty ? "disabled" : "")}>Reject Locator &amp; Save Review</button><small>Reject this proposal and keep the current saved workflow locator unchanged.</small></div></div>` : annotation.locator_status === "rejected" ? '<p class="skill-semantic-review-note">Locator proposal rejected. The saved workflow locator was kept unchanged.</p>' : ""}
+      <div class="button-row"><button class="btn mini primary" type="button" data-step-id="${escapeHtml(step.step_id)}" data-step-command="review" ${disabled || (state.dirty ? "disabled" : "")}>${draft.acceptLocator && pendingLocator ? "Save Review &amp; Apply Locator" : "Save &amp; Accept Semantic Review"}</button><small>${state.dirty ? "Save workflow changes before accepting review." : draft.acceptLocator && pendingLocator ? "Updates the saved locator after confirmation. Does not run equipment or bind variables." : "Saves review only. Does not run the step or bind variables."}</small></div>
+    </section>`;
+  }
+
+  async function saveSemanticReview(stepId, { rejectLocator = false } = {}) {
+    if (!state.editable || state.busy) return;
+    if (state.dirty) throw new Error("Save the workflow before accepting semantic review. Local edits are preserved.");
+    const annotation = annotationFor(stepId);
+    if (!annotation) return;
+    const draft = state.reviewDrafts[stepId] || {};
+    const reviewed = { step_id: stepId, review_required: false, review_reasons: [] };
+    for (const [key, _label, list] of reviewFields) {
+      const value = draft[key] ?? (list ? (annotation[key] || []).join("\n") : annotation[key] || "");
+      reviewed[key] = list ? value.split("\n").map((item) => item.trim()).filter(Boolean) : value.trim();
+      if (list && (reviewed[key].length > 16 || reviewed[key].some((item) => item.length > 1000))) throw new Error(`${_label}: use at most 16 items, each 1000 characters or fewer.`);
+    }
+    if (rejectLocator) {
+      if (annotation.locator_status !== "proposed" || !annotation.locator) return;
+      if (!window.confirm("Reject this proposed locator and save the semantic review? The current saved workflow locator will remain unchanged. No equipment will run.")) return;
+      reviewed.reject_locator = true;
+    } else if (draft.acceptLocator && annotation.locator_status === "proposed" && annotation.locator) {
+      if (!window.confirm("Accept this proposed locator and update the saved executable workflow? Existing compiled artifacts will be invalidated. No equipment will run.")) return;
+      reviewed.locator = annotation.locator;
+      reviewed.locator_status = "reviewed";
+    }
+    setBusy(true);
+    try {
+      const payload = await apiJson(apiBase.replace(/\/workflow$/, "/annotate"), {
+        method: "POST", body: JSON.stringify({ use_model: false, annotations: { steps: [reviewed] } }),
+      });
+      state.annotations = payload.annotations;
+      state.workflow = model.normalizeWorkflowState(payload.workflow);
+      state.workflowSha256 = payload.manifest.workflow_sha256;
+      root.dataset.skillLifecycle = payload.manifest.lifecycle;
+      delete state.reviewDrafts[stepId];
+      const pending = annotationFor(stepId)?.review_required;
+      const pendingMessage = annotationFor(stepId)?.locator_status === "proposed" ? "Semantic review saved. Proposed locator review remains pending." : "Semantic review saved. Further review remains required.";
+      setStatus(pending ? pendingMessage : rejectLocator ? "Semantic review accepted; locator proposal rejected. Saved workflow unchanged; no equipment was run." : "Semantic review accepted. No equipment was run; variable proposals remain unbound.", pending ? "warning" : "ok");
+    } catch (error) {
+      setStatus(`Review save failed: ${error.message}. Local review edits were preserved.`, "error");
+    } finally {
+      setBusy(false);
+      renderEditor();
+    }
   }
 
   function issuesFor(stepId) {
@@ -171,13 +260,14 @@ if (typeof module !== "undefined" && module.exports) {
     const expanded = step.step_id === state.expandedStepId;
     const selected = step.step_id === state.selectedStepId;
     const issues = issuesFor(step.step_id);
+    const needsReview = annotationFor(step.step_id)?.review_required;
     const issueMarkup = issues.length ? `<div class="skill-workflow-step-issues">${issues.map((issue) => `<span>${escapeHtml(issue.message)}</span>`).join("")}</div>` : "";
     const actionOptions = Object.entries(model.ACTION_LABELS).map(([key, label]) => `<option value="${escapeHtml(key)}" ${key === step.action?.action ? "selected" : ""}>${escapeHtml(label)}</option>`).join("");
     return `<article class="skill-workflow-step-card ${expanded ? "expanded" : ""} ${selected ? "selected" : ""} ${issues.length ? "invalid" : ""}" data-step-card="${escapeHtml(step.step_id)}" draggable="${state.editable}">
       <button class="skill-workflow-step-summary" type="button" data-expand-step="${escapeHtml(step.step_id)}">
         <span class="skill-workflow-step-index">${String(index + 1).padStart(2, "0")}</span>
         <span><strong>${escapeHtml(step.label || step.step_id)}</strong><small>${escapeHtml(model.actionSummary(step))}</small></span>
-        <span class="skill-workflow-step-state">${issues.length ? `${issues.length} issue(s)` : expanded ? "Expanded" : "Ready"}</span>
+        <span class="skill-workflow-step-state">${issues.length ? `${issues.length} issue(s)` : needsReview ? "Review required" : expanded ? "Expanded" : "Ready"}</span>
       </button>
       <div class="skill-workflow-step-editor" ${expanded ? "" : "hidden"}>
         <div class="skill-workflow-fields">
@@ -187,13 +277,14 @@ if (typeof module !== "undefined" && module.exports) {
           <label class="skill-workflow-check"><input type="checkbox" data-step-id="${escapeHtml(step.step_id)}" data-field-path="checkpoint_after" ${step.checkpoint_after ? "checked" : ""}> Capture checkpoint after step</label>
         </div>
         ${locatorMarkup(step)}
+        ${reviewMarkup(step)}
         ${issueMarkup}
         <div class="button-row skill-workflow-step-actions">
           <button class="btn mini" type="button" data-step-command="up" data-step-id="${escapeHtml(step.step_id)}" ${index === 0 || !state.editable ? "disabled" : ""}>Move up</button>
           <button class="btn mini" type="button" data-step-command="down" data-step-id="${escapeHtml(step.step_id)}" ${index === state.workflow.steps.length - 1 || !state.editable ? "disabled" : ""}>Move down</button>
           <button class="btn mini" type="button" data-step-command="duplicate" data-step-id="${escapeHtml(step.step_id)}" ${state.editable ? "" : "disabled"}>Duplicate</button>
           <button class="btn mini danger" type="button" data-step-command="delete" data-step-id="${escapeHtml(step.step_id)}" ${state.editable ? "" : "disabled"}>Delete</button>
-          <button class="btn mini primary" type="button" data-step-command="test" data-step-id="${escapeHtml(step.step_id)}" ${!workerId || state.dirty || issues.length ? "disabled" : ""}>Test one step</button>
+          <button class="btn mini primary" type="button" data-step-command="test" data-step-id="${escapeHtml(step.step_id)}" ${!workerId || hasUnsavedChanges() || needsReview || issues.length ? "disabled" : ""}>Test one step</button>
         </div>
       </div>
     </article>`;
@@ -204,8 +295,8 @@ if (typeof module !== "undefined" && module.exports) {
     const bounds = model.durationBounds(state.workflow);
     elements.lifecycle.textContent = root.dataset.skillLifecycle || "draft";
     elements.lifecycle.className = `badge ${state.editable ? "idle" : "warning"}`;
-    elements.dirty.textContent = state.dirty ? "Unsaved" : "Saved";
-    elements.dirty.className = `badge ${state.dirty ? "warning" : "ok"}`;
+    elements.dirty.textContent = hasUnsavedChanges() ? "Unsaved" : "Saved";
+    elements.dirty.className = `badge ${hasUnsavedChanges() ? "warning" : "ok"}`;
     elements.duration.textContent = `Wait estimate ${bounds.minimum_s.toFixed(1)}-${bounds.maximum_s.toFixed(1)}s`;
     elements.count.textContent = `${state.workflow.steps.length} step${state.workflow.steps.length === 1 ? "" : "s"}`;
     elements.list.innerHTML = state.workflow.steps.map(renderStep).join("");
@@ -216,8 +307,9 @@ if (typeof module !== "undefined" && module.exports) {
     if (elements.computerUsePolicy) elements.computerUsePolicy.disabled = state.busy || !state.editable;
     if (elements.applyComputerUsePolicy) elements.applyComputerUsePolicy.disabled = state.busy || !state.editable;
     if (!state.editable) {
-      elements.list.querySelectorAll("input, select").forEach((control) => { control.disabled = true; });
+      elements.list.querySelectorAll("input, select, textarea").forEach((control) => { control.disabled = true; });
     }
+    if (state.busy) elements.list.querySelectorAll("input, select, textarea, button").forEach((control) => { control.disabled = true; });
   }
 
   function markDirty(workflow, selectedStepId = state.selectedStepId) {
@@ -243,6 +335,8 @@ if (typeof module !== "undefined" && module.exports) {
       const payload = await apiJson(apiBase);
       state.workflow = model.normalizeWorkflowState(payload.workflow);
       state.workflowSha256 = payload.workflow_sha256;
+      state.annotations = payload.annotations || { steps: [] };
+      state.reviewDrafts = {};
       state.editable = payload.editable === true;
       state.dirty = false;
       state.issues = [];
@@ -252,7 +346,8 @@ if (typeof module !== "undefined" && module.exports) {
         elements.computerUsePolicy.value = serializeComputerUsePolicy(state.workflow.computer_use);
       }
       root.dataset.skillLifecycle = payload.manifest?.lifecycle || root.dataset.skillLifecycle;
-      setStatus(state.editable ? "Exact Skill workflow loaded." : "This deployed Skill version is read-only.", state.editable ? "ok" : "warning");
+      const pendingReview = state.annotations.steps?.some((annotation) => annotation.review_required);
+      setStatus(!state.editable ? "This deployed Skill version is read-only." : pendingReview ? "Workflow loaded. Review semantic evidence and proposed locators before compiling." : "Exact Skill workflow loaded.", !state.editable || pendingReview ? "warning" : "ok");
     } catch (error) {
       setStatus(`Load failed: ${error.message}`, "error");
       throw error;
@@ -287,6 +382,7 @@ if (typeof module !== "undefined" && module.exports) {
       });
       state.workflow = model.normalizeWorkflowState(payload.workflow);
       state.workflowSha256 = payload.manifest.workflow_sha256;
+      state.annotations = payload.annotations || state.annotations;
       root.dataset.skillLifecycle = payload.manifest.lifecycle;
       state.dirty = false;
       state.issues = [];
@@ -301,7 +397,8 @@ if (typeof module !== "undefined" && module.exports) {
   }
 
   async function testStep(stepId) {
-    if (state.dirty) throw new Error("Save the workflow before testing a step.");
+    if (hasUnsavedChanges()) throw new Error("Save the workflow and semantic review before testing a step.");
+    if (annotationFor(stepId)?.review_required) throw new Error("Accept semantic and locator review before testing this step.");
     if (!workerId) throw new Error("Open the editor from a selected Worker to test a step.");
     if (!window.confirm("Run only this saved step on the selected Worker?")) return;
     setBusy(true);
@@ -474,6 +571,7 @@ if (typeof module !== "undefined" && module.exports) {
     }
     const command = event.target.closest("[data-step-command]");
     if (!command) return;
+    if (state.busy || (!state.editable && command.dataset.stepCommand !== "test")) return;
     const stepId = command.dataset.stepId;
     const index = state.workflow.steps.findIndex((step) => step.step_id === stepId);
     try {
@@ -483,15 +581,39 @@ if (typeof module !== "undefined" && module.exports) {
         const next = model.duplicateStep(state.workflow, stepId);
         markDirty(next, next.steps[index + 1].step_id);
       }
-      if (command.dataset.stepCommand === "delete") markDirty(model.deleteStep(state.workflow, stepId), state.workflow.steps[Math.max(0, index - 1)]?.step_id || "");
+      if (command.dataset.stepCommand === "delete") {
+        if (state.reviewDrafts[stepId] && !window.confirm("Delete this step and its unsaved semantic review edits?")) return;
+        delete state.reviewDrafts[stepId];
+        markDirty(model.deleteStep(state.workflow, stepId), state.workflow.steps[Math.max(0, index - 1)]?.step_id || "");
+      }
+      if (command.dataset.stepCommand === "review") await saveSemanticReview(stepId);
+      if (command.dataset.stepCommand === "reject-locator") await saveSemanticReview(stepId, { rejectLocator: true });
       if (command.dataset.stepCommand === "test") await testStep(stepId);
       if (command.dataset.stepCommand === "crop") await openCropEditor(stepId);
     } catch (error) { setStatus(error.message, "error"); }
   });
 
+  elements.list.addEventListener("input", (event) => {
+    const input = event.target;
+    if (!state.editable || state.busy || !input.dataset.reviewField || !annotationFor(input.dataset.stepId)) return;
+    const draft = state.reviewDrafts[input.dataset.stepId] ||= {};
+    draft[input.dataset.reviewField] = input.value;
+    elements.dirty.textContent = "Unsaved";
+    elements.dirty.className = "badge warning";
+    elements.list.querySelectorAll('[data-step-command="test"]').forEach((button) => { button.disabled = true; });
+    setStatus("Unsaved semantic review. Use Save & Accept Semantic Review on this step.", "warning");
+  });
+
   elements.list.addEventListener("change", async (event) => {
     const input = event.target;
     const stepId = input.dataset.stepId;
+    if (!state.editable || state.busy) return;
+    if (Object.hasOwn(input.dataset, "acceptLocator")) {
+      const draft = state.reviewDrafts[stepId] ||= {};
+      draft.acceptLocator = input.checked;
+      renderEditor();
+      return;
+    }
     if (input.dataset.locatorStep) {
       try {
         const candidate = await imageCandidate(input.files[0]);
@@ -509,6 +631,7 @@ if (typeof module !== "undefined" && module.exports) {
   });
 
   elements.list.addEventListener("dragstart", (event) => {
+    if (!state.editable || state.busy) { event.preventDefault(); return; }
     const card = event.target.closest("[data-step-card]");
     if (card) event.dataTransfer.setData("text/plain", card.dataset.stepCard);
   });
@@ -517,20 +640,20 @@ if (typeof module !== "undefined" && module.exports) {
     event.preventDefault();
     const target = event.target.closest("[data-step-card]");
     const stepId = event.dataTransfer.getData("text/plain");
-    if (!target || !stepId || !state.editable) return;
+    if (!target || !stepId || !state.editable || state.busy) return;
     const targetIndex = state.workflow.steps.findIndex((step) => step.step_id === target.dataset.stepCard);
     markDirty(model.moveStep(state.workflow, stepId, targetIndex), stepId);
   });
 
   elements.add.addEventListener("click", () => {
-    if (!state.editable) return;
+    if (!state.editable || state.busy) return;
     const reference = state.selectedStepId || state.workflow.steps.at(-1)?.step_id || "";
     const next = model.insertStep(state.workflow, reference, "after", elements.addAction.value);
     const referenceIndex = next.steps.findIndex((step) => step.step_id === reference);
     markDirty(next, next.steps[Math.min(referenceIndex + 1, next.steps.length - 1)].step_id);
   });
   elements.applyComputerUsePolicy?.addEventListener("click", () => {
-    if (!state.editable) return;
+    if (!state.editable || state.busy) return;
     try {
       const policy = parseComputerUsePolicy(elements.computerUsePolicy?.value || "");
       const workflow = { ...state.workflow };
@@ -545,10 +668,10 @@ if (typeof module !== "undefined" && module.exports) {
   elements.check.addEventListener("click", () => checkWorkflow().catch((error) => setStatus(error.message, "error")));
   elements.save.addEventListener("click", () => saveWorkflow());
   elements.close.addEventListener("click", () => {
-    if (!state.dirty || window.confirm("Close and discard unsaved workflow changes?")) window.close();
+    if (!hasUnsavedChanges() || window.confirm("Close and discard unsaved workflow and semantic review changes?")) window.close();
   });
   window.addEventListener("beforeunload", (event) => {
-    if (!state.dirty) return;
+    if (!hasUnsavedChanges()) return;
     event.preventDefault();
     event.returnValue = "";
   });

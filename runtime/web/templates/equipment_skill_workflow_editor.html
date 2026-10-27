@@ -6,6 +6,25 @@
     <title>{{ title }}</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
     <link rel="stylesheet" href="/static/styles.css" />
+    <style>
+      .skill-semantic-review { display: grid; gap: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: #fff; min-width: 0; }
+      .skill-semantic-review-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+      .skill-semantic-review-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+      .skill-semantic-review-fields label { display: grid; gap: 5px; color: var(--muted); font-size: .75rem; font-weight: 650; }
+      .skill-semantic-review-fields textarea { width: 100%; min-width: 0; resize: vertical; font: inherit; font-weight: 400; line-height: 1.5; }
+      .skill-semantic-review-note, .skill-semantic-review small { margin: 0; color: var(--muted); font-size: .72rem; line-height: 1.5; }
+      .skill-semantic-proposals, .skill-semantic-locator { padding: 10px; background: #f8fafc; border-radius: 6px; font-size: .75rem; line-height: 1.5; overflow-wrap: anywhere; }
+      .skill-semantic-proposals summary { cursor: pointer; font-weight: 650; }
+      .skill-semantic-proposals li + li { margin-top: 8px; }
+      .skill-semantic-locator { display: grid; gap: 6px; background: #fffbeb; }
+      .skill-semantic-locator p { margin: 0; }
+      .skill-semantic-locator img { max-width: 220px; max-height: 140px; object-fit: contain; }
+      .skill-semantic-locator label { display: flex; align-items: start; gap: 7px; }
+      @media (max-width: 600px) {
+        .skill-semantic-review-fields { grid-template-columns: 1fr; }
+        .skill-semantic-review .button-row { align-items: start; flex-direction: column; }
+      }
+    </style>
   </head>
   <body class="skill-workflow-editor-body">
     <main

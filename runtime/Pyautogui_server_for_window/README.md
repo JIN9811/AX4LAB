@@ -109,13 +109,13 @@ Programs deployed by AX4LAB are read-only cache entries and are not edited direc
 `START RECORDING` starts input recording after five seconds. A topmost overlay shows elapsed time and the sole operator stop control, `STOP`. The Bounded Evidence card shows recording state and Checkpoint, without another Stop button. Overlay `STOP` closes the UI immediately and calls `RecordingManager.stop()` once in the background. The Console polls `/recordings/status` only while recording is active, automatically returning to idle and refreshing the list after the overlay closes. The STOP click remains in the raw timeline as provenance evidence, marked `recording_control=overlay_stop`; Linux Skill compilation and capability counts exclude it from equipment actions.
 
 - Keyboard and mouse input use monotonic timestamps.
-- Full-screen frames are written immediately to disk at a default 2 FPS throughout recording.
+- Full-screen acquisition targets 15 FPS; a separate bounded writer encodes and saves the frames without holding up input callbacks for disk writes.
 - Periodic frames use `frames/periodic/frame-XXXXXXXX.jpg`; event and boundary frames use PNG. `timeline.jsonl` links them chronologically.
-- RAM holds only a bounded cache of recent frames for pre-action evidence; disk, not a RAM ring buffer, owns the full session evidence.
+- RAM holds a bounded recent-frame cache and bounded pending-write queue; disk owns the full session evidence. STOP drains accepted writes before finalizing the saved package.
 - At the disk warning threshold, recording continues with a status warning. At the critical threshold or on a write failure, it stops safely and preserves existing evidence as an incomplete package.
 - Supports overlay Stop and Console Checkpoint, Preview, Export, and Delete. Preview pages backward and forward through saved frames without exposing Windows absolute paths to the browser.
 
-Windows produces only the raw recording. Linux AX4LAB arranges 16 frames into each 4x4 temporal storyboard, analyzes every chunk in order with the selected multimodal model, and synthesizes the complete workflow. Linux owns LLM annotation and Skill compilation, validation, versioning, and deployment. Individual replay actions in compiled Skills do not call the LLM again. However, the normal Linux Equipment Flow may include LLM decisions for pre-execution selection and terminal evidence review; the entire experiment path is not necessarily LLM-free.
+Windows produces the full raw recording. Linux AX4LAB selects at most 128 event/transition/boundary frames, arranges them into 16-frame storyboards, and analyzes the selected chunks in order with the chosen multimodal model. It preserves every recorded action and reports omitted event coverage for review. Linux owns interpretation, human review, Skill compilation, validation, versioning, and deployment. Normal compiled replay actions do not call the LLM again; the Equipment Flow can still call it for selection, evidence review, and bounded visual error restoration.
 
 ### Latest Local Result
 

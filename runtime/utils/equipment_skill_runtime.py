@@ -507,6 +507,25 @@ def validate_recovery_decision(
     action_payload = payload.get("payload")
     if not isinstance(action_payload, dict):
         raise SkillContractError("recovery payload must be an object")
+    # The model must not override the validated operation or smuggle a macro.
+    fields = {"focus_window": {"target_window", "window", "window_title", "required"},
+              "screenshot": {"checkpoint"}, "wait": {"seconds"}, "press": {"key", "presses"}}
+    if set(action_payload) - fields.get(operation, set()):
+        raise SkillContractError("recovery payload contains unsupported fields")
+    if operation == "focus_window":
+        title = action_payload.get("target_window") or action_payload.get("window") or action_payload.get("window_title")
+        if not isinstance(title, str) or not title.strip() or len(title) > 256:
+            raise SkillContractError("recovery window title is required")
+        action_payload = {"window_title": title.strip(), "required": True}
+    if operation == "press":
+        if action_payload.get("key") != "esc" or action_payload.get("presses", 1) != 1:
+            raise SkillContractError("recovery may only dismiss once with Escape")
+        action_payload = {"key": "esc", "presses": 1}
+    if operation == "wait":
+        seconds = action_payload.get("seconds", 1)
+        if type(seconds) not in (int, float) or not 0 < seconds <= 5:
+            raise SkillContractError("recovery wait must be between zero and five seconds")
+        action_payload = {"seconds": seconds}
     expected = payload.get("expected_verification")
     if not isinstance(expected, dict) or not expected:
         raise SkillContractError("recovery expected_verification is required")
@@ -887,7 +906,10 @@ class EquipmentSkillRegistry:
         updates: dict[str, Any],
         *,
         model_snapshot: dict[str, Any] | None = None,
+        source: str = "manual",
     ) -> dict[str, Any]:
+        if source not in {"manual", "model"}:
+            raise SkillContractError("annotation source must be manual or model")
         package_dir = self._package_dir(skill_id, version)
         package = self.get(skill_id, version)
         current_by_id = {
@@ -908,19 +930,72 @@ class EquipmentSkillRegistry:
             step_id = str(raw_item.get("step_id") or "").strip()
             if step_id not in current_by_id:
                 raise SkillContractError(f"unknown annotation step: {step_id}")
+            reject_locator = raw_item.get("reject_locator") is True
+            if reject_locator and (source != "manual" or "locator" in raw_item):
+                raise SkillContractError("locator rejection requires a manual choice without a locator submission")
             confidence = float(raw_item.get("confidence", current_by_id[step_id].get("confidence", 0.0)))
             if not 0.0 <= confidence <= 1.0:
                 raise SkillContractError(f"annotation confidence out of range: {step_id}")
-            current_by_id[step_id].update(
+            annotation = current_by_id[step_id]
+            explicit_review = source == "manual" and raw_item.get("review_required") is False
+            reasons = list(annotation.get("review_reasons") or [])
+            if explicit_review:
+                reasons = []
+                annotation["reviewed_at"] = _now_iso()
+            if source == "model":
+                reasons.extend(str(item)[:160] for item in raw_item.get("review_reasons", [])[:16]
+                               if isinstance(item, str))
+                if confidence < 0.7:
+                    reasons.append("low_confidence")
+                if raw_item.get("ambiguity"):
+                    reasons.append("ambiguity")
+                if raw_item.get("action"):
+                    reasons.append("model_action_change_ignored")
+            annotation.update(
                 {
                     "label": str(raw_item.get("label") or current_by_id[step_id].get("label") or step_id)[:160],
                     "confidence": confidence,
-                    "review_required": bool(raw_item.get("review_required", confidence < 0.7)),
+                    "review_required": bool(raw_item.get("review_required", annotation.get("review_required", confidence < 0.7))),
+                    "source": source,
                 }
             )
+            for key in ("intent", "target_semantics", "ambiguity"):
+                if key in raw_item:
+                    annotation[key] = str(raw_item[key] or "")[:1000]
+            for key in ("preconditions", "postconditions", "success_evidence", "failure_evidence"):
+                if key in raw_item:
+                    values = raw_item[key] if isinstance(raw_item[key], list) else [raw_item[key]]
+                    annotation[key] = [str(value)[:1000] for value in values[:16] if value not in (None, "")]
+            if isinstance(raw_item.get("proposed_variables"), list):
+                annotation["proposed_variables"] = [
+                    {key: str(variable[key])[:500]
+                     for key in ("name", "type", "recorded_value", "description", "action_field")
+                     if key in variable} | {"status": "proposed"}
+                    for variable in raw_item["proposed_variables"][:16]
+                    if isinstance(variable, dict) and variable.get("name")
+                ]
+                if source == "model" and annotation["proposed_variables"]:
+                    reasons.append("proposed_variables")
+            if reject_locator:
+                # Rejecting a model proposal leaves the recorded/manual action
+                # untouched and keeps the discarded evidence available for audit.
+                if isinstance(annotation.get("locator"), dict):
+                    annotation["rejected_locator"] = annotation.pop("locator")
+                annotation["locator_status"] = "rejected"
+                reasons = [reason for reason in reasons if reason != "model_locator_change"]
             if isinstance(raw_item.get("locator"), dict):
                 locator = deepcopy(raw_item["locator"])
-                current_by_id[step_id]["locator"] = locator
+                annotation["locator"] = locator
+                annotation["locator_status"] = "proposed" if source == "model" else "reviewed"
+                if source == "model":
+                    reasons.append("model_locator_change")
+            # A model-generated locator is evidence, not an executable edit. Only a
+            # manual locator submission may promote it into the workflow. Merely
+            # reviewing semantic text is never acceptance of a target change.
+            apply_locator = source == "manual" and isinstance(raw_item.get("locator"), dict)
+            if apply_locator:
+                locator = annotation["locator"]
+                annotation["locator_status"] = "reviewed"
                 workflow_step = workflow_steps.get(step_id)
                 action = workflow_step.get("action") if isinstance(workflow_step, dict) else None
                 if isinstance(action, dict):
@@ -933,11 +1008,15 @@ class EquipmentSkillRegistry:
                         "target_window",
                         "target_window_regex",
                     ):
-                        if key in locator:
+                        if key in locator and action.get(key) != locator[key]:
                             action[key] = deepcopy(locator[key])
                             workflow_updated = True
             if raw_item.get("checkpoint_after") is not None:
                 current_by_id[step_id]["checkpoint_after"] = bool(raw_item["checkpoint_after"])
+            if annotation.get("locator_status") == "proposed":
+                reasons.append("model_locator_change")
+            annotation["review_reasons"] = list(dict.fromkeys(reasons))[:32]
+            annotation["review_required"] = bool(annotation["review_required"] or reasons)
         annotations = package["annotations"]
         annotations["steps"] = [current_by_id[str(item.get("step_id"))] for item in annotations.get("steps", [])]
         if isinstance(updates.get("workflow_summary"), dict):
@@ -975,7 +1054,17 @@ class EquipmentSkillRegistry:
             else "annotated"
         )
         manifest["annotations_sha256"] = canonical_sha256(annotations)
+        # Annotations participate in execution verification, even when the action
+        # bytes are unchanged. Old validation/deployment cannot approve new rules.
+        manifest.pop("validated_at", None)
+        manifest.pop("deployment", None)
         if workflow_updated:
+            # Compiled programs refer to the old executable locator. They must not
+            # remain deployable after a human accepts a new target proposal.
+            package["workflow"]["program_ids"] = []
+            package["workflow"].pop("compiled_at", None)
+            manifest["program_sha256"] = {}
+            manifest["lifecycle"] = "review_required" if review_required else "annotated"
             manifest["workflow_sha256"] = canonical_sha256(package["workflow"])
         manifest["updated_at"] = annotations["updated_at"]
         if workflow_updated:
@@ -985,7 +1074,7 @@ class EquipmentSkillRegistry:
         self._append_audit(
             package_dir,
             "annotations_updated",
-            {"review_required": review_required, "model": (model_snapshot or {}).get("model", "")},
+            {"review_required": review_required, "source": source, "model": (model_snapshot or {}).get("model", "")},
         )
         return self.get(skill_id, version)
 

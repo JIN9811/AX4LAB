@@ -21,7 +21,7 @@ from agents.core.knowledge.runtime_reference import build_execution_reference as
 
 
 _TOOLS = frozenset({"execute_stacked_workflow", "accept_workflow_result", "request_operator",
-                    "observe_workflow", "recover_wait", "recover_focus", "resume_failed_block"})
+                    "observe_workflow", "recover_wait", "recover_focus", "recover_dismiss", "resume_failed_block"})
 _PHASES = frozenset({"select", "terminal_review", "recovery_review"})
 _PHASE_GUIDANCE = {
     "select": "Judge whether the configured stacked Skill Flow matches the delegated task and available evidence. ",
@@ -29,6 +29,8 @@ _PHASE_GUIDANCE = {
         "The workflow has ended. Compare its screen, execution log and required outputs. "
         "Accept only supported completion with all mandatory gates satisfied. "
         "For a proven zero-action failure, an offered wait/focus may address the observed UI problem. "
+        "recover_dismiss sends one Escape only: choose it for a visibly non-operating transient dialog "
+        "obscuring the recorded target, never to acknowledge warnings, approve motion or interrupt an active test. "
         "That choice only performs bounded recovery; observation and a separate resume decision occur later. "),
     "recovery_review": (
         "Bounded recovery has ended. Compare the before/after evidence and remaining failed block. "

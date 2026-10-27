@@ -3574,6 +3574,221 @@ def test_recording_manager_persists_bounded_event_keyframes(tmp_path: Path) -> N
     assert manager._frame_buffer.status()["active"] is False
 
 
+def test_recording_default_captures_at_15fps_while_encoder_is_busy(tmp_path: Path) -> None:
+    module = _load_packaged_helper_module()
+    pillow = pytest.importorskip("PIL.Image")
+    encoding = threading.Event()
+    release = threading.Event()
+    acquired: list[float] = []
+
+    def screenshot():
+        acquired.append(time.monotonic())
+        return pillow.new("RGB", (40, 30))
+
+    buffer = module.RecordingFrameBuffer(screenshot_provider=screenshot)
+    encode = buffer._encode_frame
+
+    def slow_encode(image):
+        encoding.set()
+        assert release.wait(3)
+        return encode(image)
+
+    buffer._encode_frame = slow_encode
+    buffer.start("rec-async-capture", time.monotonic(), tmp_path)
+    try:
+        assert encoding.wait(1)
+        time.sleep(0.24)
+        assert len(acquired) >= 4, "encoding stalled the 15 FPS acquisition producer"
+    finally:
+        release.set()
+        buffer.stop()
+    rows = [json.loads(line) for line in (tmp_path / "timeline.jsonl").read_text().splitlines()]
+    periodic = [item for item in rows if item["reason"] == "periodic"]
+    assert buffer.status()["fps"] == 15
+    assert len(periodic) == len(acquired)
+    assert periodic[0]["stored_monotonic"] - periodic[0]["captured_monotonic"] >= 0.2
+    assert periodic[0]["captured_monotonic"] == pytest.approx(acquired[0], abs=0.02)
+
+
+def test_recording_input_returns_while_png_writer_is_busy_and_stop_drains(tmp_path: Path) -> None:
+    module = _load_packaged_helper_module()
+    pillow = pytest.importorskip("PIL.Image")
+    manager = module.RecordingManager(
+        tmp_path, listener_factory=lambda _manager: [], overlay_controller=_FakeRecordingOverlay(),
+        screenshot_provider=lambda: pillow.new("RGB", (40, 30)),
+    )
+    manager.start(name="async event", target_app="lab", target_window="lab")
+    assert manager._frame_buffer.capture_once()
+    encoding = threading.Event()
+    release = threading.Event()
+    returned = threading.Event()
+    encode = manager._frame_buffer._encode_png
+
+    def slow_encode(image):
+        encoding.set()
+        assert release.wait(3)
+        return encode(image)
+
+    manager._frame_buffer._encode_png = slow_encode
+    worker = threading.Thread(target=lambda: (manager.record_event({"kind": "key_press", "key": "enter"}), returned.set()))
+    worker.start()
+    completed: list[dict] = []
+    stopper = threading.Thread(target=lambda: completed.append(manager.stop()))
+    try:
+        assert encoding.wait(1)
+        assert returned.wait(0.2), "input callback waited for PNG encoding or disk storage"
+        stopper.start()
+        time.sleep(0.05)
+        assert not completed, "stop finalized before queued evidence was drained"
+    finally:
+        release.set()
+        worker.join(3)
+        if stopper.ident is not None:
+            stopper.join(3)
+        else:
+            manager.stop()
+    assert completed and completed[0]["time_series_evidence"]["evidence_complete"] is True
+    evidence = completed[0]["events"][0]["frame_evidence"]
+    assert all(evidence[key] for key in ("pre_frame_id", "event_frame_id", "post_frame_id"))
+    assert Path(evidence["event_artifact_path"]).is_file()
+    assert Path(evidence["post_artifact_path"]).is_file()
+
+
+def test_recording_bounded_queue_reports_overload_and_drains_accepted_frames(tmp_path: Path) -> None:
+    module = _load_packaged_helper_module()
+    pillow = pytest.importorskip("PIL.Image")
+    encoding = threading.Event()
+    release = threading.Event()
+    buffer = module.RecordingFrameBuffer(
+        screenshot_provider=lambda: pillow.new("RGB", (40, 30)), fps=2, queue_max_frames=2,
+    )
+    encode = buffer._encode_frame
+
+    def slow_encode(image):
+        encoding.set()
+        assert release.wait(3)
+        return encode(image)
+
+    buffer._encode_frame = slow_encode
+    buffer.start("rec-bounded-test", time.monotonic(), tmp_path)
+    try:
+        assert buffer.capture_once(wait=False)
+        assert encoding.wait(1)
+        assert buffer.capture_once(wait=False)
+        assert buffer.capture_once(wait=False) is False
+        status = buffer.status()
+        assert status["pending_write_count"] <= 2
+        assert status["dropped_frame_count"] == 1
+        assert status["evidence_complete"] is False
+    finally:
+        release.set()
+        buffer.stop()
+    assert buffer.status()["persisted_frame_count"] == 2
+    assert buffer.status()["pending_write_count"] == 0
+    assert buffer.status()["writer_status"] == "incomplete"
+
+
+def test_recording_capture_and_writer_errors_never_claim_complete(tmp_path: Path) -> None:
+    module = _load_packaged_helper_module()
+
+    def unavailable():
+        raise RuntimeError("screen unavailable")
+
+    buffer = module.RecordingFrameBuffer(screenshot_provider=unavailable)
+    buffer.start("rec-failed-capture", time.monotonic(), tmp_path)
+    assert buffer.capture_once() is False
+    buffer.stop()
+    assert buffer.status()["capture_errors"] >= 1
+    assert buffer.status()["evidence_complete"] is False
+
+
+def test_recording_click_locator_encoding_does_not_block_input(tmp_path: Path, monkeypatch) -> None:
+    module = _load_packaged_helper_module()
+    pillow = pytest.importorskip("PIL.Image")
+    manager = module.RecordingManager(
+        tmp_path, listener_factory=lambda _manager: [], overlay_controller=_FakeRecordingOverlay(),
+        screenshot_provider=lambda: pillow.new("RGB", (80, 60), color=(20, 180, 90)),
+    )
+    manager.start(name="async locator", target_app="lab", target_window="lab")
+    assert manager._frame_buffer.capture_once()
+    encoding, release, returned = threading.Event(), threading.Event(), threading.Event()
+    save = pillow.Image.save
+
+    def slow_save(image, path, *args, **kwargs):
+        if isinstance(path, Path) and path.parent.name == "visual_evidence":
+            encoding.set()
+            assert release.wait(3)
+        return save(image, path, *args, **kwargs)
+
+    monkeypatch.setattr(pillow.Image, "save", slow_save)
+    capture = module._RecordingMouseCapture(manager)
+
+    def click():
+        capture.on_click(20, 30, "Button.left", True)
+        capture.on_click(20, 30, "Button.left", False)
+        returned.set()
+
+    worker = threading.Thread(target=click)
+    worker.start()
+    try:
+        assert encoding.wait(1)
+        assert returned.wait(0.2), "click callback blocked on visual-locator PNG storage"
+        pending = manager._active["events"][0]["visual_locator"]
+        assert pending["status"] == "pending"
+        assert pending["failure_code"] is None
+    finally:
+        release.set()
+        worker.join(3)
+        completed = manager.stop()
+    locator = completed["events"][0]["visual_locator"]
+    assert locator["status"] == "ready"
+    assert locator["locator_id"].endswith("-target")
+    assert Path(locator["full_frame_artifact_path"]).is_file()
+
+
+def test_recording_required_locator_limit_marks_evidence_incomplete(tmp_path: Path) -> None:
+    module = _load_packaged_helper_module()
+    pillow = pytest.importorskip("PIL.Image")
+    manager = module.RecordingManager(
+        tmp_path, listener_factory=lambda _manager: [], overlay_controller=_FakeRecordingOverlay(),
+        screenshot_provider=lambda: pillow.new("RGB", (40, 30)),
+    )
+    manager.start(name="locator limit", target_app="lab", target_window="lab")
+    # The capture guard counts already-recorded pointer events, not queued jobs.
+    manager._active["events"] = [{"kind": "mouse_click", "at_ms": 0} for _ in range(200)]
+    locator = manager.capture_visual_locator(10, 10, locator_id="over-limit")
+    completed = manager.stop()
+    assert locator["failure_code"] == "VISUAL_LOCATOR_EVENT_LIMIT"
+    assert completed["time_series_evidence"]["evidence_complete"] is False
+
+
+def test_recording_writer_failure_survives_stop_and_memory_budget_is_enforced(tmp_path: Path) -> None:
+    module = _load_packaged_helper_module()
+    pillow = pytest.importorskip("PIL.Image")
+    buffer = module.RecordingFrameBuffer(
+        screenshot_provider=lambda: pillow.new("RGB", (40, 30)), queue_max_bytes=100,
+    )
+    buffer.start("rec-byte-limit", time.monotonic(), tmp_path / "bounded")
+    assert buffer.capture_once() is False
+    buffer.stop()
+    assert buffer.status()["pending_write_bytes"] == 0
+    assert buffer.status()["dropped_frame_count"] == 1
+    assert buffer.status()["evidence_complete"] is False
+
+    buffer = module.RecordingFrameBuffer(screenshot_provider=lambda: pillow.new("RGB", (40, 30)))
+
+    def broken_encoder(_image):
+        raise OSError("encoder/storage unavailable")
+
+    buffer._encode_frame = broken_encoder
+    buffer.start("rec-writer-failure", time.monotonic(), tmp_path / "failed")
+    assert buffer.capture_once() is False
+    buffer.stop()
+    assert buffer.status()["write_errors"] == 1
+    assert buffer.status()["evidence_complete"] is False
+    assert buffer.status()["pending_write_count"] == 0
+
+
 def test_recording_manager_persists_complete_two_fps_fullscreen_timeline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3636,7 +3851,7 @@ def test_recording_frame_loop_compensates_for_capture_processing_time(loader) ->
     frame_buffer = module.RecordingFrameBuffer(screenshot_provider=lambda: None, fps=2)
     frame_buffer._stop_event = FakeStopEvent()
 
-    def capture_once() -> bool:
+    def capture_once(**_kwargs) -> bool:
         capture_times.append(clock["value"])
         clock["value"] += 0.1
         return True

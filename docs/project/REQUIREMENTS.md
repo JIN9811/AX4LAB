@@ -1061,15 +1061,19 @@ Required when controlling Windows GUI/macros from the Equipment Agent:
 - Image-first demonstration recording uses Pillow through PyAutoGUI to capture
   bounded target crops. Install `opencv-python` to use confidence-based image
   matching during replay.
-- Full-session demonstration evidence is written at 2 FPS as periodic JPEG
-  frames plus event/boundary PNG files. This uses the existing Pillow
+- Full-session demonstration evidence targets 15 FPS as periodic JPEG
+  frames plus event/boundary PNG files. Acquisition and encoding/storage run
+  separately with bounded queues; overload and write errors mark evidence
+  incomplete. Stop drains pending writes before finalizing. This uses Pillow
   dependency and does not require a video codec. Keep sufficient free space in
   `WINDOWS_PYAUTOGUI_RECORDING_DIR`; critical disk pressure finalizes an
   incomplete package instead of discarding frames already written.
 - Linux Skill authoring uses Pillow to build 4x4 temporal storyboards. The
   selected shared LLM backend must advertise vision support for recordings that
-  contain timeline frames. Chunk analyses cover every source frame; overview
-  images are retained for GUI/audit and are not resent during final synthesis.
+  contain timeline frames. VLM analysis selects up to 128 source-linked frames,
+  prioritizing actions and transitions; the full recording remains on disk.
+  Omitted events or incomplete evidence require review. Overview images are
+  retained for GUI/audit and are not resent during final synthesis.
   Windows does not need an LLM runtime or API key.
 - Configure `WINDOWS_PYAUTOGUI_RECORDING_DIR` for persisted recordings and
   `WINDOWS_PYAUTOGUI_ATR_API_URL` for Linux-authoritative Skill lifecycle

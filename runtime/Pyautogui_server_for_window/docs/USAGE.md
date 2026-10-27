@@ -111,12 +111,32 @@ Each recording folder may contain:
 
 - `recording.json`: version, target, state, and timeline information
 - `events.jsonl`: keyboard/mouse events and monotonic timestamps
-- `frames/periodic/`: original 2 FPS JPEG frames covering the recording
+- `frames/periodic/`: original 15 FPS target JPEG frames covering the recording
 - `timeline.jsonl`: append-only chronological index of periodic/event/boundary frames
 - `keyframes/`, `timeline/event_keyframes/`: PNG evidence at events/checkpoints
 - locator/checkpoint metadata
 
-Periodic frames are written immediately to disk throughout recording, at a default 2 FPS.
+Periodic screen acquisition targets 15 FPS by default. Encoding and storage run on a
+separate writer, including event PNGs and visual-locator crops. Input callbacks retain
+their acquired/pre-click pixels without waiting for PNG encoding or disk writes;
+screen acquisition itself still takes time on the Windows host. Original frames and
+the existing event/pre/post/boundary artifacts remain in the recording package.
+
+The writer admits at most 32 jobs and 128 MiB of retained image data, including its
+in-flight job. This is separate from the 64 MiB recent compressed-frame cache and the
+small pre-click image history. A saturated queue rejects new evidence instead of
+growing memory indefinitely. `dropped_frame_count`, `dropped_evidence_count`,
+`missed_capture_intervals`, `capture_errors`, and `write_errors` describe incomplete
+evidence; `evidence_complete=false` and `writer_status=incomplete` must not be treated
+as a complete demonstration. `at_ms`/`captured_monotonic` describe acquisition, while
+`stored_monotonic` describes artifact storage, so slow encoding does not shift the
+observed action time. Event linkage also retains the original `event_at_ms`.
+
+STOP waits for accepted work to drain before finalizing the hash-addressed manifest.
+The session remains active for update/restart safety while finalization runs. A hung
+screen provider or storage operation can delay STOP; the recorder does not falsely
+finalize or abandon a live writer. 15 FPS is a target, not a Windows-native throughput
+guarantee; confirm capacity on the actual host before relying on evidence completeness.
 
 - Memory holds only a recent-frame cache for identifying pre-action evidence.
 - Normal recordings have no arbitrary duration or total-frame cap.

@@ -182,6 +182,7 @@ def _describe(agent, state, flow, *, ctx=None):
                 "target_profile": manifest.get("target_profile"),
                 "deployment": manifest.get("deployment"),
                 "workflow_summary": (package.get("annotations") or {}).get("workflow_summary", {}),
+                "step_transitions": (package.get("annotations") or {}).get("step_transitions", [])[:32],
                 "workflow_sha256": _digest(package.get("workflow", {})),
                 "programs_sha256": _digest(package.get("programs", []))})
         except (ValueError, OSError, KeyError) as exc:
@@ -223,16 +224,21 @@ def _payload(agent, state, result, execution_id):
 
 async def _capture(agent, state, ctx, result, execution_id):
     payload = _payload(agent, state, result, execution_id)
+    return await capture_screen_evidence(agent, state, ctx, payload, checkpoint="workflow_terminal")
+
+
+async def capture_screen_evidence(agent, state, ctx, payload, *, checkpoint):
+    """Request a new bridge frame and validate its downloaded bytes and scope."""
     if "equipment.pyautogui.screenshot" not in ctx.tools.list_tools():
         return [], {"ok": False, "error": "screenshot tool unavailable"}
     try:
-        raw = await agent._call_tool(ctx, "equipment.pyautogui.screenshot", {**payload, "checkpoint": "workflow_terminal"}, state=state)
+        raw = await agent._call_tool(ctx, "equipment.pyautogui.screenshot", {**payload, "checkpoint": checkpoint}, state=state)
         if raw.get("ok") is not True:
             raise ValueError("screenshot capture failed")
         if payload["runtime_mode"] == "live" and (raw.get("mode") != "live" or raw.get("simulated") is True):
             raise ValueError("live review requires a live screenshot")
-        for key in ("run_id", "loop_id", "specimen_id", "workflow_execution_id"):
-            if key in raw and raw[key] != payload[key]:
+        for key in ("run_id", "loop_id", "specimen_id", "workflow_execution_id", "equipment_skill_execution_id"):
+            if key in raw and raw[key] != payload.get(key):
                 raise ValueError("screenshot identity mismatch")
         alias = raw.get("artifact") or {}
         # The bridge downloads output_artifacts to Linux; the singular alias
@@ -259,13 +265,13 @@ async def _capture(agent, state, ctx, result, execution_id):
                 raise ValueError("screenshot dimensions exceed limit")
             mime = Image.MIME[raster.format]
             raster.verify()
-        evidence = {"ok": True, "path": str(path), "sha256": artifact["sha256"],
+        evidence = {"ok": True, "path": str(path), "sha256": artifact["sha256"], "checkpoint": checkpoint,
             "artifact_id": artifact.get("artifact_id"), "request_identity": payload,
             "identity_binding": "agent_request",
             "response_identity": {key: raw[key] for key in ("run_id", "loop_id", "specimen_id", "workflow_execution_id") if key in raw},
             "mode": raw.get("mode"), "source": "equipment.pyautogui.screenshot"}
         record_tool_artifact("evidence_result", "equipment.workflow_screenshot", evidence)
-        return [LLMImageInput(data=data, mime_type=mime, label="Current equipment screen after workflow termination")], evidence
+        return [LLMImageInput(data=data, mime_type=mime, label=f"Current equipment screen: {checkpoint}")], evidence
     except (ValueError, KeyError, OSError, RuntimeError, SyntaxError) as exc:
         return [], {"ok": False, "error": str(exc)}
 
@@ -470,6 +476,8 @@ async def run_decided_workflow(agent, state, ctx, flow):
                         proposals["resume_failed_block"] = {}
                     elif attempts == 0:
                         proposals["recover_wait"] = {}
+                        proposals["recover_dismiss"] = {"key": "esc", "presses": 1,
+                            "scope": "dismiss a visible non-operating transient dialog only"}
                         if _focus_action(state, result, ctx=ctx):
                             proposals["recover_focus"] = {}
                 if not observed:
@@ -489,26 +497,27 @@ async def run_decided_workflow(agent, state, ctx, flow):
                         diagnostics.append({"request_log": log})
                     phase = "terminal_review"
                     continue
-                if choice in {"recover_wait", "recover_focus"} and safe and attempts == 0:
+                if choice in {"recover_wait", "recover_focus", "recover_dismiss"} and safe and attempts == 0:
                     attempts += 1
                     before_recovery_images = images
-                    operation = "wait" if choice == "recover_wait" else "focus_window"
+                    operation = {"recover_wait": "wait", "recover_focus": "focus_window", "recover_dismiss": "press"}[choice]
                     gate = equipment_skill_recovery_gate(state=state, recovery={"operation": operation,
                         "attempt": attempts, "confidence": 1.0}, allowed_operations=[operation], max_attempts=1)
                     if gate_blocks_execution(gate) or not valid():
                         result = _blocked("EQUIPMENT_WORKFLOW_RECOVERY_REJECTED", result)
                         break
                     transition("RECOVERING", checkpoint=checkpoint,
-                        recovery={"attempts": attempts, "operation": operation})
+                        recovery={"attempts": attempts, "operation": operation, "promotion_status": "candidate_only"})
                     if choice == "recover_wait":
                         await asyncio.sleep(0 if agent._effective_runtime_mode(state) == "test" else 1)
                         recovery_result = {"ok": True, "operation": "wait", "actuation_performed": False}
                     else:
-                        action = _focus_action(state, result, ctx=ctx)
+                        action = ({"action": "press", "key": "esc", "presses": 1} if choice == "recover_dismiss"
+                                  else _focus_action(state, result, ctx=ctx))
                         recovery_result = await agent._call_tool(ctx, "equipment.pyautogui.run", {
                             **_payload(agent, state, result, execution_id), "sequence": [action],
                             "sequence_id": f"{execution_id}-recovery-{attempts}"}, state=state)
-                    diagnostics.append({"recovery": recovery_result, "guardian": gate})
+                    diagnostics.append({"recovery": recovery_result, "guardian": gate, "promotion_status": "candidate_only"})
                     if recovery_result.get("ok") is not True:
                         result = _blocked("EQUIPMENT_WORKFLOW_RECOVERY_FAILED", result)
                         break

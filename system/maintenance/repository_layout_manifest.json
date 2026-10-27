@@ -53244,8 +53244,8 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "63c6feddfda5ebb6189c4a9dffe4d9efa7d146345ef096e345ca1f9c192982fb",
-          "size": 58385,
+          "sha256": "e510b776e22ed92d28ddd41543dd5f7d28b3dcf7548bfa953cf3d38f69f58e26",
+          "size": 58682,
           "mode": "100644"
         }
       },
@@ -53512,8 +53512,8 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "7ab61bfb7e438ae6d46e79809847dae6df573da3fc78a8687a5f29f657612858",
-          "size": 113700,
+          "sha256": "0ecadd68aca365664804a2555c932d810dddd291b3ddcd3cbec186bbd18892f5",
+          "size": 115016,
           "mode": "100644"
         }
       },
@@ -53532,8 +53532,8 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "eb36732d5cd311bd5c2ba5650101882d34d0b5dfc6cd7c7d88bdd3eacd06cfbe",
-          "size": 906504,
+          "sha256": "9e9c3381877eef8c8295077388f8507af952789af29651a10416a184c30646e0",
+          "size": 910857,
           "mode": "100644"
         }
       },
@@ -53904,8 +53904,8 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "90e479314133689bd835e9e6dcbc64b342e579b730fe5f789d5e8455fb4c6cd8",
-          "size": 16358,
+          "sha256": "9a53ae1b251bc98bb82ba19cef55810fdb524aca21cec788bf8a587b77936396",
+          "size": 16470,
           "mode": "100644"
         }
       },
@@ -53932,8 +53932,8 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "1eaee36c6e425ae322215b3683dad61240e1eaa2cea88f1591cc70ec3a974ae0",
-          "size": 349969,
+          "sha256": "5d5ecacda79779702c43fab11f4653cc4c830b6afffb10c89a5e42381cc221f1",
+          "size": 360967,
           "mode": "100644"
         }
       },
@@ -53944,8 +53944,8 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "2b34d57ca2c3b04ffddd2249755642970745639b3480ea1b842e8b09f595f3ed",
-          "size": 488,
+          "sha256": "b602579ae8ed9a376d20985f948a6ce5590825e2ba7eeeb0068004d8e0df07a0",
+          "size": 487,
           "mode": "100644"
         }
       },
@@ -53968,16 +53968,16 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "0b3c4ab048e458c1200b5cc9d182af7acc0089808e1f21af40c463e8722d35f9",
-          "size": 264082,
+          "sha256": "4e01c867bb9f46bf3aafea57c06bc0db9499a9a922825b4fb1ca566ac1ee54e7",
+          "size": 269937,
           "mode": "100644"
         }
       },
       "runtime/agents/equipment/computer_use.py": {
         "previous_identity": null,
         "current_identity": {
-          "sha256": "8dd5de20d2e6fb6f60096ddccadda5c26d649d15fc984882ae9d4a7d364d0020",
-          "size": 23502,
+          "sha256": "455b686f5878042db3d239ff37f8145fa30d877947784e13f087e75d5c25f7d0",
+          "size": 25385,
           "mode": "100644"
         }
       },
@@ -54024,8 +54024,8 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "1eaee36c6e425ae322215b3683dad61240e1eaa2cea88f1591cc70ec3a974ae0",
-          "size": 349969,
+          "sha256": "5d5ecacda79779702c43fab11f4653cc4c830b6afffb10c89a5e42381cc221f1",
+          "size": 360967,
           "mode": "100644"
         }
       },
@@ -54052,8 +54052,8 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "52b4c2992949bc9f02a89179f0d0ba5e236d8e5dbac5988625c86d8c1e062618",
-          "size": 74816,
+          "sha256": "3475acc8bb1967ac55d907929b2761e44dce45d7311c0507f95707f951180b0f",
+          "size": 81293,
           "mode": "100644"
         }
       },
@@ -54076,8 +54076,8 @@
       "runtime/tests/unit/test_equipment_computer_use_runner.py": {
         "previous_identity": null,
         "current_identity": {
-          "sha256": "d53d24f7b9398ea8e477283519920a231d9667e26e84bfad7218566700de3b70",
-          "size": 23612,
+          "sha256": "4563ab29b08abb9b6c4143500e9b39c013af21985498503c4b69cde3e2451ed4",
+          "size": 28200,
           "mode": "100644"
         }
       },
@@ -54124,8 +54124,8 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "7f9f294cb7fc937009546f533179a9a5423eabdb085e652afec4873c38f1ea19",
-          "size": 59759,
+          "sha256": "7cd1f3afa39b76e48d8f42a09c7da1f438afd4e351e22f5cbce1033a0fc52ee6",
+          "size": 65663,
           "mode": "100644"
         }
       },
@@ -54156,8 +54156,8 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "1dbb82fcd2f4c0d5882d16e83433afd2708d999a40f95b9f71375352f0b3957c",
-          "size": 30573,
+          "sha256": "ed5f7fa27e13b5cee85f5850ef680e018695071db4659872285ffaa06823ecda",
+          "size": 41307,
           "mode": "100644"
         }
       },
@@ -54168,8 +54168,8 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "1aecb6e90f1d5e4f6206daf2beab89e1089890291c80279f021e7ab19eb443dc",
-          "size": 122602,
+          "sha256": "f53ecde215d238935a217b4dd7d6c2eaf288de4b60f958b5391f973fbf2ae889",
+          "size": 124627,
           "mode": "100644"
         }
       },
@@ -54180,8 +54180,8 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "52e6af36d8c769763c4afe29a1f88b13bcd6778d8abd90c9bba4ce366aa6e506",
-          "size": 6921,
+          "sha256": "4f75b53ab136eb506cdf820c6642d1ca1a7e436e6e81a66709102a184981000d",
+          "size": 8564,
           "mode": "100644"
         }
       },
@@ -54192,8 +54192,8 @@
           "mode": "100644"
         },
         "current_identity": {
-          "sha256": "5726b807460051cd80dfef4f8dc38d4bc1caf0695d41729e92a09e430ee45215",
-          "size": 31607,
+          "sha256": "135875cdbf90abe791c65fb786578cd71eff04253f1bb376b539f3f4c8887f49",
+          "size": 31650,
           "mode": "100644"
         }
       },
@@ -54330,6 +54330,178 @@
         "current_identity": {
           "sha256": "87dd1f253ea8bcc109df0fe425469a3f63570783217dd1ee1c399fbb16e2e05f",
           "size": 2578,
+          "mode": "100644"
+        }
+      },
+      "docs/gui/equipment_demonstration.md": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "fecda994248a8d7476ce0202efa43a7734d7f066eb383214137e3bc9a7a07e37",
+          "size": 3803,
+          "mode": "100644"
+        }
+      },
+      "runtime/Pyautogui_server_for_window/docs/USAGE.md": {
+        "previous_identity": {
+          "sha256": "a44849b6638b0fb28087a41f6a5506b4f19bfdb69cd3f46510cbff4c5203a5a0",
+          "size": 11849,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "276c0eafedfc86d2507f647f014122b95281df93ef210bf34f482ab02e0d7bba",
+          "size": 13361,
+          "mode": "100644"
+        }
+      },
+      "runtime/agents/equipment/decision.py": {
+        "previous_identity": {
+          "sha256": "b0bbe750e5f2d1b9d4602ed5fd9d86301bd21154f8427f3003f62300be029192",
+          "size": 27822,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "f99ddd5056a1a7a3ccad154b3509b2e6cf436aff7d257979bb8e2a8f7aa0d5df",
+          "size": 28063,
+          "mode": "100644"
+        }
+      },
+      "runtime/agents/equipment/workflow.py": {
+        "previous_identity": {
+          "sha256": "dae55f765fa10668466a6ea9471d59ae378e5b50d9e3bef1d4be01a8cd8bd807",
+          "size": 33395,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "f9dd8d326e26343b8700746a1508e66279b4de746edf16bc6ecd162793338ec6",
+          "size": 34236,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/js/equipment_semantic_review.test.cjs": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "53f0e3daa680acdffdcd7b0fb0c555d78abe7a3421a7af575fd500ea82d23a76",
+          "size": 14696,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/unit/test_equipment_agent.py": {
+        "previous_identity": {
+          "sha256": "98824802217411b823ce0c3a239aaca39e4bce36305fb2605de1587ee771e21d",
+          "size": 150913,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "549190fe3152c466fc61a5b332fa810f13ebb9fed3034b5ba685993f8c33d9ec",
+          "size": 152751,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/unit/test_equipment_skill_authoring.py": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "a6c11522c34011f6dbbdb65b43a97a975b91efe406de40e5f1953137946f8683",
+          "size": 7290,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/unit/test_equipment_skill_vision.py": {
+        "previous_identity": {
+          "sha256": "f282de9958498a6b4dbec80b50e12d86ade4f42431f13dd80ff9d209b3037a5d",
+          "size": 9577,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "ab080331fb61495f47b76b167a2318aa729292f6ef3d68a2900e8cb532b263eb",
+          "size": 15820,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/unit/test_equipment_visual_recovery.py": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "c0b41c0f19fe152794436e043753d8bd93e57e1af19ce70523ca1c8feee16710",
+          "size": 2970,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/unit/test_equipment_workflow_decision.py": {
+        "previous_identity": {
+          "sha256": "eb6469f317c83812df0a8f0e13aa14fcce8107c4a47392efcb2437a41669d8f6",
+          "size": 42937,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "5da8af1961da369ff5c4b6a10e01c499fd013426ec20a537f22ac4ae4da39420",
+          "size": 43468,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/unit/test_windows_pyautogui_bridge_server_helper.py": {
+        "previous_identity": {
+          "sha256": "f3f9c927fa4ad1333d5b7635cdc729cccf0d06b7e3be92017adb5a6bcec9f23d",
+          "size": 217538,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "e43d8a2c8b41fb2cbaa4db8984fef8c1157ee7e05ff878a98069c5555150c60a",
+          "size": 226424,
+          "mode": "100644"
+        }
+      },
+      "runtime/utils/equipment_skill_vision.py": {
+        "previous_identity": {
+          "sha256": "b28e5928733e6f8766e525b4326208fe672690303a4d229090d3624746e43f78",
+          "size": 28065,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "307ad63646a15cfea43b4752990f8d5e1322aefa393237bbdee7ee12f969f7a7",
+          "size": 34381,
+          "mode": "100644"
+        }
+      },
+      "system/maintenance/plans/2026-10-27-demonstration-vlm-skills.md": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "9899fa497c5b5056810e71d342128cd68dc98f1fc0addd7364461235d7801759",
+          "size": 4936,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/js/equipment_profile_controls.test.js": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "3f735ca6e95b429969b2e1429078f7f81bc7e075ab2ef6921c9f9390609ee806",
+          "size": 5758,
+          "mode": "100644"
+        }
+      },
+      "runtime/tests/unit/test_equipment_profile_workspace.py": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "6707f4037b4bfe519d662fb4e24ff0001f9ac88245035881b48e3914892e2b9d",
+          "size": 9199,
+          "mode": "100644"
+        }
+      },
+      "runtime/utils/equipment_profiles.py": {
+        "previous_identity": {
+          "sha256": "c21b29a58e8c725d2c142256a55d7204f65d2c0dbdf6b466bd62461ad969175d",
+          "size": 7598,
+          "mode": "100644"
+        },
+        "current_identity": {
+          "sha256": "f94fa3d580cdaac553df79b9ed15ab95c2cadd6a00d26a8e843bc87be2744d3d",
+          "size": 12624,
+          "mode": "100644"
+        }
+      },
+      "system/maintenance/plans/2026-10-26-equipment-profiles.md": {
+        "previous_identity": null,
+        "current_identity": {
+          "sha256": "428c034b340d8fd699fe974614bc8bb59bfd1f9c668d6c31e38ca6800659cd78",
+          "size": 5476,
           "mode": "100644"
         }
       }

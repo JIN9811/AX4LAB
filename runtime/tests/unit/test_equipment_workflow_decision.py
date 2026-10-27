@@ -343,12 +343,18 @@ async def test_standalone_test_workflow_binds_actual_simulator_screen_to_host_id
 
 
 @pytest.mark.asyncio
-async def test_terminal_recovery_retries_only_proven_unexecuted_block(tmp_path, monkeypatch):
+@pytest.mark.parametrize("recovery_choice", ["recover_wait", "recover_dismiss"])
+async def test_terminal_recovery_retries_only_proven_unexecuted_block(tmp_path, monkeypatch, recovery_choice):
     agent, state, tools, executed, worker, _ = setup_flow(tmp_path, monkeypatch)
-    model = Model(tools, ["execute_stacked_workflow", "recover_wait", "resume_failed_block", "accept_workflow_result"])
+    model = Model(tools, ["execute_stacked_workflow", recovery_choice, "resume_failed_block", "accept_workflow_result"])
     failed = False
     def fail_once(payload):
         nonlocal failed
+        if payload.get("sequence"):
+            assert recovery_choice == "recover_dismiss"
+            assert payload["sequence"] == [{"action": "press", "key": "esc", "presses": 1}]
+            executed.append("dismiss")
+            return {"ok": True, "executed_action_count": 1, "status": "completed"}
         if payload.get("equipment_skill_id") == "measure" and not failed:
             failed = True
             executed.append("measure")
@@ -358,7 +364,8 @@ async def test_terminal_recovery_retries_only_proven_unexecuted_block(tmp_path, 
     tools.register("equipment.pyautogui.run", fail_once)
     result = await agent.run(state, model)
     assert result.success
-    assert executed == ["prepare", "measure", "measure", "export"]
+    assert executed == (["prepare", "measure", "dismiss", "measure", "export"] if recovery_choice == "recover_dismiss"
+                        else ["prepare", "measure", "measure", "export"])
     assert len(model.calls) == 4
     assert len(model.calls[2][1]["images"]) == 2
     assert [x["block_id"] for x in result.data["equipment_skill_flow_execution"]["transitions"] if x["phase"] == "skill"] == ["prepare", "measure", "export"]

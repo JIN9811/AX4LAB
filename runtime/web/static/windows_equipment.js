@@ -608,20 +608,43 @@ function skillAuthoringIsActive(job) {
   return ["QUEUED", "RUNNING", "STOPPING"].includes(String(job && job.status || "").toUpperCase());
 }
 
+function skillAuthoringReviewSummary(job) {
+  const result = job.result || {};
+  const annotations = result.annotations || {};
+  const snapshot = annotations.model_snapshot || result.model_snapshot || {};
+  const pending = (annotations.steps || []).filter((step) => step.review_required).length;
+  const reviewRequired = pending > 0 || annotations.status === "review_required" || result.manifest?.lifecycle === "review_required";
+  const reviewed = !reviewRequired && annotations.status === "reviewed";
+  const selected = snapshot.timeline_selected_frame_count;
+  const source = snapshot.timeline_source_frame_count ?? snapshot.source_frame_count;
+  const complete = snapshot.timeline_event_coverage_complete ?? snapshot.event_coverage_complete;
+  const omitted = snapshot.timeline_omitted_event_numbers || snapshot.omitted_event_numbers || [];
+  const details = [];
+  if (Number.isFinite(selected) && Number.isFinite(source)) details.push(`Sampled ${selected} / ${source} source frames`);
+  if (complete === true) details.push("Event evidence coverage complete");
+  if (complete === false) details.push(`Event evidence coverage incomplete${omitted.length ? `; omitted events: ${omitted.join(", ")}` : ""}`);
+  if (reviewRequired) details.push(`${pending || "Some"} step(s) require human review in the Workflow Editor`);
+  return { reviewRequired, reviewed, details };
+}
+
 function renderSkillAuthoringJob(job) {
   const payload = job && typeof job === "object" ? job : {};
   const status = String(payload.status || "IDLE").toUpperCase();
   const stage = String(payload.stage || "IDLE").replaceAll("_", " ");
   const progress = Math.max(0, Math.min(100, Number(payload.progress || 0)));
+  const review = skillAuthoringReviewSummary(payload);
   if (skillAuthoringProgress) skillAuthoringProgress.dataset.status = status;
   if (skillAuthoringProgressBar) {
     skillAuthoringProgressBar.value = progress;
     skillAuthoringProgressBar.textContent = `${progress}%`;
   }
   if (skillAuthoringStatus) {
-    skillAuthoringStatus.textContent = status === "RUNNING" ? `Working · ${stage}` : `${status} · ${stage}`;
+    skillAuthoringStatus.textContent = status === "COMPLETED" && review.reviewRequired ? "COMPLETED · REVIEW REQUIRED" : status === "RUNNING" ? `Working · ${stage}` : `${status} · ${stage}`;
   }
-  if (skillAuthoringDetail) skillAuthoringDetail.textContent = String(payload.status_text || "Waiting for Skill authoring.");
+  if (skillAuthoringDetail) {
+    const detail = status === "COMPLETED" ? "Draft authoring completed. Open Workflow Editor to inspect evidence and review proposals." : String(payload.status_text || "New Windows recordings target 15 FPS using asynchronous capture. Select a recording to build a reviewed draft.");
+    skillAuthoringDetail.textContent = [detail, ...review.details].join(" · ");
+  }
   if (btnStopSkillAuthoring) btnStopSkillAuthoring.disabled = !skillAuthoringIsActive(payload) || status === "STOPPING";
   if (skillAuthoringIsActive(payload)) {
     setBusy(btnImportRecording, true);
@@ -656,7 +679,12 @@ async function pollSkillAuthoringJob() {
   window.localStorage.removeItem(profileJobKey("atr.equipment.skillAuthoringJobId"));
   if (String(job.status || "").toUpperCase() === "COMPLETED" && finalizedSkillAuthoringJobId !== jobId) {
     finalizedSkillAuthoringJobId = jobId;
-    if (recordingStatus) recordingStatus.textContent = `Annotated Skill ${job.skill_id}@${job.version} is ready to compile.`;
+    if (recordingStatus) {
+      const review = skillAuthoringReviewSummary(job);
+      recordingStatus.textContent = review.reviewed
+        ? `Reviewed Skill ${job.skill_id}@${job.version} can proceed to compile validation.`
+        : `Skill ${job.skill_id}@${job.version} draft created. Open Workflow Editor for semantic and locator review before compiling.`;
+    }
     writeLog(job.result || data);
     await Promise.all([refreshEquipmentSkills(), refreshEquipmentRuntime()]);
   }
