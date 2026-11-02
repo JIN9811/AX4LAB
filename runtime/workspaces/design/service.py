@@ -247,7 +247,10 @@ class DesignService:
                         break
                     except FutureTimeout:
                         if future.done():
-                            raise  # A completed worker's TimeoutError is not a polling timeout.
+                            # Completion can race the polling timeout. Retrieve the
+                            # actual result (or worker exception), not the poll error.
+                            receipt = future.result()
+                            break
                         if self.closed:
                             raise DesignError('interrupted', 'Workspace shut down')
                 verify_receipt(job, root, receipt)

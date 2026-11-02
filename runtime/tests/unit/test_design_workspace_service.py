@@ -226,6 +226,40 @@ def test_completed_worker_timeout_is_terminal_not_an_endless_wait(service):
     assert terminal(s, job['id'])['state'] == 'failed'
 
 
+def test_success_between_poll_timeout_and_done_preserves_receipt(tmp_path):
+    class CompletingWorker(Worker):
+        def submit(self, *args, **kwargs):
+            future, cancellation = super().submit(*args, **kwargs)
+            worker = self
+
+            class CompletingFuture:
+                def result(self, timeout=None):
+                    if not future.done():
+                        # Simulate a pending poll timing out, without timing/sleeps.
+                        raise TimeoutError('poll expired')
+                    return future.result(timeout=timeout)
+
+                def done(self):
+                    # Worker succeeds in the gap after the timed-out poll.
+                    if not future.done():
+                        worker.finish()
+                    return future.done()
+
+            return CompletingFuture(), cancellation
+
+    worker = CompletingWorker()
+    service = DesignService(tmp_path/'memory', tmp_path/'artifacts', executor=worker)
+    try:
+        job = service.submit(request(), idempotency_key='poll-completion-race')
+        result = terminal(service, job['id'])
+        assert result['state'] == 'succeeded', result
+        assert result['receipt']['request']['geometry_id'] == 'simple_cubic'
+        assert service.artifact(job['id'], 'stl').read_bytes() == b'controlled numerical artifact'
+        assert (Path(worker.calls[0][0]['output_dir'])/'receipt.json').is_file()
+    finally:
+        service.shutdown()
+
+
 def test_disable_does_not_cancel_accepted_job_and_state_is_durable(service, tmp_path):
     s, w = service
     j = s.submit(request(), idempotency_key='accepted')
