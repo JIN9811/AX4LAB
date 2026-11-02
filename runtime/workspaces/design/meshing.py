@@ -1,4 +1,7 @@
 """Finite-domain fields: rotate sampling coordinates, close the crop, inspect STL."""
+from utils.source_identity import attest_module_source
+
+attest_module_source(__file__)
 
 
 def create_grid(request):

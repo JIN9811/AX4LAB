@@ -8,6 +8,9 @@ import re
 
 from workspaces.fields import normalize_fields
 from .catalog import DesignCatalog, parameter_schema
+from utils.source_identity import attest_module_source, verify_loaded_source
+
+attest_module_source(__file__)
 
 
 REQUEST_SCHEMA = "ax4lab.geometry_request.v1"
@@ -101,7 +104,10 @@ def _identity(value):
 
 def _pin_sources(record):
     shared = {name: digest for name, digest in record["source_files"].items()
-              if name.startswith(("workspaces/", "mcp_tools/", "environment/"))}
+              if name.startswith(("workspaces/", "mcp_tools/", "utils/", "environment/"))}
+    for name, digest in shared.items():
+        if name.endswith(".py"):
+            verify_loaded_source(name, digest)
     if _LOADED_SOURCES and shared != _LOADED_SOURCES:
         raise ValueError("Shared numerical source changed; restart worker")
     _LOADED_SOURCES.update(shared)
@@ -146,6 +152,7 @@ def generate_geometry(request: dict, output_dir: Path, *, identity: dict, catalo
         raise ValueError(f"Provider final validation failed: {provider_validation['reject_reasons']}")
     # Any changed source invalidates the result before publication.
     catalog.resolve(normalized["module_id"], normalized["geometry_id"], normalized["provider_version"])
+    _pin_sources(record)
     checked = validate_mesh(stl, normalized["specimen_size_mm"])
     if not checked["ok"]:
         raise ValueError(f"Generated mesh failed checks: {checked['reject_reasons']}")

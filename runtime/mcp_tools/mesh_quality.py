@@ -8,6 +8,10 @@ import os
 from pathlib import Path
 import tempfile
 
+from utils.source_identity import attest_module_source
+
+attest_module_source(__file__)
+
 
 def _load_stl(path):
     import numpy as np

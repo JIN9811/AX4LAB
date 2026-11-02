@@ -8,6 +8,10 @@ from typing import Callable
 
 import yaml
 
+from utils.source_identity import attest_module_source
+
+attest_module_source(__file__)
+
 
 _ID = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _VERSION = re.compile(r"^\d+\.\d+\.\d+$")

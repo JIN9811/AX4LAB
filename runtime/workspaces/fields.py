@@ -4,6 +4,10 @@ from copy import deepcopy
 import math
 import re
 
+from utils.source_identity import attest_module_source
+
+attest_module_source(__file__)
+
 
 _KEY = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _TYPES = {"number", "integer", "enum", "boolean", "text", "vector"}

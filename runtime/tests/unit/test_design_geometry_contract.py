@@ -244,7 +244,7 @@ def test_loaded_legacy_source_cannot_be_relabelled_with_changed_dependency(tmp_p
     record = cat.resolve(MODULE, "gyroid", "1.0.0")
     isolated_runtime = tmp_path / "runtime"
     for name in record["source_files"]:
-        if name.startswith(("workspaces/", "mcp_tools/")):
+        if name.startswith(("workspaces/", "mcp_tools/", "utils/")):
             destination = isolated_runtime / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(catalog_module.RUNTIME_ROOT / name, destination)
@@ -274,3 +274,52 @@ def test_representation_schema_replaces_inactive_parameters(tmp_path):
     assert normalize_request(req, cat)["parameters"] == {"iso_level": 0.0}
     with pytest.raises(ValueError):
         normalize_request({**req, "representation": "solid", "parameters": {"iso_level": 0}}, cat)
+
+
+@pytest.mark.parametrize("preloaded,before,after", [
+    ("mcp_tools.tpms_geometry", "return 1.5 * math.sin(", "return 1.4 * math.sin("),
+    ("mcp_tools.mesh_quality", "if volume <= 0:", "if volume <= -1:"),
+    ("workspaces.design.engine", 'ENGINE_VERSION = "1.0.0"', 'ENGINE_VERSION = "1.0.1"'),
+])
+def test_first_generation_rejects_dependency_changed_after_preload(tmp_path, preloaded, before, after):
+    """A fresh process's cached Python must never be labelled with newer disk bytes."""
+    import os
+    import shutil
+    import subprocess
+    import sys
+    runtime = Path(__file__).resolve().parents[2]
+    isolated = tmp_path / "runtime"
+    shutil.copytree(runtime / "workspaces", isolated / "workspaces", ignore=shutil.ignore_patterns("__pycache__"))
+    for name in ("mcp_tools/tpms_geometry.py", "mcp_tools/mesh_quality.py", "utils/source_identity.py"):
+        source = runtime / name
+        if source.exists():
+            target = isolated / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+    script = '''
+import importlib
+from pathlib import Path
+import sys
+module = importlib.import_module(sys.argv[1])
+if sys.argv[1].startswith("mcp_tools."):
+    assert "workspaces.design.engine" not in sys.modules
+path = Path(module.__file__)
+source = path.read_text()
+assert sys.argv[2] in source
+path.write_text(source.replace(sys.argv[2], sys.argv[3]))
+from workspaces.design.catalog import DesignCatalog
+from workspaces.design.engine import generate_geometry
+output = Path("first-generation")
+try:
+    generate_geometry({"module_id": "metamaterial_unit_cell_designer", "geometry_id": "gyroid",
+        "provider_version": "1.0.0", "specimen_size_mm": [10,10,10], "resolution": 48},
+        output, identity={}, catalog=DesignCatalog())
+except ValueError as error:
+    assert "restart" in str(error), str(error)
+else:
+    raise AssertionError("first generation accepted stale preloaded numerical code")
+assert not output.exists(), "source rejection must precede artifact allocation"
+'''
+    completed = subprocess.run([sys.executable, "-c", script, preloaded, before, after],
+        cwd=tmp_path, env={**os.environ, "PYTHONPATH": str(isolated)}, capture_output=True, text=True, timeout=30)
+    assert completed.returncode == 0, completed.stdout + completed.stderr

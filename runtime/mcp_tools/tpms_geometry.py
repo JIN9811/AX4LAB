@@ -15,6 +15,10 @@ from pathlib import Path
 from random import Random
 from typing import Any
 
+from utils.source_identity import attest_module_source
+
+attest_module_source(__file__)
+
 
 def normalize_geometry_type(value: Any) -> str:
     """Normalize legacy and human-facing geometry names to runtime names."""

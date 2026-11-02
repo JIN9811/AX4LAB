@@ -211,11 +211,61 @@ All commands use `PYTHONPATH=runtime` and
 - Scope does NOT assert all fourteen geometries, independent physical sheet-wall
   validity, absence of self-intersections, slicing/manufacturing readiness, or
   compatibility of arbitrary installed Python dependency graphs.
-- Shared source snapshot pinning applies from the first generation in a process;
-  update installed code only through normal worker restart, not concurrent file
-  mutation. The catalog itself detects stale acceptance snapshots on every resolve.
+- Shared source identity is attested at module execution time (see fixround1
+  below), including dependencies loaded before Design is imported. Update code
+  only through normal worker restart, not concurrent file mutation. The catalog
+  also detects stale acceptance snapshots on every resolve.
 - Full-project suite is deliberately deferred to Task 7 per controller direction.
 - External scikit-image currently emits NumPy 2.5 array-shape DeprecationWarnings;
   they are reported, not silenced and not caused by the new numerical contract.
   The extended existing-tool run also reports five existing Pydantic schema-field
   shadowing warnings in `experiments/schemas.py`.
+
+## Task 2 fixround1 — first-generation loaded-source provenance
+
+Review identified that the original `_LOADED_SOURCES` cache initialized only at
+first generation. A long-lived process could load legacy numerical code, change
+the installed file, and then issue its FIRST Design request: a fresh catalog
+claimed new disk identity while Python executed old cached code.
+
+Added `utils/source_identity.py`, a standard-library-only attestation helper,
+and top-level calls in the eight fingerprinted common/design/legacy modules.
+The hook records the source digest when module code executes, after comparing
+the entire executing module code object against a freshly compiled copy of its
+source. That comparison includes module constants/nested function code and
+prevents stale timestamp-valid pyc from attesting newer source bytes. The helper
+itself is attested and included in the source fingerprint.
+
+The generation guard now checks already-loaded module attestations against the
+accepted hashes BEFORE creating the output directory, including on the first
+Design request. It checks again before receipt publication for modules imported
+during generation. Loaded modules without a matching attestation are rejected
+with an explicit worker restart requirement. No numerical equations changed.
+
+**Required Task 3 integration:** every shared implementation module under
+`workspaces/design/providers/*.py` must call the following at module top level
+(after any future import). This includes a nonempty shared `__init__.py` if used.
+Provider wrapper files are compiled directly, but can use the same hook.
+
+```python
+from utils.source_identity import attest_module_source
+attest_module_source(__file__)
+```
+
+All regression mutations occur only in copied temporary runtime trees and fresh
+subprocesses, never the working checkout or production files. The new cases
+preload `mcp_tools.tpms_geometry`, `mcp_tools.mesh_quality`, or the Design engine,
+mutate the corresponding copied source, then invoke FIRST generation. Legacy
+cases explicitly assert that the Design engine has not been imported at preload.
+
+Commands (same validation Python and `PYTHONPATH=runtime` as above):
+
+- RED: `pytest runtime/tests/unit/test_design_geometry_contract.py -q -k first_generation`
+  — **3 failed, 34 deselected in 2.77s**. All three failures were the intended
+  assertion that first generation incorrectly accepted stale preloaded code.
+- GREEN: `pytest runtime/tests/unit/test_design_geometry_contract.py runtime/tests/unit/test_design_geometry_legacy.py -q`
+  — **47 passed, 73 warnings in 6.46s**, exit 0. Includes normal imports, actual
+  worker round trip, exact legacy parity, after-prior-generation mutation, and
+  before-first-generation mutation coverage.
+- `git diff --check` — clean. The three-minute legacy suite was not repeated,
+  as requested; the pre-existing scientific dependency warnings remain deferred.

@@ -8,6 +8,9 @@ import platform
 
 from workspaces.catalog import discover_modules
 from workspaces.fields import normalize_fields
+from utils.source_identity import attest_module_source
+
+attest_module_source(__file__)
 
 
 DEFAULT_ROOT = Path(__file__).parent / "modules"
@@ -70,7 +73,7 @@ def source_files(record, module):
     paths = [RUNTIME_ROOT / name for name in (
         "workspaces/catalog.py", "workspaces/fields.py", "workspaces/design/catalog.py",
         "workspaces/design/engine.py", "workspaces/design/meshing.py", "workspaces/design/tool_adapter.py",
-        "mcp_tools/tpms_geometry.py", "mcp_tools/mesh_quality.py")]
+        "mcp_tools/tpms_geometry.py", "mcp_tools/mesh_quality.py", "utils/source_identity.py")]
     paths.extend(sorted((RUNTIME_ROOT / "workspaces/design/providers").glob("*.py")))
     for path in paths:
         if not path.is_file():

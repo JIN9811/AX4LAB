@@ -1,4 +1,7 @@
 """Dedicated legacy writer adapter; no old production tool dispatch is changed."""
+from utils.source_identity import attest_module_source
+
+attest_module_source(__file__)
 
 
 def write_legacy_gyroid(request, stl_path):
