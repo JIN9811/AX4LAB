@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 from dataclasses import replace
 import argparse
+import asyncio
 import hashlib
 import json
 import os
@@ -16,6 +17,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from playwright.sync_api import expect, sync_playwright
+from playwright.async_api import expect as async_expect, async_playwright
 import uvicorn
 import yaml
 
@@ -207,7 +209,10 @@ def audit(output, chromium):
         page.set_viewport_size({'width':1920,'height':1080})
         for fixture in ('fixture_two','fixture_three'):
             (Path(temporary)/fixture).rename(modules/fixture)
-        page.get_by_role('button',name='Refresh modules',exact=True).click()
+        with page.expect_response(lambda response:response.url.endswith(f'/modules/{MODULE}/geometries')) as refreshed:
+            page.get_by_role('button',name='Refresh modules',exact=True).click()
+        refreshed.value.body()
+        page.evaluate('()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))')
         expect(page.locator('#design-modules article')).to_have_count(3)
         page.locator('#geometry-select').select_option('gyroid')
         expect(page.get_by_label('Orientation · X / Y / Z 1')).to_be_disabled()
@@ -216,22 +221,23 @@ def audit(output, chromium):
         page.locator('#geometry-select').select_option('spinodoid')
         page.get_by_label('Seed',exact=True).fill('42')
         page.locator('#final-resolution').fill('160')
-        page.get_by_role('button',name='Generate',exact=True).click()
-        try:
-            expect(page.locator('#design-jobs article').first).to_contain_text('spinodoid')
-        except AssertionError:
-            print({'message':page.locator('#design-message').inner_text(),
-                'seed':page.get_by_label('Seed',exact=True).input_value(),
-                'geometry':page.locator('#geometry-select').input_value(),
-                'errors':errors},flush=True)
-            raise
+        with page.expect_response(lambda response:response.url.endswith('/api/design/jobs') and response.request.method=='POST') as submitted:
+            page.get_by_role('button',name='Generate',exact=True).click()
+        submit_response=submitted.value
+        cancelled_job=submit_response.json()
+        assert submit_response.status==202,cancelled_job
+        assert cancelled_job['request']['geometry_id']=='spinodoid',cancelled_job
+        assert cancelled_job['request']['seed']==42,cancelled_job
+        assert cancelled_job['request']['resolution']==160,cancelled_job
+        cancelled_row=page.locator(f'#design-jobs [data-job-id="{cancelled_job["id"]}"]')
+        expect(cancelled_row).to_contain_text('spinodoid')
         page.locator('#preview-resolution').fill('17.5')
         page.get_by_role('button',name='Preview',exact=True).click()
         expect(page.locator('#design-message')).to_contain_text('resolution must be an integer')
-        page.locator('#design-jobs article').first.get_by_role('button',name='Cancel').click()
-        expect(page.locator('#design-jobs article').first).to_contain_text('cancelled')
+        cancelled_row.get_by_role('button',name='Cancel').click()
+        expect(cancelled_row).to_contain_text('cancelled')
         expect(page.locator('#design-message')).to_contain_text('resolution must be an integer')
-        expect(page.locator('#design-jobs article').first.get_by_text('Download STL')).to_have_count(0)
+        expect(cancelled_row.get_by_text('Download STL')).to_have_count(0)
         expect(page.locator('#result-title')).to_contain_text('simple_cubic')
         page.get_by_role('button',name='Disable Metamaterial Unit Cell Designer').click()
         expect(page.get_by_role('button',name='Preview',exact=True)).to_be_disabled()
@@ -264,15 +270,98 @@ def audit(output, chromium):
         assert pool.status()['completed']>=2
         evidence={'url':url+'/design','viewports':['1920x1080','390x844'],'browser':'Playwright; Browser plugin not available',
             'errors':errors,'software_renderer_warnings':render_warnings,'preview_id':preview_id,'final_id':final['id'],'final_bytes':destination.stat().st_size,
-            'requests':len(requests),'checks':'catalog, visibility, dirty inputs, numeric error, profile conflict, real preview/final download, camera, cancel, removal, reload, narrow'}
+            'requests':len(requests),'cancelled_job':{key:cancelled_job[key] for key in ('id','request','request_sha256','created_sequence')},
+            'checks':'catalog, visibility, dirty inputs, numeric error, profile conflict, real preview/final download, camera, cancel, removal, reload, narrow'}
         (output/'evidence.json').write_text(json.dumps(evidence,indent=2))
         browser.close()
         print(json.dumps(evidence,indent=2))
+
+
+async def selection_probe(output,chromium):
+    """Bound three refresh interleavings, using real API responses and exact POST IDs."""
+    output.mkdir(parents=True,exist_ok=True)
+    results=[]
+    with tempfile.TemporaryDirectory(prefix='design-selection-') as temporary, fixture_server(Path(temporary)) as (url,service,modules,pool):
+        async with async_playwright() as playwright:
+            browser=await playwright.chromium.launch(executable_path=chromium,headless=True,args=['--enable-unsafe-swiftshader'])
+            for phase in ('before_seed','after_seed','after_submit'):
+                page=await browser.new_page(viewport={'width':1920,'height':1080})
+                posts=[]
+                page.on('request',lambda request:posts.append(request.post_data_json) if request.url.endswith('/api/design/jobs') and request.method=='POST' else None)
+                await page.goto(url+'/design')
+                await page.get_by_role('button',name='Metamaterial Unit Cell Designer',exact=True).click()
+                await async_expect(page.locator('#geometry-select')).to_be_visible()
+                await page.locator('#geometry-select').select_option('simple_cubic')
+                await page.set_viewport_size({'width':390,'height':844})
+                await page.locator('#generate-design').scroll_into_view_if_needed()
+                await page.set_viewport_size({'width':1920,'height':1080})
+                gate,entered=asyncio.Event(),asyncio.Event()
+                async def delayed(route):
+                    entered.set()
+                    await gate.wait()
+                    await route.continue_()
+                await page.route(f'**/modules/{MODULE}/geometries',delayed)
+                await page.get_by_role('button',name='Refresh modules',exact=True).click()
+                await asyncio.wait_for(entered.wait(),5)
+                await page.locator('#geometry-select').select_option('gyroid')
+                await async_expect(page.get_by_label('Orientation · X / Y / Z 1')).to_be_disabled()
+                await page.locator('#representation-select').select_option('network_positive')
+                await async_expect(page.get_by_label('Orientation · X / Y / Z 1')).to_be_enabled()
+                await page.locator('#geometry-select').select_option('spinodoid')
+                async def release_refresh():
+                    async with page.expect_response(lambda response:response.url.endswith(f'/modules/{MODULE}/geometries')) as refreshed:
+                        gate.set()
+                    response=await refreshed.value
+                    assert response.status==200
+                    await response.body()
+                    await page.evaluate('()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))')
+                if phase=='before_seed':
+                    await release_refresh()
+                await page.get_by_label('Seed',exact=True).fill('42')
+                await page.locator('#final-resolution').fill('160')
+                if phase=='after_seed':
+                    await release_refresh()
+                async with page.expect_response(lambda response:response.url.endswith('/api/design/jobs') and response.request.method=='POST') as submitted:
+                    await page.get_by_role('button',name='Generate',exact=True).click()
+                response=await submitted.value
+                job=await response.json()
+                assert response.status==202,job
+                if phase=='after_submit':
+                    await release_refresh()
+                assert len(posts)==1,posts
+                for request in (posts[0]['request'],job['request']):
+                    assert request['geometry_id']=='spinodoid',request
+                    assert request['representation']=='grf',request
+                    assert request['seed']==42,request
+                    assert request['resolution']==160,request
+                    assert request['quality']=='final',request
+                row=page.locator(f'#design-jobs [data-job-id="{job["id"]}"]')
+                await async_expect(row).to_contain_text('spinodoid')
+                await async_expect(page.locator('#geometry-select')).to_have_value('spinodoid')
+                await async_expect(page.get_by_label('Seed',exact=True)).to_have_value('42')
+                await async_expect(page.locator('#final-resolution')).to_have_value('160')
+                results.append({'phase':phase,'http_status':response.status,'post_count':len(posts),
+                    'submitted_request':posts[0]['request'],'job_id':job['id'],
+                    'canonical_request':job['request'],'request_sha256':job['request_sha256'],
+                    'row_matches_accepted_id':True,'fields_preserved':True})
+                service.cancel(job['id'])
+                deadline=time.monotonic()+10
+                while service.active is not None and time.monotonic()<deadline:
+                    await asyncio.sleep(.01)
+                assert service.active is None
+                await page.close()
+            await browser.close()
+    (output/'selection-evidence.json').write_text(json.dumps(results,indent=2))
+    print(json.dumps(results,indent=2))
 
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser()
     parser.add_argument('--output',type=Path,default=Path(tempfile.mkdtemp(prefix='design-qa-')))
     parser.add_argument('--chromium',default=CHROMIUM)
+    parser.add_argument('--selection-only',action='store_true')
     args=parser.parse_args()
-    audit(args.output,args.chromium)
+    if args.selection_only:
+        asyncio.run(selection_probe(args.output,args.chromium))
+    else:
+        audit(args.output,args.chromium)
