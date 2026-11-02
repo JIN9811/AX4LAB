@@ -61,6 +61,9 @@
       geometries: [],
       draft: null,
       jobs: [],
+      invalidateSelection() {
+        selection++;
+      },
       async selectModule(id, fetcher) {
         const token = ++selection;
         const data = await fetcher(id);
@@ -206,6 +209,7 @@
       $("save-state").textContent = "Unsaved";
     }
     function changeProfileContext() {
+      model.invalidateSelection();
       profileContext++;
       editGeneration = 0;
       $("save-state").textContent = "";
@@ -282,17 +286,21 @@
       updateAvailability();
     }
     function updateAvailability() {
+      const module = modules.find((m) => m.id === model.moduleId);
       const available =
-        modules.some((m) => m.id === model.moduleId && m.state.enabled) &&
+        module?.state.enabled &&
         Boolean(model.geometry);
-      for (const id of ["preview-design", "generate-design", "save-profile"])
-        $(id).disabled = !available;
+      $("save-profile").disabled = !available;
+      $("preview-design").disabled = !available || !module.actions?.includes("preview");
+      $("generate-design").disabled = !available || !module.actions?.includes("generate");
       const selectedProfile =
         profiles.find((p) => p.id === profile?.id) || profile;
       if (selectedProfile?.available === false)
         $("save-profile").disabled = true;
       $("selection-state").textContent = available
-        ? ""
+        ? model.geometry.agent_handoff === true
+          ? "Agent handoff supported · geometry checks required"
+          : "Manual only · no agent handoff"
         : model.moduleId
           ? "Module unavailable"
           : "";
@@ -422,13 +430,13 @@
         message(chosen.unavailable_reason || "Profile unavailable", true);
         return;
       }
-      const token = ++profileToken;
+      const context = profileContext;
       if (
         await model.selectModule(chosen.request.module_id, (id) =>
           api(`/modules/${id}/geometries`),
         )
       ) {
-        if (token !== profileToken || profile?.id !== id) return;
+        if (context !== profileContext || profile?.id !== id) return;
         model.selectGeometry(chosen.request.geometry_id);
         if (model.geometry?.version !== chosen.request.provider_version)
           throw Error("Profile provider unavailable");
@@ -476,20 +484,28 @@
     $("delete-profile").onclick = action(async () => {
       if (!profile) return;
       if (!confirm(`Delete profile “${profile.name}”?`)) return;
-      await api(`/profiles/${profile.id}`, "DELETE", {
-        revision: profile.revision,
+      const target = profile, context = profileContext;
+      await api(`/profiles/${target.id}`, "DELETE", {
+        revision: target.revision,
         confirmed: true,
       });
-      profile = null;
-      $("profile-name").value = "";
+      if (context === profileContext && profile?.id === target.id) {
+        changeProfileContext();
+        profile = null;
+        $("profile-name").value = "";
+        message("Profile deleted");
+      }
       await refreshProfiles();
-      message("Profile deleted");
+      updateAvailability();
     });
     function numberValue(id) {
       const raw = $(id).value;
       return raw.trim() === "" ? null : Number(raw);
     }
     async function submit(quality) {
+      const module = modules.find((m) => m.id === model.moduleId);
+      if (!module?.state.enabled || !module.actions?.includes(quality === "final" ? "generate" : "preview"))
+        throw Error("Module does not support this action");
       const request = readDraft();
       request.quality = quality;
       request.resolution = numberValue(

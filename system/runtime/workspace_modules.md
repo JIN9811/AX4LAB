@@ -51,6 +51,10 @@ Serial Communication is the one compatibility adapter for the legacy fixed
 filename `protocol.py`. It keeps `ax4lab.serial_device.v1`, `ModuleCatalog`, its
 URLs, profiles, validation, protocol factory, and restart-on-code-change check.
 New workspaces and nested provider catalogs use `provider.py`.
+Design additionally validates nonempty unique `actions` from `preview`/`generate`
+and `output_kinds: [stl]`; these are enforced admission/control declarations, not
+arbitrary executable actions. Geometry `agent_handoff` is a boolean defaulting
+to false; manual support does not automatically enable experiment handoff.
 
 ## Declarative fields
 

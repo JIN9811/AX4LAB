@@ -117,6 +117,48 @@ def test_candidate_admission_is_bounded_detached_stable_and_not_bo(context):
         DesignAgent()._prepare_design_payload(state_for(value, geometry_candidates=[value] * 9), context)
 
 
+def test_known_invalid_alternative_is_not_authorized_and_geometry_is_pending(context):
+    from agents.design.decision import candidate_evaluation
+    invalid = request(parameters={"cell_size_mm":10, "strut_diameter_mm":6})
+    agent, state = DesignAgent(), state_for(request(), geometry_candidates=[invalid])
+    prepared = agent._prepare_design_payload(state, context)
+    assert len(prepared["ranked"]) == 1
+    assert len(prepared["rejected"]) == 1
+    assert "half cell" in prepared["rejected"][0]["reject_reasons"][0]
+    assert prepared["valid_pool"] == [] and prepared["hard_valid_count"] == 0
+    evaluation = candidate_evaluation(agent, state, prepared, prepared["ranked"][0])
+    assert evaluation["validity"]["status"] == "pending"
+    assert evaluation["request_preflight"]["status"] == "pass"
+    assert "serialized" in evaluation["validity"]["reasons"][0]
+
+
+@pytest.mark.asyncio
+async def test_invalid_alternative_never_appears_valid_in_decision_or_breaks_handoff(context, monkeypatch):
+    state = state_for(request(), geometry_candidates=[request(parameters={"cell_size_mm":10, "strut_diameter_mm":6})])
+    contexts = []
+    async def complete(self, task_type, prompt, **kwargs):
+        body = json.loads(prompt.split("\n", 1)[1])["context"]
+        contexts.append(body)
+        cid = body["candidates"][0]["candidate_id"]
+        return SimpleNamespace(text=json.dumps({"tool":"accept_candidate", "arguments":{"candidate_id":cid},
+            "reason":"Conditional choice, pending final serialized geometry checks", "evidence_refs":["candidate:"+cid]}),
+            model="deterministic-decision-fixture", raw={})
+    monkeypatch.setattr(AgentContext, "complete", complete)
+    context.force_real_llm_in_test = True
+    result = await DesignAgent().run(state, context)
+    assert result.success
+    assert len(contexts[0]["candidates"]) == 1
+    assert contexts[0]["candidates"][0]["evaluation"]["validity"]["status"] == "pending"
+    assert contexts[0]["rejected_requests"][0]["reject_reasons"]
+    descriptor = contexts[0]["geometry_catalog"][0]
+    assert descriptor["agent_handoff"] is True
+    assert descriptor["fields"] and descriptor["defaults"]
+    assert len(contexts[0]["geometry_catalog"]) == 1  # bounded to explicit candidates
+    assert result.data["experiment_spec"]["design_evaluation"]["validity"]["status"] == "pass"
+    assert result.data["design_report"]["candidate_generation"]["rejected_count"] == 1
+    assert all(p["geometry_request"]["parameters"]["strut_diameter_mm"] != 6 for _, p in context.tools.calls)
+
+
 @pytest.mark.parametrize("value", [request("unknown"), request("spinodoid"),
     request(parameters={"strut_diameter_mm": -1}), request(provider_version="99.0")])
 def test_invalid_explicit_requests_never_fallback(context, value):
@@ -215,7 +257,7 @@ async def test_no_pool_never_runs_explicit_geometry_inline(context):
 async def test_final_provider_error_has_no_fallback_or_ready_receipt(context):
     with pytest.raises((ValueError, compute_pool.ComputeError), match="resolution|sampling|wall|provider|voxel"):
         await DesignAgent().run(state_for(request("schwarz_p", resolution=16)), context)
-    assert len(context.tools.calls) == 1
+    assert len(context.tools.calls) == 0  # Known sampling failure is rejected in shared preflight.
     assert not list(context.paths.run_root.rglob("receipt.json"))
 
 

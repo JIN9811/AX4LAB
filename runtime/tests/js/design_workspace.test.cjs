@@ -9,6 +9,8 @@ const load = (name) => {
 const Fields = load("workspace_fields.js"),
   Design = load("design_workspace.js");
 class Element {
+  set value(value) { this._value = String(value); }
+  get value() { return this._value; }
   constructor(tag, doc) {
     this.tagName = tag;
     this.ownerDocument = doc;
@@ -241,4 +243,102 @@ test("representation drafts retain independent parameters and valid orientation 
     geometries: [{ ...descriptor, version: "2.0.0" }],
   }));
   assert.equal(model.draft.parameters.amount, 3);
+});
+
+// Real boot handlers, delayed transport only. The request assertion catches
+// invisible stale-model commits even when the visible field remains unchanged.
+async function bootHarness(actions = ["preview", "generate"]) {
+  const nodes = new Map();
+  const doc = { createElement: (t) => new Element(t, doc),
+    getElementById: (id) => {
+      if (!nodes.has(id)) nodes.set(id, new Element("div", doc));
+      return nodes.get(id);
+    }};
+  const g = (id) => ({...geometry, id: "g" + id,
+    agent_handoff: id === "a", fields: [{key: id + "_value", label: id, type: "number"}],
+    defaults: {[id + "_value"]: 1}});
+  const profiles = ["a", "b", "missing"].map((id) => ({id, name: id, revision: 1,
+    available: id !== "missing", request: {module_id: id, geometry_id: "g" + id,
+      provider_version: "1.0.0", representation: "solid", parameters: {[id + "_value"]: 1},
+      specimen_size_mm: [10,10,10], orientation_deg: [0,0,0], seed: null, quality:"preview", resolution:48}}));
+  let release, delayed, deletion;
+  const sent = [];
+  global.document = doc;
+  global.window = {addEventListener() {}};
+  global.WorkspaceFields = Fields;
+  global.confirm = () => true;
+  const timeout = global.setTimeout;
+  global.setTimeout = () => 0;
+  global.fetch = async (url, options) => {
+    if (options.method !== "GET") sent.push({url, method: options.method, body: JSON.parse(options.body)});
+    if (url.endsWith("/geometries") && url.includes("/" + delayed + "/"))
+      await new Promise((resolve) => {release = resolve;});
+    if (options.method === "DELETE" && deletion)
+      await new Promise((resolve) => {release = resolve;});
+    let data;
+    if (url.endsWith("/modules")) data = {modules: ["a","b"].map((id) => ({id, label:id,
+      actions, state:{enabled:true}, icon_url:"/icon"})), errors:[]};
+    else if (url.endsWith("/geometries")) data = {geometries:[g(url.split("/").at(-2))]};
+    else if (url.endsWith("/jobs")) data = {jobs:[]};
+    else if (options.method === "POST" || options.method === "PUT") data = {id:"saved", ...JSON.parse(options.body)};
+    else data = {profiles};
+    return {ok:true, json:async () => data};
+  };
+  Design.boot();
+  const flush = async () => {for (let i=0;i<20;i++) await Promise.resolve();};
+  await flush();
+  const node = (id) => doc.getElementById(id);
+  node("preview-resolution").value = "48";
+  node("final-resolution").value = "96";
+  const choose = (id) => {node("profile-select").value=id; return node("profile-select").onchange();};
+  return {node, sent, choose, flush, delay: (id) => delayed=id, deleteDelay: () => deletion=true,
+    release: () => release(), close: () => {global.setTimeout=timeout;}};
+}
+
+for (const interruption of ["new", "empty", "unavailable"]) {
+  test("profile load interrupted by " + interruption + " cannot commit invisible request", async () => {
+    const h = await bootHarness();
+    try {
+      await h.choose("b"); h.delay("a"); const loading = h.choose("a"); await h.flush();
+      if (interruption === "new") h.node("new-profile").onclick();
+      else await h.choose(interruption === "empty" ? "" : "missing");
+      h.release(); await loading;
+      assert.equal(h.node("geometry-select").value, "gb");
+      if (interruption === "unavailable") h.node("new-profile").onclick();
+      h.node("profile-name").value="new draft";
+      await h.node("save-profile").onclick();
+      const outgoing = h.sent.at(-1).body.request;
+      assert.equal(outgoing.module_id, "b");
+      assert.equal(outgoing.geometry_id, "gb");
+      assert.deepEqual(outgoing.parameters, {b_value:1});
+    } finally {h.close();}
+  });
+}
+
+test("delayed delete cannot clear another selected profile or change next update target", async () => {
+  const h = await bootHarness();
+  try {
+    await h.choose("a"); h.deleteDelay();
+    const deleting=h.node("delete-profile").onclick(); await h.flush();
+    await h.choose("b"); h.release(); await deleting;
+    assert.equal(h.node("profile-name").value, "b");
+    await h.node("save-profile").onclick();
+    assert.equal(h.sent.at(-1).url, "/api/design/profiles/b");
+    assert.equal(h.sent.at(-1).method, "PUT");
+    assert.equal(h.sent.at(-1).body.request.geometry_id, "gb");
+  } finally {h.close();}
+});
+
+test("preview-only module controls and manual-only provider disclosure follow metadata", async () => {
+  const h=await bootHarness(["preview"]);
+  try {
+    await h.choose("b");
+    assert.equal(h.node("preview-design").disabled, false);
+    assert.equal(h.node("generate-design").disabled, true);
+    assert.match(h.node("selection-state").textContent, /Manual only/);
+    await h.node("generate-design").onclick(); // scripted calls must also fail closed
+    assert.equal(h.sent.filter((r) => r.url.endsWith("/jobs")).length, 0);
+    await h.choose("a");
+    assert.match(h.node("selection-state").textContent, /Agent handoff supported/);
+  } finally {h.close();}
 });

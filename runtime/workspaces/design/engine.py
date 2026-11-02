@@ -66,6 +66,10 @@ def normalize_request(request: dict, catalog: DesignCatalog) -> dict:
     quality = request.get("quality", "preview")
     if not isinstance(quality, str) or quality not in {"preview", "final"}:
         raise ValueError("quality must be preview or final")
+    module = next(m for m in catalog.modules if m["id"] == record["module_id"])
+    action = "generate" if quality == "final" else "preview"
+    if action not in module["descriptor"]["actions"]:
+        raise ValueError(f"Module does not support requested action: {action}")
     resolution = request.get("resolution", 48 if quality == "preview" else 96)
     if type(resolution) is not int or not 16 <= resolution <= MAX_RESOLUTION:
         raise ValueError(f"resolution must be an integer in [16, {MAX_RESOLUTION}]")
@@ -87,10 +91,18 @@ def normalize_request(request: dict, catalog: DesignCatalog) -> dict:
         effective = max(48, resolution, math.ceil(max(size) * 3 / max(wall, .05)) + 1)
         if effective > MAX_RESOLUTION:
             raise ValueError("Legacy adaptive resolution exceeds workspace resource budget")
-    return {"schema": REQUEST_SCHEMA, "module_id": record["module_id"], "geometry_id": record["id"],
+    normalized = {"schema": REQUEST_SCHEMA, "module_id": record["module_id"], "geometry_id": record["id"],
             "provider_version": record["version"], "representation": representation,
             "parameters": parameters, "specimen_size_mm": size, "orientation_deg": orientation,
             "quality": quality, "resolution": resolution, "seed": seed}
+    if descriptor.get("engine") != "legacy_gyroid" or representation != "sheet":
+        _pin_sources(record)
+        preflight = _load_provider_namespace(record).get("preflight")
+        if preflight is not None:
+            if not callable(preflight):
+                raise ValueError("Provider preflight must be callable")
+            preflight(deepcopy(normalized))
+    return normalized
 
 
 def _identity(value):
@@ -113,12 +125,17 @@ def _pin_sources(record):
     _LOADED_SOURCES.update(shared)
 
 
-def _load_provider(record):
+def _load_provider_namespace(record):
     # Compile exact bytes rather than timestamp-based pyc: installed wrapper edits
     # within the same second must not run stale bytecode under a new fingerprint.
     path = record["provider_path"]
     namespace = {"__name__": "_ax4lab_geometry_" + record["source_fingerprint"], "__file__": str(path)}
     exec(compile(path.read_bytes(), str(path), "exec"), namespace)
+    return namespace
+
+
+def _load_provider(record):
+    namespace = _load_provider_namespace(record)
     generate = namespace.get("generate_field")
     if not callable(generate):
         raise ValueError("Provider must export generate_field")

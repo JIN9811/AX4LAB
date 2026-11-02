@@ -25,10 +25,24 @@ The module `provider.py` may follow the existing module's metadata marker.
 The geometry descriptor uses `ax4lab.geometry_provider.v1`, ID `study_cubic`,
 version `1.0.0`, `representations: [strut]`, `default_representation: strut`,
 and typed `fields`/`defaults` (copy the reviewed Simple Cubic descriptor shape).
+Set `agent_handoff: false` for manual-only providers (also the conservative default
+if omitted). Only a literal boolean is accepted. The fourteen shipped providers
+explicitly set it true; Design and Specimen reject manual-only providers, and
+the GUI discloses the boundary. This flag is not manufacturing approval.
+
+Module `actions` must be a nonempty unique subset of `[preview, generate]`, and
+`output_kinds` must be `[stl]`. Missing/malformed/unknown actions and outputs are
+excluded during discovery. Preview maps to `quality: preview`; Generate maps to
+`quality: final`. API/engine validation enforces the same controls as the GUI.
+Custom executable actions are not supported.
 Its fixed local wrapper implements `generate_field(grid, request)`:
 
 ```python
 from workspaces.design.providers import strut
+from workspaces.design.providers.preflight import strut as check_strut
+
+def preflight(request):
+    check_strut({**request, 'geometry_id': 'simple_cubic'})
 
 def generate_field(grid, request):
     return strut.generate_field(grid, {**request, 'geometry_id': 'simple_cubic'})
@@ -43,6 +57,14 @@ untracked dynamic imports. Include all new files in the positive
 restart workers at a safe operational point, and refresh the catalog. Use unique
 descriptor IDs; invalid metadata is isolated, not silently substituted.
 Installed descriptors never choose import paths or execute expressions.
+The optional code-owned `preflight(request)` hook is invoked on normalized
+requests by both manual and agent paths before job admission. It must be bounded,
+read-only and raise `ValueError` for known invalid cross-field, sampling or work
+limits; it may not change inputs. No field/mesh generation belongs in preflight.
+Missing hooks imply only common schema/resource checks, never geometric validity.
+Data-dependent work, topology and calibration remain pending until the actual
+final mesh is verified. Relevant enabled descriptors/schemas are supplied to the
+bounded decision context for the explicit candidate pool, not as search authority.
 
 ## Scientific and license scope
 

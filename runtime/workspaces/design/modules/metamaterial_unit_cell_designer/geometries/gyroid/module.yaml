@@ -1,4 +1,5 @@
 schema: ax4lab.geometry_provider.v1
+agent_handoff: true
 id: gyroid
 version: 1.0.0
 label: Gyroid

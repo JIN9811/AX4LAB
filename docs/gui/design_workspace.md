@@ -3,6 +3,9 @@
 Open **Design** from the workspace launcher, or `/design`, on the server PC.
 Select **Metamaterial Unit Cell Designer**, a geometry and its representation.
 The installed descriptors supply the controls, units, defaults and available modes.
+Only declared actions are available: preview-only modules cannot Generate, even
+through the API. Provider status states **Manual only** or **Agent handoff
+supported**; support never implies manufacturing approval.
 
 ## Configure and generate
 
@@ -93,6 +96,12 @@ after installing new source code. Receipts remain tied to their original source.
 The existing registered Design graph opts in through
 `state.run_metadata['orchestrator_design_contract']['geometry_request']`.
 Optional `geometry_candidates` admits at most eight distinct normalized requests.
+Shared request preflight rejects known cross-field, sampling and resource failures.
+Invalid alternatives remain in the rejection evidence, not the selection pool;
+an invalid primary request fails without substitution. Preflight-admitted candidates
+are explicitly **pending** final geometry checks (not hard-valid). Model selection
+is conditional; only a verified final serialized receipt authorizes handoff.
+Unselected preview failures are reported without invalidating a verified selection.
 It uses the same engine/tool/CPU job, preserves seed and representation through
 selection, and creates separate hash-linked actual-STL preview PNGs. Specimen
 reuses only verified final receipts; corrupted artifacts regenerate the same

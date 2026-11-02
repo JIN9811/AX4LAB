@@ -60,6 +60,17 @@ def fixture_server(root):
             {'key':'note','label':'Fixture note','type':'text','visible_when':{'field':'mode','equals':'detail'}}]
         geometry['defaults'].update(mode='plain',note='retained')
         geometry_file.write_text(yaml.safe_dump(geometry))
+        # Explicit fixture wrapper owns its graph; its public identity is not a
+        # built-in graph name. It is deliberately manual-only.
+        geometry['agent_handoff'] = False
+        geometry_file.write_text(yaml.safe_dump(geometry))
+        (geometry_file.parent/'provider.py').write_text(
+            'from workspaces.design.providers.strut import generate_field as field\n'
+            'from workspaces.design.providers.preflight import strut\n'
+            'def preflight(request):\n'
+            '    return strut({**request, "geometry_id":"simple_cubic"})\n'
+            'def generate_field(grid, request):\n'
+            '    return field(grid, {**request, "geometry_id":"simple_cubic"})\n')
     pool = ComputePool(1, paths=paths)
     service = DesignService(paths.memory_root,paths.artifact_root,catalog=DesignCatalog(modules),executor=pool)
     app = FastAPI()

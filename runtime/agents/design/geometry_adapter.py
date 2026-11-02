@@ -34,6 +34,9 @@ def enabled_catalog(ctx, request):
         raise ValueError("Explicit geometry requires injected runtime paths")
     catalog = DesignCatalog()
     normalized = normalize_request(request, catalog)
+    record = catalog.resolve(normalized["module_id"], normalized["geometry_id"], normalized["provider_version"])
+    if record["descriptor"]["agent_handoff"] is not True:
+        raise ValueError("Design provider is manual-only; agent handoff is not supported")
     state = Store(paths.memory_root / "design_workspace").data
     enabled = state["modules"].get(normalized["module_id"], {"enabled": True})
     if enabled.get("enabled") is not True:
@@ -87,33 +90,44 @@ def prepare(agent, state, ctx):
     constraints.update({key: deepcopy(value) for key, value in agreed.items() if key in constraints})
     validate_constraints(constraints)
     objective = agent._objective_contract(state, constraints)
-    pool = {}
-    for raw in [contract["geometry_request"], *extra]:
+    pool, rejected, descriptors = {}, [], {}
+    for index, raw in enumerate([contract["geometry_request"], *extra]):
         # Validate original quality/schema as well as the explicitly final target.
-        enabled_catalog(ctx, raw)
-        catalog, request = enabled_catalog(ctx, final_request(raw))
+        try:
+            enabled_catalog(ctx, raw)
+            catalog, request = enabled_catalog(ctx, final_request(raw))
+            for actual, maximum, fixture in zip(request["specimen_size_mm"],
+                    constraints["max_specimen_size_mm"], constraints["utm_fixture_limit_mm"]):
+                if actual > min(float(maximum), float(fixture)):
+                    raise ValueError("Geometry exceeds agreed specimen/fixture envelope")
+        except (ValueError, TypeError, KeyError) as exc:
+            # The primary locked request must never silently become an alternative.
+            if index == 0:
+                raise
+            rejected.append({"geometry_request": deepcopy(raw), "reject_reasons": [str(exc)],
+                             "validity": {"status": "fail", "reasons": [str(exc)]}})
+            continue
         record = catalog.resolve(request["module_id"], request["geometry_id"], request["provider_version"])
-        for actual, maximum, fixture in zip(request["specimen_size_mm"],
-                constraints["max_specimen_size_mm"], constraints["utm_fixture_limit_mm"]):
-            if actual > min(float(maximum), float(fixture)):
-                raise ValueError("Geometry exceeds agreed specimen/fixture envelope")
+        descriptors[(record["module_id"], record["id"])] = {
+            **deepcopy(record["descriptor"]), "module_id": record["module_id"]}
         fingerprint = request_sha256(request)
         pool[fingerprint] = {"candidate_id": "geometry-" + fingerprint[:16],
             "candidate_fingerprint": fingerprint, "geometry_type": request["geometry_id"],
             "specimen_size_mm": deepcopy(request["specimen_size_mm"]),
             "orientation_deg": deepcopy(request["orientation_deg"]),
             "geometry_request": request, "source_fingerprint": record["source_fingerprint"],
-            "geometry_receipt": None, "candidate_status": "validated_request",
+            "geometry_receipt": None, "candidate_status": "geometry_pending",
             "expected_mass_g": None, "expected_print_time_min": None, "expected_volume_mm3": None}
     if len(pool) > MAX_CANDIDATES:
         raise ValueError("Candidate admission bounded to 8 distinct requests")
     ranked = sorted(pool.values(), key=lambda item: item["candidate_id"])
     return {"geometry_capability": True, "constraints": constraints, "objective": objective,
-        "pool": ranked, "ranked": ranked, "valid_pool": ranked, "hard_valid_count": len(ranked),
+        "pool": ranked, "ranked": ranked, "valid_pool": [], "hard_valid_count": 0,
+        "geometry_catalog": list(descriptors.values()),
         "accepted_requests": {item["candidate_id"]: deepcopy(item["geometry_request"]) for item in ranked},
         "prior_summary": agent._prior_results_summary(ctx), "failure_summary": agent._failure_memory_summary(ctx),
         "knowledge_summary": {"entries": [], "source": "none"}, "bo_recommendation": {},
-        "strategy": "explicit_geometry_requests", "rejected": [], "repaired_candidates": []}
+        "strategy": "explicit_geometry_requests", "rejected": rejected, "repaired_candidates": []}
 
 
 def evaluate(state, prepared, candidate):
@@ -124,8 +138,11 @@ def evaluate(state, prepared, candidate):
         reasons.append("locked geometry_request mismatch or unauthorized candidate")
     return {"schema": "design_evaluation.v1", "candidate_id": candidate["candidate_id"],
         "candidate_fingerprint": candidate.get("candidate_fingerprint"),
-        "validity": {"status": "fail" if reasons else "pass", "reasons": reasons,
-                     "source": "geometry schema, envelope and locked normalized request"},
+        "validity": {"status": "fail" if reasons else "pending", "reasons": reasons or
+                     ["Final serialized geometry, calibration and data-dependent resource checks pending"],
+                     "source": "request preflight is necessary, not final geometry evidence"},
+        "request_preflight": {"status": "fail" if reasons else "pass",
+                              "source": "shared provider preflight, envelope and locked normalized request"},
         "constraint_margins": [], "locked_parameters": {"geometry_request": deepcopy(accepted)},
         "performance": {"status": "unassessed", "metric": prepared["objective"]["primary_metric"],
             "value": None, "source": None, "reason": "No measured candidate-matched mechanical evidence."},
@@ -190,7 +207,7 @@ def finalize_steps(agent, state, ctx, prepared, candidate, decision):
         raise ValueError("Explicit geometry requires configured CPU pool")
     selected = deepcopy(candidate)
     evaluation = evaluate(state, prepared, selected)
-    if evaluation["validity"]["status"] != "pass":
+    if evaluation["validity"]["status"] != "pending" or evaluation["request_preflight"]["status"] != "pass":
         raise ValueError("Selected geometry does not match locked request")
     catalog, request = enabled_catalog(ctx, selected["geometry_request"])
     record = catalog.resolve(request["module_id"], request["geometry_id"], request["provider_version"])
@@ -208,6 +225,7 @@ def finalize_steps(agent, state, ctx, prepared, candidate, decision):
     selected.update(geometry_result=generated, geometry_receipt=generated.get("geometry_receipt"))
     if verified_geometry(state, ctx, selected, catalog) is None:
         raise ValueError("Final geometry tool returned invalid receipt/artifact")
+    evaluation["validity"].update(status="pass", reasons=[], source="verified final serialized geometry receipt")
     selected["candidate_status"] = "selected"
     selected["expected_volume_mm3"] = selected["geometry_receipt"]["volume_mm3"]
     evaluation["cost"]["volume"].update(value=selected["expected_volume_mm3"], status="serialized_mesh")
@@ -215,8 +233,14 @@ def finalize_steps(agent, state, ctx, prepared, candidate, decision):
     for item in ledger:
         preview_spec = {**item, "specimen_id": "specimen-" + item["candidate_fingerprint"][:16],
             "geometry_request": {**deepcopy(item["geometry_request"]), "quality": "preview"}}
-        preview = yield ("geometry.generate_metamaterial_stl",
-            {**output_payload(state, ctx, preview_spec, "design_candidates"), "render_preview": True})
+        try:
+            preview = yield ("geometry.generate_metamaterial_stl",
+                {**output_payload(state, ctx, preview_spec, "design_candidates"), "render_preview": True})
+        except Exception as exc:
+            if item["candidate_id"] == selected["candidate_id"]:
+                raise
+            item["geometry_preview_error"] = {"status": "failed", "error_type": type(exc).__name__}
+            continue
         preview_receipt = preview["geometry_receipt"]
         if (preview.get("ok") is not True or preview_receipt.get("quality") != "preview"
                 or preview_receipt.get("final_geometry_valid") is not False
@@ -239,8 +263,10 @@ def finalize_steps(agent, state, ctx, prepared, candidate, decision):
         "report_id": f"design-report-{state.run_id}-{state.loop_count + 1}", "loop_index": state.loop_count + 1,
         "status": "selected", "evaluation_semantics": "evidence_based_v1", "objective": prepared["objective"],
         "candidate_generation": {"strategy": prepared["strategy"], "candidate_count": len(ledger),
-            "valid_count": len(ledger), "rejected_count": 0, "repaired_count": 0,
-            "candidate_ledger": ledger, "top_candidates": ledger, "preview_status": "generated"},
+            "valid_count": 1, "pending_count": len(ledger)-1,
+            "rejected_count": len(prepared["rejected"]), "rejected": deepcopy(prepared["rejected"]), "repaired_count": 0,
+            "candidate_ledger": ledger, "top_candidates": ledger,
+            "preview_status": "partial" if any("geometry_preview_error" in c for c in ledger) else "generated"},
         "candidate_evaluation": evaluation, "design_evaluation": evaluation,
         "geometry_request": deepcopy(request), "geometry_receipt": deepcopy(selected["geometry_receipt"]),
         "geometry_preview": deepcopy(selected["geometry_preview"]),

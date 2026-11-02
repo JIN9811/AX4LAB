@@ -20,12 +20,21 @@ RUNTIME_ROOT = Path(__file__).resolve().parents[2]
 def _module_schema(value):
     if value.get("schema") != "ax4lab.design_module.v1":
         raise ValueError("Unsupported design module schema")
+    for key, supported in (("actions", {"preview", "generate"}), ("output_kinds", {"stl"})):
+        items = value.get(key)
+        if (not isinstance(items, list) or not items or
+                any(not isinstance(item, str) or item not in supported for item in items) or
+                len(items) != len(set(items))):
+            raise ValueError(f"Invalid supported {key}")
     return value
 
 
 def _geometry_schema(value):
     if value.get("schema") != "ax4lab.geometry_provider.v1":
         raise ValueError("Unsupported geometry provider schema")
+    if type(value.get("agent_handoff", False)) is not bool:
+        raise ValueError("agent_handoff must be boolean")
+    value = {**value, "agent_handoff": value.get("agent_handoff", False)}
     modes = value.get("representations")
     if (not isinstance(modes, list) or not modes or
             any(not isinstance(mode, str) or not mode for mode in modes) or len(set(modes)) != len(modes)):

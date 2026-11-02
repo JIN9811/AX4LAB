@@ -134,6 +134,11 @@ async def decide_design(agent, state, ctx, prepared):
                                        for cid,c in candidates.items() if cid not in authorized_ids],
                    "history":{"prior_count":history["prior_count"], "failure_count":prepared["failure_summary"]["count"]},
                    "evidence_refs":sorted(evidence_refs), "tools":tools}
+        if prepared.get("geometry_capability"):
+            context.update(geometry_catalog=deepcopy(prepared["geometry_catalog"]),
+                           rejected_requests=deepcopy(prepared["rejected"]),
+                           selection_semantics="Conditional choice only: pending geometry must pass final serialized checks before handoff")
+            tools["accept_candidate"]["effect"] = "conditionally select preflight-admitted candidate; no handoff until final geometry verification"
         reference = build_reference_context(ctx, consumer="design_agent", query=state.active_goal or "Design Agent",
             run_id=state.run_id, loop_id=str(state.loop_count))
         context = append_reference_only(context, reference)
@@ -196,11 +201,16 @@ async def decide_design(agent, state, ctx, prepared):
                 return decision
             else:
                 evaluation = candidate_evaluation(agent, state, prepared, candidates[cid])
-                if evaluation["validity"]["status"] != "pass":
+                pending_geometry = (prepared.get("geometry_capability") and
+                    evaluation["validity"]["status"] == "pending" and
+                    evaluation.get("request_preflight", {}).get("status") == "pass")
+                if evaluation["validity"]["status"] != "pass" and not pending_geometry:
                     entry["result"] = {"status":"rejected", "evaluation":evaluation}
                     record_tool_artifact("evidence_result", f"design.{tool}", entry)
                     raise ValueError("candidate failed acceptance checks")
                 entry["result"] = {"status":"accepted", "candidate_id":cid}
+                if pending_geometry:
+                    entry["result"].update(geometry_validity="pending", handoff_authorized=False)
                 decision.update(status="accepted", candidate_id=cid, reason=reason, evidence_refs=refs)
                 record_tool_artifact("evidence_result", f"design.{tool}", entry)
                 return decision

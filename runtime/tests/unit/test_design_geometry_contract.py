@@ -77,7 +77,7 @@ def install_provider(root, *, stochastic=False):
     geometry.mkdir(parents=True)
     (module / "module.yaml").write_text(yaml.safe_dump({
         "schema": "ax4lab.design_module.v1", "id": "fixture", "version": "1.0.0",
-        "label": "Fixture", "actions": ["generate"], "output_kinds": ["stl"]}))
+        "label": "Fixture", "actions": ["preview", "generate"], "output_kinds": ["stl"]}))
     (module / "provider.py").write_text('raise RuntimeError("catalog must not import me")\n')
     (module / "icon.svg").write_text("<svg/>")
     (geometry / "module.yaml").write_text(yaml.safe_dump({
@@ -91,6 +91,122 @@ def install_provider(root, *, stochastic=False):
         '            "bounds_mm": grid["bounds_mm"], "method": "analytic_slab_distance"}\n')
     (geometry / "icon.svg").write_text("<svg/>")
     return geometry
+
+
+@pytest.mark.parametrize("key,value", [
+    ("actions", None), ("actions", []), ("actions", "preview"),
+    ("actions", ["preview", "preview"]), ("actions", ["shell"]),
+    ("actions", [{"name": "preview", "command": "run"}]),
+    ("output_kinds", None), ("output_kinds", []), ("output_kinds", ["exe"]),
+    ("output_kinds", ["stl", "stl"]),
+])
+def test_invalid_action_contract_is_excluded(tmp_path, key, value):
+    from workspaces.design.catalog import DesignCatalog
+    install_provider(tmp_path)
+    path = tmp_path / "fixture/module.yaml"
+    data = yaml.safe_load(path.read_text())
+    if value is None:
+        data.pop(key)
+    else:
+        data[key] = value
+    path.write_text(yaml.safe_dump(data))
+    catalog = DesignCatalog(tmp_path)
+    assert catalog.modules == []
+    assert catalog.errors
+
+
+@pytest.mark.parametrize("capability", [None, False, True, "yes", {}, 1])
+def test_agent_capability_is_conservative_and_validated(tmp_path, capability):
+    from workspaces.design.catalog import DesignCatalog
+    geometry = install_provider(tmp_path)
+    path = geometry / "module.yaml"
+    data = yaml.safe_load(path.read_text())
+    if capability is not None:
+        data["agent_handoff"] = capability
+    path.write_text(yaml.safe_dump(data))
+    catalog = DesignCatalog(tmp_path)
+    if capability is not None and type(capability) is not bool:
+        assert not catalog.geometries
+        assert catalog.errors
+    else:
+        assert catalog.resolve("fixture", "slab", "1.0.0")["descriptor"]["agent_handoff"] is (capability is True)
+
+
+def test_all_shipped_geometries_intentionally_support_agent_handoff(catalog):
+    assert len(catalog.geometries) == 14
+    for record in catalog.geometries.values():
+        # Read the declared contract, not a runtime permissive default.
+        assert yaml.safe_load(record["descriptor_path"].read_text())["agent_handoff"] is True
+
+
+def test_preview_only_module_rejects_final_in_api_and_engine(tmp_path):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from workspaces.design.api import create_router
+    from workspaces.design.catalog import DesignCatalog
+    from workspaces.design.engine import generate_geometry
+    from workspaces.design.service import DesignService
+    install_provider(tmp_path / "modules")
+    path = tmp_path / "modules/fixture/module.yaml"
+    data = yaml.safe_load(path.read_text())
+    data["actions"] = ["preview"]
+    path.write_text(yaml.safe_dump(data))
+    catalog = DesignCatalog(tmp_path / "modules")
+    service = DesignService(tmp_path / "memory", tmp_path / "artifacts", catalog=catalog)
+    app = FastAPI()
+    app.include_router(create_router(lambda: service))
+    req = request(module_id="fixture", geometry_id="slab")
+    try:
+        with TestClient(app, base_url="http://localhost", client=("127.0.0.1", 1)) as client:
+            assert client.post("/api/design/validate", json={"request": req}).status_code == 200
+            for endpoint in ("validate", "jobs"):
+                body = {"request": {**req, "quality": "final"}}
+                if endpoint == "jobs": body["idempotency_key"] = "unsupported"
+                response = client.post("/api/design/" + endpoint, json=body)
+                assert response.status_code == 422, response.text
+                assert "action" in response.text
+            assert service.jobs() == []
+        with pytest.raises(ValueError, match="action"):
+            generate_geometry({**req, "quality": "final"}, tmp_path / "denied", identity={}, catalog=catalog)
+        preview = generate_geometry(req, tmp_path / "preview", identity={}, catalog=catalog)
+        assert preview["ok"] and not preview["final_geometry_valid"]
+    finally:
+        service.shutdown()
+
+
+def test_manual_only_provider_really_generates_but_agent_admission_rejects(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from agents.design import geometry_adapter
+    from workspaces.design.catalog import DesignCatalog
+    from workspaces.design.engine import generate_geometry
+    install_provider(tmp_path / "modules")
+    catalog = DesignCatalog(tmp_path / "modules")
+    req = request(module_id="fixture", geometry_id="slab", quality="final")
+    receipt = generate_geometry(req, tmp_path / "manual", identity={"job_id":"manual"}, catalog=catalog)
+    assert receipt["final_geometry_valid"] and receipt["checks"]["stl_reload"] == "passed"
+    monkeypatch.setattr(geometry_adapter, "DesignCatalog", lambda: catalog)
+    ctx = SimpleNamespace(paths=SimpleNamespace(memory_root=tmp_path / "memory"))
+    with pytest.raises(ValueError, match="manual.only|agent handoff"):
+        geometry_adapter.enabled_catalog(ctx, req)
+
+
+@pytest.mark.parametrize("geometry,parameters,changes,reason", [
+    ("simple_cubic", {"cell_size_mm":10, "strut_diameter_mm":6}, {}, "half cell"),
+    ("simple_cubic", {}, {"resolution":16}, "voxels"),
+    ("simple_cubic", {"cell_size_mm":2, "strut_diameter_mm":.5}, {"specimen_size_mm":[100,100,100]}, "budget"),
+    ("schwarz_p", {"cell_size_mm":10, "wall_thickness_mm":2}, {}, "thin-sheet"),
+    ("schwarz_p", {}, {"resolution":16}, "samples|voxels"),
+    ("spinodoid", {"cone_angles_deg":[0,0,0]}, {"seed":42}, "cone"),
+    ("spinodoid", {"wave_count":512}, {"seed":42, "resolution":160}, "budget"),
+    ("spinodoid", {"wavelength_mm":2}, {"seed":42}, "wavelength"),
+    ("reentrant_honeycomb", {"inclined_length_mm":10, "vertical_length_mm":2, "angle_deg":-60}, {}, "collapsed"),
+    ("voronoi", {"strut_diameter_mm":4}, {"seed":42, "specimen_size_mm":[10,10,10]}, "diameter"),
+])
+def test_shared_preflight_rejects_known_impossible_requests(catalog, geometry, parameters, changes, reason):
+    from workspaces.design.engine import normalize_request
+    with pytest.raises(ValueError, match=reason):
+        normalize_request({"module_id":MODULE, "geometry_id":geometry, "provider_version":"1.0.0",
+                           "quality":"final", "resolution":96, "parameters":parameters, **changes}, catalog)
 
 
 def test_discovery_does_not_execute_and_seed_is_required(tmp_path):
