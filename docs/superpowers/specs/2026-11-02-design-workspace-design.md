@@ -1,6 +1,6 @@
 # Design Workspace and Metamaterial Unit Cell Designer
 
-Status: proposed detailed design, awaiting user approval. No implementation claim.
+Status: detailed design approved by the user on 2026-11-02. Implementation pending.
 
 ## Intent and agreed direction
 
