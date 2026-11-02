@@ -1,0 +1,11 @@
+schema: ax4lab.geometry_provider.v1
+id: octet
+version: 1.0.0
+label: octet
+representations: [strut]
+default_representation: strut
+stochastic: false
+fields:
+  - {key: cell_size_mm, label: Cell size, type: number, min: 0.1, max: 200, unit: mm}
+  - {key: strut_diameter_mm, label: Strut diameter, type: number, min: 0.1, max: 50, unit: mm}
+defaults: {cell_size_mm: 10, strut_diameter_mm: 2}
