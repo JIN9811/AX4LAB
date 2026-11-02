@@ -161,6 +161,14 @@ async def test_bad_receipt_regenerates_same_request_seed_and_rechecks(context, d
     assert calls[0][1]["geometry_request"] == spec["geometry_request"]
     assert calls[0][1]["geometry_request"]["seed"] == 42
     assert prepared.success is False
+    repaired = state.current_experiment_spec
+    assert repaired["geometry_receipt"] == prepared.data["fabrication_report"]["digital_thread"]["geometry_receipt"]
+    assert repaired["geometry_result"] == prepared.data["specimen_result"]["geometry_result"]
+    retry_start = len(context.tools.calls)
+    retry = await SpecimenMakingAgent()._prepare_fabrication_async(state, context)
+    assert [name for name, _ in context.tools.calls[retry_start:]] == [
+        "geometry.check_mesh_quality", "geometry.check_manufacturability"]
+    assert retry.data["specimen_result"]["geometry_receipt"] == repaired["geometry_receipt"]
 
 
 def test_nested_request_fingerprint_and_lock_include_seed_and_family(context):
@@ -285,3 +293,63 @@ def test_preview_request_final_target_and_profile_changes_are_isolated(context):
     assert prepared["ranked"][0]["geometry_request"]["quality"] == "final"
     assert prepared["ranked"][0]["geometry_request"]["resolution"] == 96
     assert state.run_metadata["orchestrator_design_contract"]["geometry_request"] == raw
+
+
+@pytest.mark.asyncio
+async def test_shared_engine_candidate_previews_are_distinct_and_archived(context, monkeypatch):
+    from PIL import Image
+    import mcp_tools.mock_tools as numerical_tools
+    def no_parent_render(*args, **kwargs):
+        pytest.fail("Preview rendering must execute in the CPU subprocess, not the graph thread")
+    monkeypatch.setattr(numerical_tools, "_try_write_stl_iso_capture_png", no_parent_render)
+    state = state_for(request(), geometry_candidates=[request("spinodoid", seed=42)])
+    result = await DesignAgent().run(state, context)
+    spec = result.data["experiment_spec"]
+    ledger = result.data["candidate_ledger"]
+    assert result.data["design_report"]["candidate_generation"]["preview_status"] == "generated"
+    assert len(ledger) == 2
+    for candidate in ledger:
+        preview = candidate["geometry_preview"]
+        receipt = preview["geometry_receipt"]
+        assert receipt["quality"] == "preview" and receipt["final_geometry_valid"] is False
+        assert receipt["request"] == {**candidate["geometry_request"], "quality": "preview"}
+        assert receipt["request_sha256"] != candidate["candidate_fingerprint"]
+        assert Path(preview["stl_path"]) != Path(spec["geometry_result"]["stl_path"])
+        assert hashlib.sha256(Path(preview["stl_path"]).read_bytes()).hexdigest() == receipt["artifacts"]["stl"]["sha256"]
+        png = Path(candidate["preview_image_path"])
+        assert png.is_relative_to(context.paths.run_root / state.run_id)
+        assert preview["render_receipt"]["source_stl_sha256"] == receipt["artifacts"]["stl"]["sha256"]
+        assert preview["render_receipt"]["request_sha256"] == receipt["request_sha256"]
+        assert hashlib.sha256(png.read_bytes()).hexdigest() == preview["render_receipt"]["image_sha256"]
+        with Image.open(png) as image:
+            assert image.format == "PNG" and image.size == (760, 420)
+            assert len(image.convert("RGB").getcolors(760 * 420)) > 10
+        assert candidate["preview_image_url"].startswith("/api/runs/geometry-run/artifact-file/")
+    assert spec["geometry_preview"]["geometry_receipt"]["identity"] == spec["geometry_receipt"]["identity"]
+    assert spec["geometry_receipt"]["quality"] == "final"
+    archives = list(context.paths.run_root.rglob("manifest.json"))
+    assert archives and any("preview.png" in path.read_text() for path in archives)
+    assert [payload["geometry_request"]["quality"] for name, payload in context.tools.calls] == ["final", "preview", "preview"]
+    assert compute_pool.compute_status()["completed"] == 3
+
+
+@pytest.mark.asyncio
+async def test_explicit_gyroid_existing_report_projection_retains_geometry_lineage(context):
+    from agents.specimen.presentation import project_specimen_report
+    state = state_for(request("gyroid", specimen_size_mm=[10, 10, 10], resolution=48))
+    result = await DesignAgent().run(state, context)
+    spec = result.data["experiment_spec"]
+    report = SpecimenMakingAgent()._build_fabrication_report(
+        state=state, spec=spec, candidate=spec["candidate_id"], specimen_id=spec["specimen_id"],
+        geometry_result=spec["geometry_result"], mesh_result={"ok": True, "mesh_status": "pass"},
+        manufacturability_result={"ok": True, "manufacturability_status": "pass"},
+        handoff_result={}, experiment_response={}, printer_response={}, printer_payload={},
+        protocol_note="Read-only report projection; no manufacturing execution", live_gui_test_spec=False,
+        printer_test_path="", top_cap_enabled=False, bottom_cap_enabled=False, geometry_payload={})
+    view = project_specimen_report({}, {"fabrication_report": report})
+    assert view["role_specific"]["digital_thread"]["geometry_request"] == spec["geometry_request"]
+    assert view["role_specific"]["digital_thread"]["geometry_receipt"] == spec["geometry_receipt"]
+    gate = next(g for g in view["role_specific"]["quality_gates"] if g["gate"] == "geometry")
+    assert gate["evidence"]["geometry_receipt"] == spec["geometry_receipt"]
+    assert gate["evidence"]["geometry_request"] == spec["geometry_request"]
+    assert all(name == "geometry.generate_metamaterial_stl" for name, _ in context.tools.calls)

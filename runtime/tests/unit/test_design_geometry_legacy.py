@@ -50,3 +50,15 @@ def test_tool_adapter_preserves_nested_request_receipt_and_unknown_mass(tmp_path
     assert result["geometry_report"]["geometry_receipt"] == result["geometry_receipt"]
     with pytest.raises(ValueError, match="output_dir"):
         generate_tool({"geometry_request": req})
+
+
+@pytest.mark.parametrize("quality,flag,error", [("final", True, "preview quality"),
+    ("preview", "yes", "boolean"), ("preview", True, "CPU pool")])
+def test_preview_render_requires_explicit_quality_flag_and_cpu_pool(tmp_path, quality, flag, error):
+    from workspaces.design.tool_adapter import generate_tool
+    request = {"module_id": "metamaterial_unit_cell_designer", "geometry_id": "simple_cubic",
+               "provider_version": "1.0.0", "quality": quality}
+    output = tmp_path / "preview"
+    with pytest.raises(ValueError, match=error):
+        generate_tool({"geometry_request": request, "output_dir": str(output), "render_preview": flag})
+    assert not output.exists()

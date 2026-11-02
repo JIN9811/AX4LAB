@@ -23,6 +23,7 @@ Modification guide:
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
 import inspect
@@ -484,6 +485,10 @@ class SpecimenMakingAgent(BaseAgent):
                 default="",
             ),
         }
+        explicit_geometry = ({"geometry_request": deepcopy(spec["geometry_request"]),
+                              "geometry_receipt": deepcopy(geometry_result.get("geometry_receipt"))}
+                             if "geometry_request" in spec else {})
+        digital_thread.update(explicit_geometry)
         cap_policy = {
             "top_cap_enabled": top_cap_enabled,
             "bottom_cap_enabled": bottom_cap_enabled,
@@ -550,7 +555,7 @@ class SpecimenMakingAgent(BaseAgent):
             spc_status = "blocked" if any(str(item.get("status")).lower() == "blocked" for item in readiness_levels) else "pass"
         quality_gates = [
             self._gate("required_fields", "pass", {"missing": []}),
-            self._gate("geometry", "pass" if geometry_result.get("ok") else "fail", {"geometry_hash": digital_thread["geometry_hash"], "stl_path": digital_thread["stl_path"]}),
+            self._gate("geometry", "pass" if geometry_result.get("ok") else "fail", {"geometry_hash": digital_thread["geometry_hash"], "stl_path": digital_thread["stl_path"], **deepcopy(explicit_geometry)}),
             self._gate("mesh", "pass" if mesh_result.get("ok") and mesh_result.get("mesh_status") == "pass" else "fail", {"mesh_status": mesh_result.get("mesh_status"), "warnings": mesh_result.get("warnings", [])}),
             self._gate("manufacturability", "pass" if manufacturability_result.get("ok") and manufacturability_result.get("manufacturability_status") == "pass" else "fail", {"status": manufacturability_result.get("manufacturability_status"), "warnings": manufacturability_result.get("warnings", []), "wall_thickness_verification": manufacturability_result.get("wall_thickness_verification", {})}),
             self._gate("slicer", self._gate_status_from_result(slicer_result), {"sliced_path": digital_thread["gcode_path"], "failure_code": slicer_result.get("failure_code")}),
@@ -1184,6 +1189,9 @@ class SpecimenMakingAgent(BaseAgent):
         if "geometry_request" in spec:
             from agents.design.geometry_adapter import specimen_geometry_steps, blocked_specimen_result
             geometry_payload, geometry_result, mesh_result, manufacturing = yield from specimen_geometry_steps(state, ctx, spec)
+            # Publish only the verified preparation result, including regeneration,
+            # before the existing review-required branch returns to its owner.
+            state.current_experiment_spec = deepcopy(spec)
             if manufacturing.get("ok") is not True or manufacturing.get("manufacturability_status") != "pass":
                 return blocked_specimen_result(state, spec, geometry_result, mesh_result, manufacturing)
             # Only the existing Gyroid-sheet manufacturing capability can pass.

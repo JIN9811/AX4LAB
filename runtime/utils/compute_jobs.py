@@ -9,7 +9,14 @@ def execute(job, payload):
         record = catalog.resolve(request['module_id'], request['geometry_id'], request['provider_version'])
         if payload.get('source_fingerprint') != record['source_fingerprint']:
             raise ValueError('Provider acceptance fingerprint mismatch')
-        return generate_geometry(request, Path(payload['output_dir']), identity=payload['identity'], catalog=catalog)
+        render_preview = payload.get('render_preview', False)
+        if type(render_preview) is not bool or (render_preview and request['quality'] != 'preview'):
+            raise ValueError('Rendering requires an explicit preview request')
+        receipt = generate_geometry(request, Path(payload['output_dir']), identity=payload['identity'], catalog=catalog)
+        if render_preview:
+            from workspaces.design.tool_adapter import render_generated_preview
+            render_generated_preview(Path(payload['output_dir']), receipt)
+        return receipt
     if job.startswith('geometry.'):
         from mcp_tools.mock_tools import _generate_geometry_stl, _check_mesh_quality, _check_manufacturability
         functions = {'geometry.generate': _generate_geometry_stl,
