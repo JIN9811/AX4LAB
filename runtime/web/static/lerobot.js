@@ -2909,6 +2909,66 @@ function renderDeviceMemory(data) {
   }
 }
 
+function renderRebotSettings(data, profile) {
+  const panel = $("lerobot-rebot-settings");
+  if (!panel) return;
+  const native = ["rebot_b601_rs", "rebot_b601_rs_quest"].includes(profile.profile_id);
+  panel.classList.toggle("hidden", !native);
+  panel.hidden = !native;
+  const toggleNativeHidden = (element, hide) => {
+    if (!element) return;
+    element.classList.toggle("rebot-hidden", hide);
+  };
+  const ports = $("device-port-setup");
+  if (ports) ports.classList.toggle("hidden", native);
+  const nativeUnsupported = ["device-port-setup", "isaac-mirror-card", "isaac-augmentation-card", "visualization-card", "training-card", "rollout-card", "manipulation-agent-card"];
+  for (const id of nativeUnsupported) {
+    const element = $(id);
+    toggleNativeHidden(element, native);
+    document.querySelectorAll(`a[href="#${id}"]`).forEach((link) => toggleNativeHidden(link, native));
+  }
+  for (const id of ["isaac-lab-tab-button", "btn-lerobot-find-ports", "lerobot-record-controls-hint",
+    "lerobot-isaac-rgbd-render-action-status", "lerobot-render-failure-list"]) {
+    const element = $(id);
+    toggleNativeHidden(element, native);
+  }
+  for (const id of ["lerobot-camera-fps-input", "lerobot-observation-pipeline-select", "lerobot-device-input", "lerobot-tts-engine-input"]) {
+    const label = $(id)?.closest("label");
+    toggleNativeHidden(label, native);
+  }
+  for (const element of document.querySelectorAll(".lerobot-tts-rate-field")) toggleNativeHidden(element, native);
+  for (const id of ["btn-isaac-rgbd-render-start", "lerobot-isaac-rgbd-render-session-override-input"]) {
+    const row = $(id)?.closest(".button-row, .lerobot-inline-options");
+    toggleNativeHidden(row, native);
+  }
+  for (const id of ["btn-train-start", "btn-rollout-start", "btn-replay-start", "btn-manipulation-rollout-start"]) {
+    const button = $(id);
+    if (!button) continue;
+    if (native && button.dataset.rebotDisabled === undefined) {
+      button.dataset.rebotDisabled = String(button.disabled);
+      button.disabled = true;
+      button.title = "This Rebot adapter supports Teleop and Record";
+    } else if (!native && button.dataset.rebotDisabled !== undefined) {
+      button.disabled = button.dataset.rebotDisabled === "true";
+      delete button.dataset.rebotDisabled;
+      button.title = "";
+    }
+  }
+  const stop = $("btn-record-stop");
+  if (stop) stop.textContent = native ? "Stop Record" : "Force Stop";
+  if (!native) { panel.dataset.profileId = ""; return; }
+  if (panel.dataset.profileId !== profile.profile_id) {
+    const settings = (data.rebot_native_settings || {})[profile.profile_id] || {};
+    $("lerobot-rebot-python").value = settings.python || "";
+    $("lerobot-rebot-config").value = JSON.stringify(settings.config || {
+      robot: { type: profile.robot_type, id: profile.robot_id },
+      teleop: { type: profile.teleop_type, id: profile.teleop_id }, fps: 30, display_data: false,
+    }, null, 2);
+    if (fpsInput) fpsInput.value = String((settings.config || {}).fps || 30);
+    panel.dataset.profileId = profile.profile_id;
+  }
+}
+
 function renderConfig(data) {
   const resources = data.isaac_resources || {};
   for (const [input, key] of [[isaacSyntheticIsaacLabPathInput, "isaac_lab_path"], [isaacSyntheticIsaacSimPythonInput, "isaac_sim_python"], [isaacSyntheticStagePathInput, "stage_path"]]) {
@@ -2934,6 +2994,7 @@ function renderConfig(data) {
   }
   const selectedProfileId = profileSelect ? profileSelect.value : selected;
   const profile = profiles.find((p) => p.profile_id === selectedProfileId) || profiles[0] || {};
+  renderRebotSettings(data, profile);
   const pipelineOptions = Array.isArray(data.observation_pipelines) ? data.observation_pipelines : [];
   const selectedPipeline = data.selected_observation_pipeline_id || data.default_observation_pipeline_id || "raw_depth_adapter";
   if (observationPipelineSelect) {
@@ -3331,7 +3392,7 @@ async function completeTeleopHandoff() {
 }
 
 function recordIsActive(data) {
-  if (!data || data.workflow !== "record") return false;
+  if (!data || data.workflow !== "record" || !data.session_id) return false;
   const status = String(data.status || "").toUpperCase();
   const terminal = new Set(["STOPPED", "FAILED", "COMPLETED", "CANCELLED", "DATASET_COMPLETE"]);
   return !terminal.has(status) && (data.returncode === undefined || data.returncode === null);
@@ -3544,7 +3605,14 @@ function stopRolloutStatusPolling() {
 }
 
 function sessionPayload(workflow, overrides = {}) {
-  return basePayload({ session_id: lastSessionByWorkflow[workflow] || "", ...overrides });
+  const pid = profileSelect ? profileSelect.value : "";
+  let sid = lastSessionByWorkflow[workflow] || "";
+  const current = lastSessions.find((item) => item.session_id === sid);
+  if (["rebot_b601_rs", "rebot_b601_rs_quest"].includes(pid) || (current && current.native_rebot)) {
+    const matching = lastSessions.filter((item) => item.profile_id === pid && item.workflow === workflow);
+    sid = (matching.findLast((item) => isActiveSession(item)) || matching[matching.length - 1] || {}).session_id || "";
+  }
+  return basePayload({ session_id: sid, ...overrides });
 }
 
 function renderBrowser(data) {
@@ -5421,7 +5489,17 @@ bind("btn-lerobot-refresh", async (event) => {
 bind("btn-lerobot-save-profile", async (event) => {
   const statusTarget = actionStatusFromEvent(event);
   setActionStatus(statusTarget, "running", "config saved", { status: "request sent" });
+  let nativeSettings;
+  if (["rebot_b601_rs", "rebot_b601_rs_quest"].includes(profileSelect.value)) {
+    try {
+      nativeSettings = { python: $("lerobot-rebot-python").value.trim(), config: JSON.parse($("lerobot-rebot-config").value) };
+    } catch (err) {
+      setActionStatus(statusTarget, "error", "config saved", { message: `Invalid native configuration: ${err.message}` });
+      return;
+    }
+  }
   const data = await postJson("/api/lerobot/config", {
+    ...(nativeSettings ? { native_settings: nativeSettings } : {}),
     profile_id: profileSelect ? profileSelect.value : "",
     observation_pipeline_id: observationPipelineSelect ? observationPipelineSelect.value : "raw_depth_adapter",
     mode: modeSelect ? modeSelect.value : "test",

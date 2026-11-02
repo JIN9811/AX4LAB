@@ -9,6 +9,20 @@
 }(typeof globalThis !== "undefined" ? globalThis : this, function buildWindowsEquipmentSelection() {
   "use strict";
 
+  const PROFILE_VIEW_KEY = "ax4lab.equipment.viewedProfileId";
+
+  function equipmentProfileView(payload, preferredId = "") {
+    const profiles = Array.isArray(payload && payload.profiles) ? payload.profiles : [];
+    const profile = profiles.find((item) => item.profile_id === preferredId)
+      || profiles.find((item) => item.profile_id === (payload && payload.selected_profile_id));
+    const profileId = profile ? String(profile.profile_id || "") : "";
+    return {
+      profileId,
+      label: profileId ? String(profile.label || "").trim() || profileId : "No profile selected",
+      href: profileId ? `/equipment/windows?profile_id=${encodeURIComponent(profileId)}` : "/equipment/windows",
+    };
+  }
+
   function candidateSelectionView(candidate) {
     const selected = Boolean(candidate && candidate.selected);
     return {
@@ -68,9 +82,11 @@
   }
 
   return {
+    PROFILE_VIEW_KEY,
     agenticRunTerminalBadgeView,
     candidateSelectionView,
     confirmCandidateSelection,
+    equipmentProfileView,
     profileConnectionStatus,
     selectedCandidatesFirst,
     skillIdFromRecordingName,

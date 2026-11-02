@@ -26,7 +26,10 @@ def run_audit(base_url: str, out_dir: Path, *, geckodriver: str) -> dict[str, ob
         select = driver.find_element(By.ID, "btn-equipment-local-select")
         if select.is_enabled():
             select.click()
-        wait.until(lambda item: "selected" in item.find_element(By.ID, "equipment-local-bridge-detail").text)
+        wait.until(lambda item: item.execute_script(
+            "return selectedBridgeId === 'local_development' "
+            "&& document.getElementById('btn-equipment-local-select').disabled;"
+        ))
 
         driver.execute_script("window.confirm = () => true;")
         driver.find_element(By.ID, "btn-equipment-program1").click()

@@ -26,7 +26,7 @@ Modification guide:
     <title>{{ title }}</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
     <!-- Compatibility markers: /static/styles.css?v=20260715-camera-usb-link-1 /static/lerobot.js?v=20260903-background-train-1 -->
-    <link rel="stylesheet" href="/static/styles.css?v=20260904-teleop-handoff-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20261028-rebot-native-1" />
     <link rel="preload" as="image" href="/static/ax4lab-logo-transparent.png">
     <link rel="stylesheet" href="/static/workspace_boot.css?v=1">
   </head>
@@ -136,6 +136,15 @@ Modification guide:
           <button id="btn-lerobot-find-ports" class="btn">Scan Existing Ports</button>
         </div>
         <div id="lerobot-profile-action-status" class="lerobot-action-status idle">Waiting for profile action.</div>
+        <div id="lerobot-rebot-settings" class="hidden" hidden>
+          <div class="control-grid lerobot-control-grid">
+            <label>Rebot Python<input id="lerobot-rebot-python" type="text" placeholder="/path/to/lerobot/bin/python" /></label>
+          </div>
+          <label>Native robot / leader / camera configuration
+            <textarea id="lerobot-rebot-config" rows="12" spellcheck="false" style="width:100%;font-family:monospace"></textarea>
+          </label>
+          <div class="lerobot-action-status idle">Teleop / Record · Save with Use Profile · Validate without moving hardware</div>
+        </div>
       </section>
 
       <details id="device-port-setup" class="panel lerobot-device-panel lerobot-panel-details">
@@ -414,7 +423,7 @@ Modification guide:
             <label class="checkbox-line"><input id="lerobot-resume-input" type="checkbox" /> Resume dataset</label>
             <label class="checkbox-line"><input id="lerobot-push-hub-input" type="checkbox" /> Push to Hub</label>
           </div>
-          <p class="hint">
+          <p class="hint" id="lerobot-record-controls-hint">
             Live controls map to LeRobot recording keys: Save/Next sends Right Arrow, Retry sends Left Arrow, Finish sends Esc. Force Stop performs emergency cleanup of LeRobot live processes if a session or stale subprocess keeps devices open.
           </p>
           <div class="button-row compact">
@@ -1506,6 +1515,6 @@ val=48-59</textarea>
         </article>
       </section>
     </main>
-    <script src="/static/lerobot.js?v=20260923-rtc-defaults-1" defer></script>
+    <script src="/static/lerobot.js?v=20261028-rebot-native-1" defer></script>
   </body>
 </html>

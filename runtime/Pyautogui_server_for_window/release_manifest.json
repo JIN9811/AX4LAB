@@ -1,6 +1,6 @@
 {
   "schema": "atr.windows_bridge_release.v1",
-  "version": "2026.10.27.1",
+  "version": "2026.10.28.2",
   "files": [
     "release_manifest.json",
     "START_WINDOWS_BRIDGE.cmd",

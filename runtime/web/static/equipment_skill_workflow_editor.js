@@ -39,6 +39,7 @@ if (typeof module !== "undefined" && module.exports) {
     check: document.getElementById("workflow-editor-check"),
     save: document.getElementById("workflow-editor-save"),
     close: document.getElementById("workflow-editor-close"),
+    split: document.getElementById("workflow-editor-split"),
     add: document.getElementById("workflow-editor-add-step"),
     addAction: document.getElementById("workflow-editor-add-action"),
     list: document.getElementById("workflow-editor-step-list"),
@@ -104,6 +105,7 @@ if (typeof module !== "undefined" && module.exports) {
 
   function setBusy(busy) {
     state.busy = busy;
+    if (elements.split) elements.split.disabled = busy || !state.workflow;
     [elements.check, elements.save, elements.add, elements.addAction, elements.computerUsePolicy, elements.applyComputerUsePolicy].forEach((button) => {
       if (button) button.disabled = busy || (!state.editable && button !== elements.check);
     });
@@ -113,6 +115,85 @@ if (typeof module !== "undefined" && module.exports) {
   function hasUnsavedChanges() {
     return state.dirty || Object.keys(state.reviewDrafts).length > 0;
   }
+
+  const splitDialog = document.getElementById("workflow-split-dialog");
+  const splitContent = document.getElementById("workflow-split-content");
+  const splitStatus = document.getElementById("workflow-split-status");
+  const splitGenerate = document.getElementById("workflow-split-generate");
+  const splitConfirm = document.getElementById("workflow-split-confirm");
+  const splitClose = document.getElementById("workflow-split-close");
+  const splitBase = apiBase.replace(/\/workflow$/, "/split-proposal");
+  let splitState = { proposal: null, result: null, stale: false };
+
+  function renderSplit() {
+    const { proposal, result, stale } = splitState;
+    splitContent.replaceChildren();
+    for (const [index, part] of (proposal?.parts || []).entries()) {
+      const article = document.createElement("article");
+      article.className = "skill-split-part";
+      const heading = document.createElement("strong");
+      heading.textContent = part.name;
+      const steps = document.createElement("small");
+      steps.textContent = ` ${index + 1} · ${part.step_ids.length} steps · ${part.step_ids[0]} → ${part.step_ids.at(-1)}`;
+      article.append(heading, steps);
+      for (const text of [part.purpose, part.preconditions?.length ? `Before: ${part.preconditions.join("; ")}` : "", part.postconditions?.length ? `After: ${part.postconditions.join("; ")}` : ""]) {
+        if (!text) continue;
+        const paragraph = document.createElement("p"); paragraph.textContent = text; article.append(paragraph);
+      }
+      splitContent.append(article);
+    }
+    for (const branch of proposal?.branches || []) {
+      const row = document.createElement("div"); row.className = "skill-split-branch";
+      row.textContent = `After part ${branch.after_part}: ${branch.condition} — Needs demonstration. ${branch.description}`;
+      splitContent.append(row);
+    }
+    for (const child of result?.children || []) {
+      const link = document.createElement("a");
+      const url = new URL(`/equipment/skills/${encodeURIComponent(child.skill_id)}/${encodeURIComponent(child.version)}/workflow-editor`, window.location.origin);
+      const profile = new URLSearchParams(window.location.search).get("profile_id");
+      if (profile) url.searchParams.set("profile_id", profile);
+      link.href = url.pathname + url.search; link.textContent = child.name; link.target = "_blank"; link.rel = "noopener";
+      splitContent.append(link);
+    }
+    splitConfirm.disabled = state.busy || !proposal?.split_recommended || Boolean(result) || stale;
+  }
+
+  async function splitRequest(action) {
+    setBusy(true); splitGenerate.disabled = true; splitConfirm.disabled = true;
+    splitStatus.dataset.tone = "idle";
+    try { await action(); }
+    catch (error) { splitStatus.textContent = error.message; splitStatus.dataset.tone = "error"; }
+    finally { setBusy(false); splitGenerate.disabled = false; renderEditor(); renderSplit(); }
+  }
+
+  elements.split?.addEventListener("click", () => {
+    if (state.busy) return;
+    if (hasUnsavedChanges()) { setStatus("Save workflow and review changes before splitting.", "warning"); return; }
+    splitDialog.showModal();
+    splitRequest(async () => {
+      splitStatus.textContent = "Loading proposal…";
+      splitState = await apiJson(`${splitBase}/latest`);
+      splitStatus.textContent = splitState.result ? "Drafts created. Review each skill before deployment." : splitState.stale ? "Source changed. Generate a new proposal." : splitState.proposal ? "Review the proposed boundaries before creating drafts." : "Generate a proposal from this saved demonstration.";
+    });
+  });
+  splitGenerate?.addEventListener("click", () => splitRequest(async () => {
+    if (hasUnsavedChanges()) throw new Error("Save workflow and review changes before splitting.");
+    splitStatus.textContent = "Analyzing boundaries with the selected model…";
+    const payload = await apiJson(splitBase, {method: "POST", body: JSON.stringify({expected_workflow_sha256: state.workflowSha256})});
+    splitState = {proposal: payload.proposal, result: null, stale: false};
+    splitStatus.textContent = payload.proposal.split_recommended ? "Review boundaries. Branch suggestions need another demonstration." : "One coherent task — no split recommended.";
+  }));
+  splitConfirm?.addEventListener("click", () => {
+    if (state.busy || !splitState.proposal?.split_recommended || splitState.result || splitState.stale) return;
+    if (!window.confirm(`Create ${splitState.proposal.parts.length} separate skill drafts? The original and active flow will stay unchanged.`)) return;
+    splitRequest(async () => {
+      splitStatus.textContent = "Creating drafts…";
+      const payload = await apiJson(`${splitBase}/${encodeURIComponent(splitState.proposal.proposal_id)}/confirm`, {method: "POST", body: JSON.stringify({confirm_create: true})});
+      splitState.result = payload.result;
+      splitStatus.textContent = "Drafts created. Review each skill before deployment.";
+    });
+  });
+  splitClose?.addEventListener("click", () => splitDialog.close());
 
   function annotationFor(stepId) {
     return (state.annotations.steps || []).find((annotation) => annotation.step_id === stepId);

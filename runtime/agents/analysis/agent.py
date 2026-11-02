@@ -462,7 +462,11 @@ class AnalysisAgent(BaseAgent):
                 return sorted(raw_curve, key=lambda item: item["displacement_mm"]), meta
             shared_rows, shared_probe = parse_utm_csv(path)
             source_format = str(shared_probe.get("source_format") or "unknown")
-            if source_format in {"canonical", "trapeziumx_raw"}:
+            if source_format == "qmesys_raw" and not shared_probe.get("ok"):
+                meta.update(shared_probe)
+                meta["error"] = str(shared_probe.get("message") or "Invalid Qm measurement CSV.")
+                return [], meta
+            if source_format in {"canonical", "trapeziumx_raw", "qmesys_raw"}:
                 raw_curve = self._curve_points_from_rows(shared_rows, sort_by_displacement=False)
                 source_columns = list(shared_probe.get("source_columns") or [])
                 source_units = list(shared_probe.get("units") or [])
@@ -475,7 +479,7 @@ class AnalysisAgent(BaseAgent):
                         unit = {"time_s": "s", "force_N": "N", "displacement_mm": "mm", "height_mm": "mm"}.get(str(canonical), "")
                     mappings[str(source_column)] = {
                         "canonical": canonical,
-                        "multiplier": 1.0,
+                        "multiplier": shared_probe.get("column_multipliers", {}).get(canonical, 1.0),
                         "unit": unit,
                     }
                 meta.update({key: value for key, value in shared_probe.items() if key != "column_mapping"})

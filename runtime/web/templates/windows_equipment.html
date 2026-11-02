@@ -25,7 +25,8 @@ Modification guide:
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>{{ title }}</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=20261027-recording-clean" />
+    <link rel="stylesheet" href="/static/knowledge_source_upload.css?v=2" />
     <style>
       .equipment-candidate-card.selected {
         border-color: var(--ok);
@@ -47,35 +48,24 @@ Modification guide:
         <div class="hero-copy">
           <p class="eyebrow">Equipment Agent</p>
           <h1>Lab Equipment Workspace</h1>
-          <p class="subhead">
-            공통 장비 프로파일을 선택해 연결, 테스트, 런타임, 증거를 같은 계약으로 관리합니다. 현재 UTM은 Windows PyAutoGUI bridge 패키지를 사용하는 첫 번째 장비 프로파일입니다.
-          </p>
+          <p id="equipment-current-profile" class="equipment-current-profile" aria-live="polite">Loading profile…</p>
         </div>
-        <article class="status-card">
-          <div class="status-head">
-            <span class="status-title">Saved Connection</span>
-            <span id="equipment-connection-dot" class="status-dot idle"></span>
-          </div>
-          <strong id="equipment-connection-label">Loading</strong>
-          <p id="equipment-connection-detail">Reading saved PyAutoGUI bridge candidates.</p>
-        </article>
-        <article class="status-card equipment-action-status-card">
-          <div class="status-head">
-            <span class="status-title">Current Action</span>
-            <span id="equipment-action-dot" class="status-dot idle"></span>
-          </div>
-          <strong id="equipment-action-label">Idle</strong>
-          <p id="equipment-action-detail">Scan, select, preflight, run, then verify evidence before Analysis handoff.</p>
-        </article>
+        <div class="equipment-header-actions">
+          <button id="btn-equipment-refresh" class="btn equipment-connect-btn" type="button" title="Refresh saved connection">
+            Connect <span id="equipment-connection-dot" class="status-dot idle" role="img" aria-label="No worker selected"></span>
+          </button>
+          <button id="btn-equipment-open-bridge-gui" class="btn" type="button">Remote GUI</button>
+        </div>
       </section>
 
-      <section id="equipment-runtime-overview" class="panel equipment-profile-overview" aria-label="Canonical Lab Equipment runtime overview">
+      <section id="equipment-runtime-overview" class="panel equipment-profile-overview" aria-label="Equipment profile controls">
         <article id="equipment-profile-list">
-          <span class="eyebrow">Equipment Profile</span>
-          <h2>Profile &amp; Worker</h2>
-          <select id="equipment-profile-items" class="text-input equipment-profile-select" aria-label="Equipment profile">
-            <option value="utm_windows_v1" selected>UTM</option>
-          </select>
+          <h2>Equipment Profile</h2>
+          <label class="planning-message-label" for="equipment-profile-items">Selected profile
+            <select id="equipment-profile-items" class="text-input equipment-profile-select" aria-label="Equipment profile">
+              <option value="utm_windows_v1" selected>UTM</option>
+            </select>
+          </label>
           <label class="planning-message-label" for="equipment-profile-name">Profile name
             <input id="equipment-profile-name" class="text-input" type="text" maxlength="80" autocomplete="off" placeholder="e.g. UTM 2">
           </label>
@@ -84,33 +74,14 @@ Modification guide:
             <button id="btn-equipment-apply-profile" type="button" class="btn primary">Apply</button>
             <button id="btn-equipment-delete-profile" type="button" class="btn danger" disabled>Delete Profile</button>
           </div>
-          <p id="equipment-profile-apply-status" class="hint" role="status">Loading applied profile.</p>
-        </article>
-        <article id="equipment-profile-connection">
-          <span class="eyebrow">Connection</span>
-          <h2>Bridge Readiness</h2>
-          <p id="equipment-profile-connection-status" class="hint">Loading selected profile state.</p>
-        </article>
-        <article id="equipment-profile-runtime">
-          <span class="eyebrow">Canonical Runtime</span>
-          <h2 id="equipment-runtime-execution-id">No active execution</h2>
-          <p id="equipment-profile-runtime-status" class="hint">No canonical Equipment execution yet.</p>
-          <p id="equipment-runtime-reference" class="hint">Profile, Skill/program, worker, and mode are resolved at stage entry.</p>
-          <p id="equipment-computer-use-progress" class="hint" hidden>No computer-use progress.</p>
-        </article>
-        <article id="equipment-profile-evidence">
-          <span class="eyebrow">Handoff</span>
-          <h2>Evidence &amp; Analysis</h2>
-          <p id="equipment-profile-evidence-status" class="hint">No profile test result yet.</p>
-          <p id="equipment-runtime-evidence-count" class="hint">0 evidence items</p>
+          <p id="equipment-profile-apply-status" class="equipment-profile-feedback" role="status" aria-live="polite"></p>
         </article>
       </section>
 
       <div id="equipment-inline-controls" class="equipment-inline-controls">
       <section id="equipment-connection-workspace" class="panel equipment-connection-workspace" aria-label="Equipment worker connection workspace">
         <div class="equipment-section-heading">
-          <div><span class="eyebrow">Low-Level Worker</span><h2>Connection &amp; Profile</h2></div>
-          <button id="btn-equipment-open-bridge-gui" class="btn">Open Windows GUI</button>
+          <h2>Connection &amp; Profile</h2>
         </div>
         <div class="equipment-connection-grid">
         <article>
@@ -125,7 +96,6 @@ Modification guide:
           </label>
           <div class="button-row">
             <button id="btn-equipment-scan" class="btn primary">Scan</button>
-            <button id="btn-equipment-refresh" class="btn">Refresh Saved</button>
           </div>
         </article>
         <article>
@@ -139,11 +109,10 @@ Modification guide:
         <article id="equipment-local-bridge-panel" class="equipment-local-bridge-panel" aria-label="Local development PyAutoGUI bridge">
           <div class="equipment-local-bridge-copy">
             <h3>Bridge on This PC</h3>
-            <p>Windows 배포 전 동일 API와 매크로 계약을 로컬에서 검증합니다.</p>
           </div>
-          <div class="equipment-local-bridge-state">
+          <div class="equipment-local-bridge-state" role="status" aria-live="polite">
             <span id="equipment-local-bridge-dot" class="status-dot idle"></span>
-            <div><strong id="equipment-local-bridge-status">Stopped</strong><p id="equipment-local-bridge-detail">localhost:8767 · not selected</p></div>
+            <strong id="equipment-local-bridge-status">Stopped</strong>
           </div>
           <div class="equipment-local-bridge-actions">
             <button id="btn-equipment-local-start" class="btn primary">Start</button>
@@ -193,30 +162,42 @@ Modification guide:
           <article data-equipment-stage="verify"><span>07</span><strong>Verify</strong><small>screen/data/vision</small></article>
           <article data-equipment-stage="handoff"><span>08</span><strong>Handoff</strong><small>analysis evidence</small></article>
         </div>
+        <details id="equipment-profile-runtime" class="equipment-detail-drawer equipment-runtime-details">
+          <summary>Execution details</summary>
+          <h3 id="equipment-runtime-execution-id">No active execution</h3>
+          <p id="equipment-profile-runtime-status" class="hint">No canonical Equipment execution yet.</p>
+          <p id="equipment-runtime-reference" class="hint">Profile, Skill/program, worker, and mode are resolved at stage entry.</p>
+          <p id="equipment-computer-use-progress" class="hint" hidden>No computer-use progress.</p>
+        </details>
       </section>
 
       <section class="equipment-authoring-grid">
         <article id="equipment-skill-recording" class="panel equipment-work-card">
           <div class="equipment-section-heading">
-            <div><span class="eyebrow">Pre-processing</span><h2>Skill Recording</h2></div>
-            <button id="btn-equipment-refresh-recordings" class="btn mini" type="button">Refresh Recordings</button>
+            <h2>Skill Recording</h2>
+            <button id="btn-equipment-refresh-recordings" class="btn mini" type="button" data-original-text="Refresh">Refresh</button>
           </div>
-          <p class="hint">Record a human demonstration at 15 FPS with asynchronous storage, then import it for the selected Local/API VLM to interpret. Review proposed targets and variables before compiling the Skill.</p>
-          <div id="equipment-worker-recordings" class="equipment-skill-list">Select a connected Worker to load its recordings.</div>
-          <div class="equipment-form-grid">
+          {% include "knowledge_source_upload.html" %}
+          <div id="equipment-worker-recordings" class="equipment-skill-list">No recordings.</div>
+          <div class="equipment-recording-create">
             <label class="planning-message-label">Skill ID<input id="equipment-skill-id" class="text-input" placeholder="compression_test" /></label>
-            <label class="planning-message-label">Version<input id="equipment-skill-version" class="text-input" value="1.0.0" /></label>
-            <label class="planning-message-label">Selected Worker<input id="equipment-skill-worker-id" class="text-input" placeholder="selected worker" readonly /></label>
+            <button id="btn-equipment-import-recording" class="btn primary" data-original-text="Create Draft" disabled>Create Draft</button>
           </div>
-          <div class="button-row"><button id="btn-equipment-import-recording" class="btn primary" disabled>Import Selected &amp; Build Draft</button></div>
-          <p id="equipment-recording-status" class="hint">No recording imported.</p>
+          <details class="equipment-recording-options">
+            <summary>Options</summary>
+            <div class="equipment-form-grid">
+              <label class="planning-message-label">Version<input id="equipment-skill-version" class="text-input" value="1.0.0" /></label>
+              <label class="planning-message-label">Connection<input id="equipment-skill-worker-id" class="text-input" readonly /></label>
+            </div>
+          </details>
+          <p id="equipment-recording-status" class="equipment-recording-message" role="status" aria-live="polite"></p>
           <div id="equipment-skill-authoring-progress" class="equipment-skill-authoring-progress" data-status="IDLE">
             <div class="equipment-skill-authoring-progress-head">
-              <strong id="equipment-skill-authoring-status">Idle</strong>
+              <strong id="equipment-skill-authoring-status" role="status" aria-live="polite">Idle</strong>
               <button id="btn-equipment-stop-skill-authoring" class="btn mini danger" type="button" disabled>Stop</button>
             </div>
             <progress id="equipment-skill-authoring-progress-bar" max="100" value="0">0%</progress>
-            <small id="equipment-skill-authoring-detail">Select a recording to create a Skill draft.</small>
+            <small id="equipment-skill-authoring-detail"></small>
           </div>
           <figure id="equipment-skill-storyboard-preview" class="equipment-skill-storyboard-preview" hidden>
             <img id="equipment-skill-storyboard-image" alt="Recorded workflow timeline storyboard" />
@@ -281,6 +262,11 @@ Modification guide:
             <button id="btn-equipment-verify-proof-package" class="btn">Verify Package</button>
             <button id="btn-equipment-completion-audit" class="btn primary">Completion Audit</button>
           </div>
+        </div>
+        <div id="equipment-profile-evidence" class="equipment-inline-status">
+          <strong>Analysis Handoff</strong>
+          <p id="equipment-profile-evidence-status" class="hint">No profile test result yet.</p>
+          <p id="equipment-runtime-evidence-count" class="hint">0 evidence items</p>
         </div>
         <div id="equipment-proof-dashboard" class="equipment-proof-dashboard equipment-proof-dashboard-neutral">
           <article id="equipment-gate-windows-bridge" class="equipment-proof-gate idle"><span>Worker</span><strong id="equipment-gate-windows-bridge-status">not checked</strong><p id="equipment-gate-windows-bridge-detail">Connection evidence is not loaded.</p></article>
@@ -450,8 +436,9 @@ Modification guide:
     </main>
 
     <script src="/static/equipment_skill_flow_model.js" defer></script>
-    <script src="/static/windows_equipment_selection.js" defer></script>
+    <script src="/static/knowledge_source_upload.js?v=2" defer></script>
+    <script src="/static/windows_equipment_selection.js?v=20261027-profile-name" defer></script>
     <script src="/static/equipment_computer_use_settings.js?v=20261026-shared-1" defer></script>
-    <script src="/static/windows_equipment.js?v=20261026-profile-delete-2" defer></script>
+    <script src="/static/windows_equipment.js?v=20261027-recording-clean" defer></script>
   </body>
 </html>

@@ -22,6 +22,11 @@ function fixture() {
 }
 const active = (id) => ({ok: true, workflow: 'record', session_id: id, status: 'RECORDING', returncode: null});
 
+test('native test-mode preview does not create recording status polling', () => {
+  const f = fixture();
+  assert.equal(f.context.recordIsActive({ok: true, workflow: 'record', status: 'PREVIEW', actuation_performed: false}), false);
+});
+
 test('temporary status transport failure keeps retrying and recovers', async () => {
   const f = fixture(); f.context.startRecordStatusPolling('new');
   let pending = f.tick(); f.requests[0].reject(new Error('timeout')); await pending;

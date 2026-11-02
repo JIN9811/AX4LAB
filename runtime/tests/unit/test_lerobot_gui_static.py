@@ -121,8 +121,8 @@ def test_lerobot_handoff_complete_stops_matching_teleop_then_confirms_transfer()
     assert "teleop-handoff/confirm" in script
     assert script.index('postJson("/api/lerobot/teleoperate/stop"') < script.index("teleop-handoff/confirm")
     assert "UTM Vision verification is next" in script
-    assert '/static/lerobot.js?v=20260923-rtc-defaults-1' in template
-    assert '/static/styles.css?v=20260904-teleop-handoff-1' in template
+    assert '/static/lerobot.js?v=20261028-rebot-native-1' in template
+    assert '/static/styles.css?v=20261028-rebot-native-1' in template
 
 
 def test_lerobot_isaac_augmentation_recipe_controls_and_payload_are_wired() -> None:

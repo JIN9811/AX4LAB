@@ -1108,61 +1108,117 @@ textarea {
   min-width: min(320px, 100%);
 }
 
-.equipment-action-status-card strong {
+.equipment-setup-page > .hero {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.equipment-header-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.equipment-current-profile {
+  margin: 8px 0 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--primary);
   overflow-wrap: anywhere;
 }
 
-.equipment-setup-page > .hero {
-  grid-template-columns: minmax(0, 1.45fr) repeat(2, minmax(220px, 0.78fr));
-  align-items: stretch;
+.equipment-connect-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
 }
 
-.equipment-setup-page > .hero > .status-card {
-  min-height: 168px;
+.equipment-connect-btn .status-dot {
+  width: 9px;
+  height: 9px;
+  flex-shrink: 0;
 }
 
 .equipment-profile-overview {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
+  display: block;
 }
 
-.equipment-profile-overview > article {
+.equipment-profile-overview #equipment-profile-list {
   display: grid;
-  align-content: start;
-  gap: 12px;
+  grid-template-columns: auto minmax(160px, 1fr) minmax(160px, 1fr) auto;
+  align-items: end;
+  gap: 16px;
   min-width: 0;
-  min-height: 178px;
-  overflow: hidden;
-  padding: 16px;
-  border: 1.5px solid rgba(20, 54, 179, 0.13);
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.76);
 }
 
-.equipment-profile-overview > article h2 {
+.equipment-profile-overview h2 {
+  align-self: center;
   margin: 0;
-  font-size: 1rem;
+  font-size: 1.1rem;
   overflow-wrap: anywhere;
 }
 
-.equipment-profile-overview > article p,
-.equipment-profile-overview > article .hint {
+.equipment-profile-overview .planning-message-label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+}
+
+.equipment-profile-overview .text-input {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+}
+
+.equipment-profile-overview .button-row {
+  margin: 0;
+  align-items: end;
+}
+
+.equipment-profile-feedback {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--primary);
+  border-radius: 10px;
+  background: var(--bg-soft);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.equipment-profile-feedback:empty {
+  display: none;
+}
+
+.equipment-inline-status {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  padding: 10px 0;
   min-width: 0;
   overflow-wrap: anywhere;
 }
 
-.equipment-profile-overview #equipment-runtime-execution-id {
+.equipment-inline-status .hint {
+  margin: 0;
+}
+
+.equipment-runtime-details {
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.equipment-runtime-details #equipment-runtime-execution-id {
   font: 700 0.82rem/1.35 "IBM Plex Mono", monospace;
-  word-break: break-all;
-}
-
-.equipment-profile-overview .equipment-candidates {
-  min-height: 0;
-}
-
-.equipment-profile-overview #equipment-profile-runtime .button-row {
-  margin-top: auto;
+  overflow-wrap: anywhere;
 }
 
 .equipment-workspace-actions {
@@ -1179,49 +1235,37 @@ textarea {
 
 .equipment-local-bridge-panel {
   display: grid;
-  grid-template-columns: minmax(360px, 1.35fr) minmax(260px, 0.8fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 18px;
 }
 
-.equipment-local-bridge-copy h2,
-.equipment-local-bridge-copy p,
-.equipment-local-bridge-state p {
+.equipment-local-bridge-copy h3 {
   margin: 0;
-}
-
-.equipment-local-bridge-copy h2 {
-  margin-top: 4px;
   font-size: 1.08rem;
-}
-
-.equipment-local-bridge-copy p,
-.equipment-local-bridge-state p {
-  margin-top: 5px;
-  color: var(--muted);
-  font-size: 0.82rem;
-  line-height: 1.45;
 }
 
 .equipment-local-bridge-state {
   display: flex;
   align-items: center;
-  gap: 12px;
-  min-height: 64px;
-  padding: 12px 14px;
-  border: 1.5px solid var(--line);
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.72);
+  gap: 8px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  background: var(--bg-soft);
+  font-size: 13px;
 }
 
 .equipment-local-bridge-actions {
   display: grid;
-  grid-template-columns: repeat(2, minmax(86px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
 }
 
 .equipment-local-bridge-actions .btn {
-  min-height: 40px;
+  min-height: 36px;
+  min-width: 0;
+  padding: 8px 12px;
+  font-size: 13px;
 }
 
 .equipment-inline-controls {
@@ -1722,6 +1766,36 @@ textarea {
   border: 1px solid var(--line);
   border-radius: 12px;
   background: rgba(248, 250, 252, 0.78);
+}
+
+#equipment-skill-authoring-progress[data-status="IDLE"],
+#equipment-recording-status:empty,
+#equipment-skill-authoring-detail:empty {
+  display: none;
+}
+
+.equipment-recording-create {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 12px;
+}
+
+.equipment-recording-create .btn { min-height: 40px; }
+.equipment-recording-options summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.equipment-recording-options .equipment-form-grid { margin-top: 12px; }
+.equipment-recording-message {
+  padding: 10px 12px;
+  border-left: 3px solid var(--primary);
+  border-radius: 8px;
+  background: var(--bg-soft);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+#equipment-skill-recording .equipment-skill-row { min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+  .equipment-recording-create { grid-template-columns: minmax(0, 1fr); }
+  .equipment-recording-create .btn { width: 100%; }
 }
 
 .equipment-skill-authoring-progress-head {
@@ -2387,9 +2461,6 @@ textarea {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .equipment-local-bridge-panel {
-    grid-template-columns: 1fr;
-  }
 }
 
 @media (max-width: 680px) {
@@ -2426,7 +2497,7 @@ textarea {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .equipment-setup-page > .hero {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr;
   }
   .equipment-setup-page > .hero .hero-copy {
     grid-column: 1 / -1;
@@ -2435,9 +2506,9 @@ textarea {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
   .equipment-local-bridge-panel {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: minmax(0, 1fr) auto;
   }
-  .equipment-local-bridge-copy {
+  .equipment-local-bridge-actions {
     grid-column: 1 / -1;
   }
 }
@@ -2451,12 +2522,6 @@ textarea {
   }
   .equipment-command-rail {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .equipment-local-bridge-panel {
-    grid-template-columns: 1fr;
-  }
-  .equipment-local-bridge-copy {
-    grid-column: auto;
   }
 }
 
@@ -2479,7 +2544,7 @@ textarea {
 .equipment-candidates {
   display: grid;
   gap: 10px;
-  min-height: 120px;
+  min-height: 0;
   color: var(--muted);
 }
 
@@ -2492,9 +2557,9 @@ textarea {
 }
 
 .equipment-candidate-card {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
   gap: 12px;
   padding: 12px;
   border: 1.5px solid var(--line);
@@ -2502,9 +2567,8 @@ textarea {
   background: rgba(255, 255, 255, 0.72);
 }
 
-#equipment-candidates .equipment-candidate-card {
-  display: grid;
-  align-items: stretch;
+.equipment-candidate-card.selected {
+  border-color: var(--primary);
 }
 
 .equipment-candidate-card p {
@@ -2513,19 +2577,48 @@ textarea {
 
 .equipment-candidate-identity {
   min-width: 0;
-  flex: 1 1 auto;
+  overflow-wrap: anywhere;
+  color: var(--text);
 }
 
 .equipment-worker-actions {
   display: grid;
-  justify-items: end;
-  gap: 7px;
-  flex: 0 0 auto;
+  gap: 8px;
+  min-width: 0;
+}
+
+.equipment-worker-actions .button-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.equipment-worker-actions .equipment-worker-maintenance {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.equipment-worker-actions .button-row .btn {
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  padding: 8px 6px;
+  font-size: 12px;
+  line-height: 1.25;
+  white-space: normal;
 }
 
 .equipment-worker-update-state {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--bg-soft);
   color: var(--muted);
   font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.equipment-worker-update-state:empty {
+  display: none;
 }
 
 .equipment-worker-update-state.available {
@@ -2534,7 +2627,7 @@ textarea {
 }
 
 .equipment-worker-update-state.ready {
-  color: var(--success);
+  color: var(--ok);
 }
 
 .equipment-worker-update-state.blocked {
@@ -2543,26 +2636,25 @@ textarea {
 
 .equipment-candidate-save {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(112px, 0.65fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
   align-items: center;
   min-width: 0;
   width: 100%;
 }
 
-.equipment-alias-input {
+.equipment-alias-input,
+.equipment-pairing-code-input {
   min-width: 0;
   padding: 9px 10px;
   border-radius: 11px;
 }
 
-.equipment-pairing-code-input {
-  min-width: 0;
-}
-
 .equipment-candidate-save .btn {
   grid-column: 1 / -1;
   width: 100%;
+  min-height: 36px;
+  font-size: 13px;
 }
 
 .btn.danger {
@@ -4296,6 +4388,10 @@ body.planning-live-body .bo-objective-summary-card {
   gap: 14px;
 }
 
+.rebot-hidden {
+  display: none !important;
+}
+
 .lerobot-workflow-card {
   min-height: auto;
 }
@@ -5258,8 +5354,12 @@ body.planning-live-body #live-objective-readiness.warning { color: #fb7185; }
   .equipment-setup-grid {
     grid-template-columns: 1fr;
   }
-  .equipment-profile-overview {
+  .equipment-profile-overview #equipment-profile-list {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .equipment-profile-overview h2,
+  .equipment-profile-overview .button-row {
+    grid-column: 1 / -1;
   }
   .lerobot-workflow-grid,
   .lerobot-control-grid,
@@ -5276,7 +5376,7 @@ body.planning-live-body #live-objective-readiness.warning { color: #fb7185; }
   .control-grid {
     grid-template-columns: 1fr;
   }
-  .equipment-profile-overview {
+  .equipment-profile-overview #equipment-profile-list {
     grid-template-columns: 1fr;
   }
   .model-chip {

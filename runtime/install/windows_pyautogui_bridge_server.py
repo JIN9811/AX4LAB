@@ -593,6 +593,8 @@ class _RecordingKeyboardCapture:
             return
         if self._pressed_modifiers:
             modifiers = [item for item in self._ORDER if item in self._pressed_modifiers]
+            if "ctrl" in modifiers and len(name) == 1 and 1 <= ord(name) <= 26:
+                name = chr(ord(name) + 96)
             self._used_modifiers.update(modifiers)
             self.manager.record_keyboard_event({"kind": "hotkey", "keys": [*modifiers, name]})
             return
@@ -1024,6 +1026,7 @@ class RecordingFrameBuffer:
             "dropped_frame_count": self._dropped_frame_count,
             "dropped_evidence_count": self._dropped_evidence_count,
             "missed_capture_intervals": self._missed_capture_intervals,
+            "capture_timing_degraded": self._missed_capture_intervals > 0,
             "write_errors": self._write_errors,
         }
 
@@ -1837,8 +1840,8 @@ class RecordingFrameBuffer:
                 missed_intervals = int((now - next_capture) // interval) + 1
                 with self._lock:
                     self._missed_capture_intervals += missed_intervals
-                    self._writer_status = "incomplete"
-                    self._last_error = "screen acquisition missed scheduled capture intervals"
+                    # Scheduling lag is sampling quality, not a failed write.
+                    # Actual capture/write/drop failures still mark incomplete.
                 next_capture += missed_intervals * interval
 
     @staticmethod
@@ -5722,10 +5725,51 @@ def _probe_trapezium_csv_bytes(data: bytes) -> dict[str, Any] | None:
     }
 
 
+def _probe_qmesys_csv(data: bytes) -> dict[str, Any] | None:
+    import math
+    try:
+        rows = list(csv.reader(StringIO(data.decode("utf-8-sig"))))
+    except (UnicodeDecodeError, csv.Error):
+        return None
+    if not rows or [v.strip() for v in rows[0]] != ["Time", "Load", "Disp", "Table"]:
+        return None
+    units = [v.strip().lower() for v in rows[1]] if len(rows) > 1 else []
+    scale = {"kgf": 9.80665, "n": 1.0, "kn": 1000.0}
+    valid_units = len(units) == 4 and units[0] in {"sec", "s"} and units[1] in scale and units[2:] == ["mm", "mm"]
+    values = []
+    invalid = 0
+    for row in rows[2:]:
+        if not row or not any(v.strip() for v in row):
+            continue
+        try:
+            nums = [float(v) for v in row]
+            if len(nums) != 4 or not all(math.isfinite(v) for v in nums):
+                raise ValueError("invalid row")
+            values.append(nums)
+        except ValueError:
+            invalid += 1
+    monotonic = len(values) >= 2 and all(b[0] >= a[0] for a, b in zip(values, values[1:]))
+    ok = valid_units and invalid == 0 and monotonic
+    return {"ok": ok, "source_format": "qmesys_raw", "encoding": "utf-8-sig",
+            "sha256": hashlib.sha256(data).hexdigest(), "size_bytes": len(data),
+            "row_count_probe": len(values), "columns_probe": ["time_s", "force_N", "displacement_mm"],
+            "source_columns": rows[0], "units": dict(zip(rows[0], units)),
+            "column_mapping": {"Time": "time_s", "Load": "force_N", "Disp": "displacement_mm"},
+            "missing_columns": [], "failure_code": None if ok else "UTM_DATA_PARSE_FAILED",
+            "message": "" if ok else "Invalid Qm_Tester units, numeric rows, or time order.",
+            "data_quality": {"raw_csv_preserved": True, "numeric_row_count": len(values),
+                             "invalid_numeric_row_count": invalid, "time_monotonic_non_decreasing": monotonic,
+                             "force_scale_to_N": scale.get(units[1]) if len(units) > 1 else None,
+                             "force_nonzero": any(v[1] != 0 for v in values)}}
+
+
 def _probe_utm_csv(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"ok": False, "failure_code": "UTM_EXPORT_FILE_MISSING"}
     data = path.read_bytes()
+    qmesys = _probe_qmesys_csv(data)
+    if qmesys is not None:
+        return qmesys
     trapezium = _probe_trapezium_csv_bytes(data)
     if trapezium is not None:
         return trapezium
@@ -5856,6 +5900,122 @@ def _wait_until_stable(path: Path, *, stable_for_sec: float, timeout_s: float) -
             stable_since = now
         time.sleep(0.2)
     return False
+
+
+_RAW_DATA_LOCK = threading.RLock()
+
+
+def _raw_data_settings() -> dict[str, Any]:
+    path = ARTIFACT_ROOT / "raw_data_settings.json"
+    settings = {"directory": "", "filename_template": "Compression_{test_no}_{sample_no}.csv"}
+    with _RAW_DATA_LOCK:
+        if path.exists():
+            try:
+                saved = json.loads(path.read_text(encoding="utf-8"))
+                settings.update({k: saved[k] for k in settings if k in saved})
+            except (OSError, ValueError, TypeError):
+                return {"ok": False, "status": "invalid_settings", "settings": settings}
+    return {"ok": True, "settings": settings}
+
+
+def _validate_raw_data_settings(payload: dict[str, Any]) -> dict[str, str]:
+    directory = str(payload.get("directory") or "").strip()
+    template = str(payload.get("filename_template") or "").strip()
+    if not directory or not Path(directory).is_absolute():
+        raise ValueError("Choose an absolute RAW folder path on this PC.")
+    if not Path(directory).is_dir():
+        raise ValueError("RAW folder does not exist on this PC.")
+    remaining = template.replace("{test_no}", "").replace("{sample_no}", "")
+    if (not all(key in template for key in ("{test_no}", "{sample_no}"))
+            or any(c in template for c in '/\\:*?[]<>|\"')
+            or any(c in remaining for c in '{}')
+            or any(ord(c) < 32 for c in template)
+            or not template.lower().endswith(".csv") or len(template) > 200):
+        raise ValueError("Use a CSV filename with {test_no} and {sample_no}; no paths or wildcards.")
+    return {"directory": directory, "filename_template": template}
+
+
+def _save_raw_data_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        settings = _validate_raw_data_settings(payload)
+        with _RAW_DATA_LOCK:
+            ARTIFACT_ROOT.mkdir(parents=True, exist_ok=True)
+            target = ARTIFACT_ROOT / "raw_data_settings.json"
+            temp = target.with_suffix(".tmp")
+            temp.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+            temp.replace(target)
+        return {"ok": True, "status": "saved", "settings": settings}
+    except (OSError, ValueError) as exc:
+        return {"ok": False, "status": "invalid_settings", "message": str(exc)}
+
+
+def _search_raw_data(payload: dict[str, Any]) -> dict[str, Any]:
+    """Read-only exact lookup; never select the newest unrelated specimen."""
+    try:
+        saved = _raw_data_settings()
+        if not saved["ok"]:
+            return saved
+        settings = _validate_raw_data_settings(saved["settings"])
+        identity = {}
+        for key in ("test_no", "sample_no"):
+            value = str(payload.get(key) or "").strip()
+            if not re.fullmatch(r"[\w-]{1,80}", value):
+                raise ValueError("Test No. and Sample No. are required (letters, digits, underscore or hyphen).")
+            identity[key] = value
+        root = Path(settings["directory"]).resolve()
+        name = settings["filename_template"].format(**identity)
+        candidate = root / name
+        if candidate.resolve().parent != root:
+            raise ValueError("CSV must remain inside the configured RAW folder.")
+        if not candidate.is_file():
+            return {"ok": False, "status": "not_found", "message": f"Not found: {name}", "expected_path": str(candidate)}
+        stat = candidate.stat()
+        return {"ok": True, "status": "found", "identity": identity,
+                "file": {"name": name, "path": str(candidate), "size_bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns, "modified_unix": stat.st_mtime}}
+    except (OSError, ValueError) as exc:
+        return {"ok": False, "status": "invalid_request", "message": str(exc)}
+
+
+def _collect_raw_data(payload: dict[str, Any]) -> dict[str, Any]:
+    """Copy an identified fresh CSV into existing downloadable artifacts. No UI actions."""
+    try:
+        import math
+        since = float(payload.get("not_before_unix", 0))
+        stable = float(payload.get("stable_for_sec", 2))
+        if not math.isfinite(since) or since <= 0 or not math.isfinite(stable) or not .01 <= stable <= 30:
+            raise ValueError("A positive not_before_unix and stable_for_sec between 0.01 and 30 are required.")
+        for key in ("run_id", "specimen_id"):
+            if not re.fullmatch(r"[\w-]{1,96}", str(payload.get(key) or "")):
+                raise ValueError(f"A valid {key} is required.")
+        found = _search_raw_data(payload)
+        if not found["ok"]:
+            return found
+        info = found["file"]
+        if info["modified_unix"] < since:
+            return {"ok": False, "status": "stale_file", "message": "CSV predates this acquisition; not collected."}
+        source = Path(info["path"])
+        if not 0 < info["size_bytes"] <= 64 * 1024 * 1024:
+            raise ValueError("CSV must be nonempty and at most 64 MiB.")
+        time.sleep(stable)
+        check = _search_raw_data(payload)
+        if not check.get("ok") or check["file"] != info:
+            return {"ok": False, "status": "file_changing", "message": "CSV is still changing; retry after writing finishes."}
+        data = source.read_bytes()
+        after = source.stat()
+        if len(data) != info["size_bytes"] or after.st_mtime_ns != info["mtime_ns"]:
+            return {"ok": False, "status": "file_changing"}
+        artifact_id = f"utm_csv_{payload['specimen_id']}_{uuid4().hex}"
+        directory = ARTIFACT_ROOT / payload["run_id"]
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / f"{artifact_id}.csv"
+        target.write_bytes(data)
+        artifact = _artifact_payload(target, artifact_id=artifact_id, kind="utm_csv", windows_path=str(source))
+        # A successful copy is not evidence of successful equipment execution.
+        return {"ok": True, "status": "collected", "identity": found["identity"],
+                "run_id": payload["run_id"], "specimen_id": payload["specimen_id"],
+                "output_artifacts": [artifact], "parse_ok": artifact.get("parse_ok", False)}
+    except (OSError, ValueError, TypeError) as exc:
+        return {"ok": False, "status": "invalid_request", "message": str(exc)}
 
 
 def _candidate_export_files(run_id: str, specimen_id: str, glob_pattern: str) -> list[Path]:
@@ -6905,6 +7065,21 @@ INDEX_HTML = r"""
       </div>
     </section>
 
+    <section class="panel wide" id="rawDataPanel">
+      <div class="panel-head"><h2>Raw Data</h2><button id="saveRawData" type="button">Save</button></div>
+      <div class="panel-body">
+        <div class="form-grid">
+          <label>RAW Folder<input id="rawDataDirectory" placeholder="C:\\Program Files (x86)\\Qm_Tester\\Data2026\\RAW"></label>
+          <label>Filename Rule<input id="rawDataTemplate" value="Compression_{test_no}_{sample_no}.csv"></label>
+        </div>
+        <div class="form-grid">
+          <label>Test No.<input id="rawDataTestNo" placeholder="11"></label>
+          <label>Sample No.<input id="rawDataSampleNo" placeholder="3"></label>
+        </div>
+        <div class="row"><button id="searchRawData" class="secondary" type="button">Test Search</button><span id="rawDataStatus" role="status">Not configured</span></div>
+      </div>
+    </section>
+
     <section class="panel" id="programManagerPanel">
       <div class="panel-head"><div><div class="eyebrow">Local Cache</div><h2>Program Manager</h2></div><div class="row"><button id="newProgram" type="button">Add</button><button id="browseProgram" class="secondary" type="button">Browse JSON</button><button id="downloadProgramTemplate" class="secondary" type="button">Template</button></div></div>
       <div class="panel-body">
@@ -6973,6 +7148,30 @@ INDEX_HTML = r"""
       if (!response.ok && data.ok !== false) data.ok = false;
       return data;
     }
+    async function refreshRawData() {
+      const data = await call("/raw-data/settings");
+      if (data.settings) {
+        $("rawDataDirectory").value = data.settings.directory || "";
+        $("rawDataTemplate").value = data.settings.filename_template || "";
+      }
+      $("rawDataStatus").textContent = data.ok && data.settings.directory ? "Saved" : "Not configured";
+    }
+    async function rawDataAction(action) {
+      const status = $("rawDataStatus");
+      const button = $(action === "settings" ? "saveRawData" : "searchRawData");
+      button.disabled = true;
+      status.textContent = action === "settings" ? "Saving…" : "Searching saved folder…";
+      try {
+        const payload = action === "settings"
+          ? {directory:$("rawDataDirectory").value,filename_template:$("rawDataTemplate").value}
+          : {test_no:$("rawDataTestNo").value,sample_no:$("rawDataSampleNo").value};
+        const data = await call(`/raw-data/${action}`, {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+        status.textContent = data.ok ? (data.file ? `${data.file.name} · ${data.file.size_bytes.toLocaleString()} bytes` : "Saved") : data.message || data.status;
+      } catch (error) { status.textContent = String(error); }
+      finally { button.disabled = false; }
+    }
+    $("saveRawData").addEventListener("click",()=>rawDataAction("settings"));
+    $("searchRawData").addEventListener("click",()=>rawDataAction("search"));
     function showResult(data, label="Local action") {
       const ok = data && data.ok !== false;
       const status = String(data && (data.status || data.failure_code) || (ok ? "ok" : "failed"));
@@ -7076,7 +7275,7 @@ INDEX_HTML = r"""
     $("recordingPreviewNext").addEventListener("click",async()=>{if(recordingPreviewIndex<recordingPreviewFrames.length-1){recordingPreviewIndex+=1;renderRecordingPreview();return;}if(recordingPreviewNextCursor!=null)await loadRecordingPreviewPage(recordingPreviewRecordingId,recordingPreviewNextCursor,0);});
     $("recordingPreviewClose").addEventListener("click",()=>{$("recordingPreview").hidden=true;});
     $("diagnosticHealth").addEventListener("click",()=>refreshHealth(true)); $("diagnosticRequestLog").addEventListener("click",async()=>$("diagnosticOutput").textContent=JSON.stringify(await call("/request-log"),null,2));
-    syncRecordingToggle(); Promise.all([refreshHealth(),refreshPairing(),refreshPrograms(),refreshRecordings(),refreshRecordingStatus()]).catch((error)=>showResult({ok:false,status:"startup_failed",message:String(error)},"Console startup"));
+    syncRecordingToggle(); Promise.all([refreshRawData(),refreshHealth(),refreshPairing(),refreshPrograms(),refreshRecordings(),refreshRecordingStatus()]).catch((error)=>showResult({ok:false,status:"startup_failed",message:String(error)},"Console startup"));
   </script>
 </body>
 </html>
@@ -7099,6 +7298,8 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _is_local_setup_path(path: str, method: str) -> bool:
+        if (method == "GET" and path == "/raw-data/settings") or (method == "POST" and path in {"/raw-data/settings", "/raw-data/search"}):
+            return True
         if method == "GET":
             return path in {"/health", "/programs", "/recordings", "/recordings/status", "/pairing/status", "/request-log"} or (
                 path.startswith("/recordings/") and not path.endswith("/package")
@@ -7283,6 +7484,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/pairing/status":
             self._send(200, PAIRING_MANAGER.status())
             return
+        if path == "/raw-data/settings":
+            self._send(200, _raw_data_settings())
+            return
         if path == "/health":
             self._send(200, _health())
             return
@@ -7388,6 +7592,14 @@ class Handler(BaseHTTPRequestHandler):
         if path != "/pairing/complete" and not self._require_auth(path, "POST"):
             return
         if not self._require_json_content_type():
+            return
+        if path in {"/raw-data/settings", "/raw-data/search", "/raw-data/collect"}:
+            body_ok, payload = self._read_json_body(max_bytes=16 * 1024)
+            if not body_ok:
+                return
+            operation = {"/raw-data/settings": _save_raw_data_settings, "/raw-data/search": _search_raw_data, "/raw-data/collect": _collect_raw_data}[path]
+            result = operation(payload)
+            self._send(200 if result.get("ok") else 400, result)
             return
         if path == "/update/stage":
             body_ok, payload = self._read_json_body(max_bytes=36 * 1024 * 1024)

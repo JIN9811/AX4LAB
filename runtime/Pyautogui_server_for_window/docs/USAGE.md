@@ -293,3 +293,68 @@ Packaging, unit, and integration tests in the Linux repository cover:
 - canonical Equipment Runtime projections
 
 Automated verification does not run physical equipment. Perform that separately through the Profile's approved on-site procedure.
+# Raw Data (Windows console)
+
+## AX4LAB collection connector
+
+`WindowsPyAutoGUIBridge.collect_qm_raw_csv(payload)` uses the saved Windows RAW
+folder and the existing authenticated artifact-download path. The registered
+tool is `equipment.pyautogui.collect_qm_raw_csv`. Existing
+`equipment.pyautogui.run` callers can use the same connector by setting
+`raw_data_source` to `qm_auto_save`:
+
+```python
+result = bridge.run({
+    "runtime_mode": "live",
+    "raw_data_source": "qm_auto_save",
+    "test_type": "Compression",
+    "test_no": "11",
+    "sample_no": "3",
+    "run_id": current_run_id,
+    "specimen_id": current_specimen_id,
+    "not_before_unix": recorded_windows_test_start,
+})
+```
+
+Pass the actual Qm test selection and numbers recorded during test setup, not
+AX4LAB cycle numbers. The saved rule must match
+`Compression_{test_no}_{sample_no}.csv` for this example. The start timestamp
+must be recorded at test start in the Windows worker's clock domain, not at
+collection time. Missing identity, stale files, source-path mismatch, download
+hash mismatch and invalid measurements return failure without running a save
+macro or choosing another CSV. Virtual/test-mode calls cannot contact Windows.
+
+The connector returns `data_ready`, `result_file`, `utm_csv_path`, bound
+`output_artifacts`, and `data_acquisition` for existing downstream consumers.
+It does not claim that compression, robot clearance or the overall equipment
+task completed. It does not configure Qm or automatically replace a saved
+Skill: the collection caller must explicitly provide the above payload.
+
+The original CSV bytes are preserved. The shared analysis parser reads
+`Time`, `Load`, and `Disp`; `Table` is not specimen displacement. Load in kgf
+is converted to N with factor 9.80665 (N and kN are also supported). Unit
+conversion metadata remains in the analysis column-mapping report.
+
+Open the bridge console on the Windows PC. In **Raw Data**, enter the existing
+RAW folder and a CSV filename rule such as
+`Compression_{test_no}_{sample_no}.csv`, then click **Save**. Settings persist on
+this PC and apply immediately; no AX4LAB server restart is needed.
+
+Enter **Test No.** and **Sample No.**, then click **Test Search**. This searches
+the saved folder for that exact file, without clicking the UTM application or
+starting equipment. Save edited settings before searching. Original CSVs are
+never renamed or removed. Test/sample numbers are not automatically inferred
+from AX4LAB cycle numbers.
+
+Authenticated clients can use `POST /raw-data/search` with `test_no` and
+`sample_no`. `POST /raw-data/collect` additionally requires `run_id`,
+`specimen_id`, and `not_before_unix` (the acquisition start time on the Windows
+clock). Optional `stable_for_sec` defaults to 2. The collector rejects older or
+changing files and copies the exact CSV into the existing artifact store.
+Download its returned artifact ID through the existing `/artifacts/{id}` API.
+`collected` confirms file transfer readiness, not equipment/test success; inspect
+`parse_ok` and the evidence separately. Existing macro/export routes are unchanged.
+
+Qm_Tester CSV columns `Time,Load,Disp,Table` and their units row are recognized.
+Source bytes and units are preserved, including kgf; metadata records the force
+conversion to N without rewriting the original file.

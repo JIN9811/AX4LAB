@@ -206,7 +206,7 @@ def test_windows_equipment_page_exposes_common_profile_workspace() -> None:
     for element_id in (
         "equipment-profile-list",
         "equipment-profile-items",
-        "equipment-profile-connection",
+        "equipment-connection-workspace",
         "equipment-profile-runtime",
         "equipment-profile-evidence",
         "btn-equipment-profile-preflight",

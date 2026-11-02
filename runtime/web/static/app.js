@@ -90,6 +90,7 @@ const printerWorkspaceDotEl = document.getElementById("printer-workspace-dot");
 const printerWorkspaceDetailEl = document.getElementById("printer-workspace-detail");
 const windowsWorkspaceDotEl = document.getElementById("windows-workspace-dot");
 const windowsWorkspaceDetailEl = document.getElementById("windows-workspace-detail");
+let windowsWorkspaceRefreshSequence = 0;
 const lerobotWorkspaceDotEl = document.getElementById("lerobot-workspace-dot");
 const lerobotWorkspaceDetailEl = document.getElementById("lerobot-workspace-detail");
 const boWorkspaceDotEl = document.getElementById("bo-workspace-dot");
@@ -514,7 +515,7 @@ function openPrinterWindow() {
 }
 
 function openWindowsBridgeWindow() {
-  openWorkspaceWindow("/equipment/windows", 1180, 880);
+  openWorkspaceWindow(btnOpenWindowsBridge?.getAttribute("href") || "/equipment/windows", 1180, 880);
 }
 
 function openBoWindow() {
@@ -1055,10 +1056,23 @@ async function refreshPrinterWorkspaceStatus() {
 }
 
 async function refreshWindowsWorkspaceStatus() {
-  if (!windowsWorkspaceDetailEl && !windowsWorkspaceDotEl) return;
+  if (!btnOpenWindowsBridge && !windowsWorkspaceDetailEl && !windowsWorkspaceDotEl) return;
+  const sequence = ++windowsWorkspaceRefreshSequence;
   try {
-    const res = await fetch("/api/equipment/windows/config");
+    const profilesRes = await fetch("/api/equipment/profiles", {cache: "no-store"});
+    if (!profilesRes.ok) throw new Error(`Profiles unavailable (${profilesRes.status})`);
+    const profiles = await profilesRes.json();
+    if (sequence !== windowsWorkspaceRefreshSequence) return;
+    const {PROFILE_VIEW_KEY, equipmentProfileView} = window.atrWindowsEquipmentSelection;
+    let viewedProfileId = "";
+    try { viewedProfileId = localStorage.getItem(PROFILE_VIEW_KEY) || ""; } catch (_) { /* Storage may be disabled. */ }
+    const view = equipmentProfileView(profiles, viewedProfileId);
+    if (btnOpenWindowsBridge) btnOpenWindowsBridge.setAttribute("href", view.href);
+    if (!windowsWorkspaceDetailEl && !windowsWorkspaceDotEl) return;
+    const query = view.profileId ? `?profile_id=${encodeURIComponent(view.profileId)}` : "";
+    const res = await fetch(`/api/equipment/windows/config${query}`);
     const data = await res.json();
+    if (sequence !== windowsWorkspaceRefreshSequence) return;
     const connection = data.connection || {};
     const candidates = Array.isArray(connection.candidates) ? connection.candidates : [];
     const selected = Boolean(connection.selected);
@@ -1070,6 +1084,8 @@ async function refreshWindowsWorkspaceStatus() {
       windowsWorkspaceDetailEl.textContent = `${alias} · ${url} · ${token} · saved=${candidates.length}`;
     }
   } catch (err) {
+    if (sequence !== windowsWorkspaceRefreshSequence) return;
+    if (btnOpenWindowsBridge) btnOpenWindowsBridge.setAttribute("href", "/equipment/windows");
     setDotState(windowsWorkspaceDotEl, "warn");
     if (windowsWorkspaceDetailEl) {
       windowsWorkspaceDetailEl.textContent = `Windows bridge status unavailable: ${err}`;
@@ -1256,6 +1272,15 @@ if (btnOpenWindowsBridge) {
   btnOpenWindowsBridge.addEventListener("click", (event) => {
     event.preventDefault();
     openWindowsBridgeWindow();
+  });
+  window.addEventListener("storage", (event) => {
+    if (event.key === window.atrWindowsEquipmentSelection.PROFILE_VIEW_KEY || event.key === null) {
+      refreshWindowsWorkspaceStatus();
+    }
+  });
+  window.addEventListener("focus", () => refreshWindowsWorkspaceStatus());
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) refreshWindowsWorkspaceStatus();
   });
 }
 

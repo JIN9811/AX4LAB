@@ -4738,6 +4738,43 @@ def test_recording_keyboard_capture_keeps_plain_key_press(tmp_path: Path) -> Non
     assert stopped["events"][0]["key"] == "a"
 
 
+@pytest.mark.parametrize("loader", [_load_helper_module, _load_packaged_helper_module])
+@pytest.mark.parametrize("letter", ["a", "f", "i", "j", "m", "s", "z"])
+def test_recording_windows_ctrl_control_characters(loader, letter):
+    module = loader()
+    events = []
+    capture = module._RecordingKeyboardCapture(SimpleNamespace(record_keyboard_event=events.append))
+    capture.on_press("Key.ctrl_l")
+    capture.on_press(SimpleNamespace(char=chr(ord(letter) - 96)))
+    assert events == [{"kind": "hotkey", "keys": ["ctrl", letter]}]
+
+
+@pytest.mark.parametrize("loader", [_load_helper_module, _load_packaged_helper_module])
+def test_recording_schedule_lag_does_not_claim_writer_failure(loader, monkeypatch):
+    module = loader()
+    clock = {"value": 0.0}
+    captures = []
+    class Stop:
+        def wait(self, timeout):
+            clock["value"] += timeout
+            return bool(captures)
+    buffer = module.RecordingFrameBuffer(screenshot_provider=lambda: None, fps=15)
+    buffer._stop_event = Stop()
+    def capture_once(**kwargs):
+        captures.append(clock["value"])
+        clock["value"] += 0.15
+    buffer.capture_once = capture_once
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock["value"])
+    buffer._capture_loop()
+    status = buffer.status()
+    assert status["missed_capture_intervals"] > 0
+    assert status["capture_timing_degraded"] is True
+    assert status["writer_status"] != "incomplete"
+    assert status["evidence_complete"] is True
+    buffer._mark_error(RuntimeError("disk write failed"))
+    assert buffer.status()["evidence_complete"] is False
+
+
 def test_recording_manager_captures_initial_typing_language(tmp_path: Path) -> None:
     module = _load_helper_module()
     language = {

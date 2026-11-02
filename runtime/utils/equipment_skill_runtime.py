@@ -395,7 +395,16 @@ def compile_recording_actions(
                 actions.append({"action": "press", "key": key})
         elif kind == "hotkey":
             flush_text()
-            keys = [str(key).strip().lower() for key in event.get("keys", []) if str(key).strip()]
+            # pynput on Windows can report Ctrl+letters as ASCII controls,
+            # including whitespace (Ctrl+I/J/M). Normalize before stripping;
+            # the original recording remains immutable evidence.
+            raw_keys = [str(key).lower() for key in event.get("keys", [])]
+            has_ctrl = any(key.strip() in {"ctrl", "ctrl_l", "ctrl_r", "control"} for key in raw_keys)
+            keys = [
+                chr(ord(key) + 96) if has_ctrl and len(key) == 1 and 1 <= ord(key) <= 26 else key.strip()
+                for key in raw_keys
+            ]
+            keys = [key for key in keys if key]
             if not keys:
                 raise SkillContractError("hotkey requires keys")
             actions.append({"action": "hotkey", "keys": keys})

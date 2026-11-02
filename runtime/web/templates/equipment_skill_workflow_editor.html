@@ -20,6 +20,16 @@
       .skill-semantic-locator p { margin: 0; }
       .skill-semantic-locator img { max-width: 220px; max-height: 140px; object-fit: contain; }
       .skill-semantic-locator label { display: flex; align-items: start; gap: 7px; }
+      #workflow-split-dialog { width: min(720px, calc(100vw - 32px)); max-height: 85vh; padding: 22px; border: 1px solid var(--line); border-radius: 12px; color: var(--ink, #203044); }
+      #workflow-split-dialog::backdrop { background: #10233666; }
+      #workflow-split-dialog h2 { margin: 0; }
+      #workflow-split-content { display: grid; gap: 10px; margin: 16px 0; overflow-wrap: anywhere; }
+      .skill-split-part { padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
+      .skill-split-part p { margin: 6px 0; font-size: .85rem; }
+      .skill-split-part small, #workflow-split-status { font-size: .8rem; color: var(--muted); }
+      #workflow-split-status[data-tone="error"] { color: #a62036; }
+      .skill-split-branch { padding: 10px; border-left: 3px solid #e7b451; background: #fffbeb; font-size: .85rem; }
+      #workflow-split-dialog .button-row { flex-wrap: wrap; }
       @media (max-width: 600px) {
         .skill-semantic-review-fields { grid-template-columns: 1fr; }
         .skill-semantic-review .button-row { align-items: start; flex-direction: column; }
@@ -45,12 +55,24 @@
           </div>
         </div>
         <div class="skill-workflow-editor-actions">
+          <button id="workflow-editor-split" class="btn" type="button" disabled>Split Skills</button>
           <button id="workflow-editor-check" class="btn" type="button">Check Workflow</button>
           <button id="workflow-editor-save" class="btn primary" type="button">Save</button>
           <button id="workflow-editor-close" class="btn" type="button">Close</button>
         </div>
       </header>
 
+      <dialog id="workflow-split-dialog" aria-labelledby="workflow-split-title">
+        <h2 id="workflow-split-title">Split Skills</h2>
+        <p><span class="badge idle">Draft only</span> Original workflow stays unchanged.</p>
+        <div id="workflow-split-content"></div>
+        <p id="workflow-split-status" role="status"></p>
+        <div class="button-row">
+          <button id="workflow-split-generate" class="btn" type="button">Generate Proposal</button>
+          <button id="workflow-split-confirm" class="btn primary" type="button" disabled>Create Drafts</button>
+          <button id="workflow-split-close" class="btn" type="button">Close</button>
+        </div>
+      </dialog>
       <section class="skill-workflow-editor-content">
         <aside class="skill-workflow-editor-palette" aria-label="Add workflow step">
           <div>
@@ -146,6 +168,6 @@
       </form>
     </dialog>
     <script src="/static/equipment_skill_workflow_model.js"></script>
-    <script src="/static/equipment_skill_workflow_editor.js"></script>
+    <script src="/static/equipment_skill_workflow_editor.js?v=20261028-semantic-split-1"></script>
   </body>
 </html>

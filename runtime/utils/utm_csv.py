@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -52,6 +53,10 @@ def _find_header(rows: list[list[str]]) -> tuple[int, list[str], list[str], dict
             indexes = {role: headers.index(role) for role in (*_REQUIRED_ROLES, "height_mm") if role in headers}
             return 1, headers, [], indexes, "canonical"
         units = [_clean(item) for item in rows[row_index + 1]] if row_index + 1 < len(rows) else []
+        if headers == ["Time", "Load", "Disp", "Table"]:
+            if [u.casefold() for u in units] in (["sec", "kgf", "mm", "mm"], ["sec", "n", "mm", "mm"], ["sec", "kn", "mm", "mm"]):
+                return row_index + 2, headers, units, {"time_s": 0, "force_N": 1, "displacement_mm": 2}, "qmesys_raw"
+            return 0, headers, units, {}, "qmesys_raw"
         role_indexes: dict[str, int] = {}
         for index, header in enumerate(headers):
             unit = units[index] if index < len(units) else ""
@@ -71,11 +76,17 @@ def parse_utm_csv_bytes(data: bytes) -> tuple[list[dict[str, float]], dict[str, 
     missing = sorted(role for role in _REQUIRED_ROLES if role not in indexes)
     canonical_columns = [role for role, _ in sorted(indexes.items(), key=lambda item: item[1])]
     numeric_rows: list[dict[str, float]] = []
+    multipliers = {role: 1.0 for role in indexes}
+    if source_format == "qmesys_raw" and "force_N" in indexes:
+        multipliers["force_N"] = {"kgf": 9.80665, "n": 1.0, "kn": 1000.0}[units[indexes["force_N"]].casefold()]
     invalid_numeric_rows = 0
     if not missing:
         for row in rows[data_start:]:
             try:
-                numeric_rows.append({role: float(row[indexes[role]]) for role in indexes})
+                values = {role: float(row[indexes[role]]) * multipliers[role] for role in indexes}
+                if source_format == "qmesys_raw" and not all(math.isfinite(v) for v in values.values()):
+                    raise ValueError("Nonfinite Qm measurement")
+                numeric_rows.append(values)
             except (IndexError, TypeError, ValueError):
                 invalid_numeric_rows += 1
 
@@ -90,6 +101,9 @@ def parse_utm_csv_bytes(data: bytes) -> tuple[list[dict[str, float]], dict[str, 
     if missing:
         failure_code = "UTM_DATA_PARSE_FAILED"
         message = f"Missing UTM columns: {', '.join(missing)}"
+    elif source_format == "qmesys_raw" and invalid_numeric_rows:
+        failure_code = "UTM_DATA_PARSE_FAILED"
+        message = "Qm CSV contains invalid measurement rows."
     elif len(numeric_rows) < 2:
         failure_code = "UTM_DATA_PARSE_FAILED"
         message = "UTM export must contain at least two numeric data rows."
@@ -150,6 +164,7 @@ def parse_utm_csv_bytes(data: bytes) -> tuple[list[dict[str, float]], dict[str, 
         "source_columns": source_columns,
         "units": units,
         "column_mapping": {source_columns[index]: role for role, index in indexes.items() if index < len(source_columns)},
+        "column_multipliers": multipliers,
         "missing_columns": missing,
         "data_quality": quality,
         "failure_code": failure_code,

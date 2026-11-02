@@ -1455,6 +1455,8 @@ class WindowsPyAutoGUIBridge(BaseBridge):
     def run(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """Execute an allowlisted sequence or registered program."""
         payload = dict(payload or {})
+        if payload.get("raw_data_source") == "qm_auto_save":
+            return self.collect_qm_raw_csv(payload)
         # A new attempted operation invalidates prior success even if validation
         # below refuses it before the simulator executes.
         self._simulator_observations.pop(self._simulator_scope(payload), None)
@@ -1509,6 +1511,11 @@ class WindowsPyAutoGUIBridge(BaseBridge):
             "equipment.pyautogui.run", "/execute", self._public_payload(runtime_payload), payload
         )
         return self._attach_control_profile(result, runtime_payload)
+
+    def collect_qm_raw_csv(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Collect a named Qm auto-save using the existing artifact transport."""
+        from device_bridges.windows_pyautogui.qm_collection import collect_qm_raw_csv
+        return collect_qm_raw_csv(self, dict(payload or {}))
 
     def _should_use_live(self, payload: dict[str, Any], *, for_execution: bool) -> bool:
         # Host-owned virtual selection vetoes saved promotion and conflicting live flags.
@@ -2279,6 +2286,7 @@ class WindowsPyAutoGUIBridge(BaseBridge):
             local_path.write_bytes(content_bytes)
             digest = hashlib.sha256(content_bytes).hexdigest()
             merged = {**artifact, **{key: value for key, value in payload.items() if key != "content_base64"}}
+            merged["remote_sha256"] = str(artifact.get("sha256") or "")
             local_parse_probe: dict[str, Any] = {}
             if kind == "utm_csv":
                 local_parse_probe = self._probe_utm_csv_bytes(content_bytes)

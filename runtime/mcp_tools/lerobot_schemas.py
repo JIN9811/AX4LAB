@@ -252,6 +252,10 @@ class RobotProfile(BaseModel):
     teleop_type: str
     robot_port: str = ""
     teleop_port: str = ""
+    # Dual-arm CAN and broker plugins do not accept a top-level serial port.
+    serial_port_arguments: bool = True
+    robot_options: dict[str, str] = Field(default_factory=dict)
+    teleop_options: dict[str, str] = Field(default_factory=dict)
     camera_ports: dict[str, str] = Field(default_factory=dict)
     robot_id: str = ""
     teleop_id: str = ""

@@ -160,6 +160,82 @@ lerobot:
         - rollout
       test_fixture: fake_so101
 
+    # Native Teleop/Record adapter; local Python and device settings are saved
+    # separately per machine. Never inherit OMX processors or motor settings.
+    rebot_b601_rs:
+      profile_id: rebot_b601_rs
+      display_name: Rebot B601 RS · Dual-arm Leader
+      robot_family: rebot
+      robot_type: bi_rebot_b601_follower
+      teleop_type: bi_rebot_102_leader
+      robot_id: bi_follower
+      teleop_id: bi_leader
+      calibration_dir: ""
+      serial_port_arguments: false
+      robot_options:
+        left_arm_config.motor_family: rs
+        left_arm_config.can_adapter: socketcan
+        left_arm_config.port: can1
+        right_arm_config.motor_family: rs
+        right_arm_config.can_adapter: socketcan
+        right_arm_config.port: can0
+      teleop_options:
+        left_arm_config.port: /dev/ttyUSB0
+        right_arm_config.port: /dev/ttyUSB1
+      camera_map:
+        front: front_camera
+        left_wrist: left_wrist_camera
+        right_wrist: right_wrist_camera
+      fps: 30
+      observation_schema: lerobot_bi_rebot_b601_rs_v1
+      observation_pipeline_id: legacy_lerobot
+      action_schema: lerobot_bi_rebot_b601_rs_v1
+      safety_limits:
+        live_enabled: true
+        require_operator_confirm: true
+        allow_policy_rollout: false
+        allow_recording: true
+        allow_training: false
+        allow_teleoperation: true
+      command_templates:
+        teleoperate: ["lerobot-teleoperate"]
+        record: ["lerobot-record"]
+        train: ["lerobot-train"]
+      supported_workflows: [teleoperate, record]
+
+    rebot_b601_rs_quest:
+      profile_id: rebot_b601_rs_quest
+      display_name: Rebot B601 RS · Quest VR
+      robot_family: rebot
+      robot_type: rebot_vr
+      teleop_type: quest3
+      robot_id: bi_follower_vr
+      teleop_id: quest3
+      calibration_dir: ""
+      serial_port_arguments: false
+      # The installed Quest plugin resolves its actual workspace and media preset.
+      # Do not embed a deployment-checkout path or enable generic VLA rollout:
+      # this plugin accepts only its paired Quest action tickets.
+      camera_map:
+        front: front_camera
+        left_wrist: left_wrist_camera
+        right_wrist: right_wrist_camera
+      fps: 30
+      observation_schema: rebot_vr_ros_v2
+      observation_pipeline_id: legacy_lerobot
+      action_schema: rebot_vr_ros_v2
+      safety_limits:
+        live_enabled: true
+        require_operator_confirm: true
+        allow_policy_rollout: false
+        allow_recording: true
+        allow_training: false
+        allow_teleoperation: true
+      command_templates:
+        teleoperate: ["lerobot-teleoperate"]
+        record: ["lerobot-record"]
+      supported_workflows: [teleoperate, record]
+
     fake_omx_ai:
       inherits: robotis_omx_ai
       profile_id: fake_omx_ai

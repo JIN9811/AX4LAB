@@ -176,7 +176,7 @@ def register_equipment_tools(
             return {"ok": False, "failure_code": "EQUIPMENT_EXECUTION_NOT_FOUND", "message": str(exc)}
         return {"ok": True, "execution": execution, "projection": EquipmentRuntimeService.project(execution)}
 
-    for name in ("health", "list_programs", "register_program", "delete_program", "run", "screenshot",
+    for name in ("health", "list_programs", "register_program", "delete_program", "run", "collect_qm_raw_csv", "screenshot",
                  "list_locators", "request_log", "capture_locator", "save_utm_profile", "save_connection",
                  "select_candidate", "delete_candidate"):
         registry.register(f"equipment.pyautogui.{name}",

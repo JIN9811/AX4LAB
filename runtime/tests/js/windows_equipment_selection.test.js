@@ -7,10 +7,33 @@ const {
   agenticRunTerminalBadgeView,
   candidateSelectionView,
   confirmCandidateSelection,
+  equipmentProfileView,
   profileConnectionStatus,
   selectedCandidatesFirst,
   skillIdFromRecordingName,
 } = require("../../web/static/windows_equipment_selection.js");
+
+test("workspace name and link use the viewed profile without changing the applied profile", () => {
+  const payload = {selected_profile_id: "utm_a", profiles: [
+    {profile_id: "utm_a", label: "UTM A"}, {profile_id: "utm_b", label: "UTM B"},
+  ]};
+  assert.deepEqual(equipmentProfileView(payload, "utm_b"), {
+    profileId: "utm_b", label: "UTM B", href: "/equipment/windows?profile_id=utm_b",
+  });
+  assert.equal(payload.selected_profile_id, "utm_a");
+});
+
+test("a removed viewed profile falls back to the server-applied profile and its current name", () => {
+  assert.deepEqual(equipmentProfileView({selected_profile_id: "utm_a", profiles: [
+    {profile_id: "utm_a", label: "Renamed UTM"},
+  ]}, "removed"), {profileId: "utm_a", label: "Renamed UTM", href: "/equipment/windows?profile_id=utm_a"});
+});
+
+test("missing profiles cannot invent a device name or a stale profile link", () => {
+  assert.deepEqual(equipmentProfileView({profiles: []}, "removed"), {
+    profileId: "", label: "No profile selected", href: "/equipment/windows",
+  });
+});
 
 test("selected candidate view is explicit, disabled, and accessible", () => {
   const selected = candidateSelectionView({

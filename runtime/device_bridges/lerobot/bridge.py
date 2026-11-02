@@ -48,6 +48,7 @@ from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
 from PIL import Image, ImageDraw
+from device_bridges.lerobot import rebot_native
 from utils.runtime_paths import RuntimePaths
 from utils.runtime_process import path_metadata
 
@@ -614,6 +615,7 @@ class LeRobotBridge:
         self._sessions: dict[str, dict[str, Any]] = {}
         self._replay_start_lock = threading.RLock()
         self._processes: dict[str, subprocess.Popen[str]] = {}
+        self._native_input_fds: dict[str, int] = {}
         self._monitor_processes: dict[str, subprocess.Popen[str]] = {}
         self._receiver_processes: dict[str, subprocess.Popen[str]] = {}
         self._log_handles: dict[str, IO[str]] = {}
@@ -689,6 +691,7 @@ class LeRobotBridge:
 
     def shutdown(self) -> dict[str, Any]:
         """Stop tracked and stale LeRobot live subprocesses before the GUI server exits."""
+        native_results = rebot_native.shutdown(self)
         mirror_trace = self._stop_all_mirror_loops()
         background_session_ids = {
             str(session.get("session_id") or "")
@@ -708,7 +711,8 @@ class LeRobotBridge:
             self._stop_receiver_process(endpoint)
         self._persist_background_train_sessions()
         step_trace = mirror_trace + step_trace
-        return {"ok": True, "tool": "lerobot.shutdown", "step_trace": step_trace, "events": step_trace}
+        return {"ok": all(item.get("status") in ("STOPPED", "COMPLETED", "IDLE") for item in native_results),
+                "native_sessions": native_results, "tool": "lerobot.shutdown", "step_trace": step_trace, "events": step_trace}
 
     def cleanup_all_lerobot_processes(self, *, exclude_workflows: set[str] | None = None) -> list[dict[str, Any]]:
         """Stop any live LeRobot workflow process group tied to this checkout."""
@@ -746,6 +750,7 @@ class LeRobotBridge:
         """Return GUI-friendly configuration and current session summary."""
         profiles = [self._public_profile(profile) for profile in self._profiles()]
         return {
+            "rebot_native_settings": {key: rebot_native.load_settings(self, key) for key in rebot_native.TYPES},
             "ok": True,
             "tool": "lerobot.config",
             "default_profile_id": self.config.default_profile_id,
@@ -772,6 +777,11 @@ class LeRobotBridge:
     def configure(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Select a profile for GUI convenience without launching hardware."""
         profile_id = str(payload.get("profile_id") or self._selected_profile_id or self.config.default_profile_id)
+        if payload.get("native_settings") is not None:
+            try:
+                rebot_native.save_settings(self, profile_id, payload["native_settings"])
+            except (ValueError, OSError, TypeError) as exc:
+                return self._error("lerobot.config", "test", profile_id, "REBOT_CONFIG_INVALID", str(exc))
         profile = self._profile(profile_id)
         if profile is None:
             return self._error("lerobot.config", "test", profile_id, "LEROBOT_PROFILE_NOT_FOUND", "Robot profile not found.")
@@ -793,6 +803,12 @@ class LeRobotBridge:
 
     def profiles_validate(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """Validate one robot profile."""
+        if rebot_native.selected(self, payload):
+            profile_id = str((payload or {}).get("profile_id") or self._selected_profile_id)
+            try:
+                return rebot_native.validate(self, profile_id)
+            except (ValueError, OSError, subprocess.SubprocessError) as exc:
+                return self._error("lerobot.profiles.validate", "test", profile_id, "REBOT_CONFIG_INVALID", str(exc))
         request = LeRobotBaseRequest.model_validate(payload or {})
         mode = request.runtime_mode or request.mode
         profile = self._profile(request.profile_id)
@@ -2214,6 +2230,8 @@ class LeRobotBridge:
 
     def teleoperate_start(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """Start a deterministic fake teleoperation session."""
+        if rebot_native.selected(self, payload):
+            return rebot_native.start(self, "teleoperate", payload or {})
         request = LeRobotSessionRequest.model_validate(payload or {})
         mode = request.runtime_mode or request.mode
         connect_detail = "leader/follower ports accepted" if mode == "live" else "fake leader/follower connected"
@@ -2240,6 +2258,8 @@ class LeRobotBridge:
 
     def teleoperate_stop(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """Stop a teleoperation session idempotently."""
+        if rebot_native.selected(self, payload):
+            return rebot_native.stop(self, "teleoperate", payload or {})
         stopped = self._stop_session("lerobot.teleoperate.stop", payload or {}, "teleoperate")
         if self._uses_in_process_isaac_mirror(stopped):
             stopped["isaac_mirror_stop"] = self._in_process_isaac_mirror_stop_summary(stopped)
@@ -2298,6 +2318,8 @@ class LeRobotBridge:
 
     def record_start(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """Start a LeRobot recording session."""
+        if rebot_native.selected(self, payload):
+            return rebot_native.start(self, "record", payload or {})
         request = LeRobotSessionRequest.model_validate(payload or {})
         mode = request.runtime_mode or request.mode
         request, effective_resume, ready_detail = self._record_start_request(request)
@@ -2331,6 +2353,8 @@ class LeRobotBridge:
 
     def record_control(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """Apply a deterministic recording control action."""
+        if rebot_native.selected(self, payload):
+            return rebot_native.control(self, payload or {})
         request = LeRobotRecordControlRequest.model_validate(payload or {})
         if request.action == "stop":
             stopped = self._stop_session("lerobot.record.control", payload or {}, "record", stopped_status="STOPPED")
@@ -2361,6 +2385,8 @@ class LeRobotBridge:
             return stopped
         mode = request.runtime_mode or request.mode
         session = self._resolve_session(request.session_id, "record", prefer_active=True)
+        if session and session.get("native_rebot"):
+            return rebot_native.control(self, payload or {})
         profile_id = str(session.get("profile_id") if session else request.profile_id or self._selected_profile_id)
         if session is None:
             return self._error("lerobot.record.control", mode, profile_id, "LEROBOT_SESSION_NOT_FOUND", "Recording session not found.")
@@ -2415,6 +2441,8 @@ class LeRobotBridge:
 
     def train_start(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """Start LeRobot policy training in test or gated live mode."""
+        if rebot_native.selected(self, payload):
+            return rebot_native.start(self, "train", payload or {})
         request = LeRobotSessionRequest.model_validate(payload or {})
         mode = request.runtime_mode or request.mode
         profile = self._profile(request.profile_id)
@@ -2483,6 +2511,8 @@ class LeRobotBridge:
 
     def train_cancel(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """Cancel training idempotently."""
+        if rebot_native.selected(self, payload):
+            return rebot_native.stop(self, "train", payload or {})
         return self._stop_session("lerobot.train.cancel", payload or {}, "train", stopped_status="CANCELLED")
 
     def train_status(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -2491,6 +2521,8 @@ class LeRobotBridge:
 
     def rollout_start(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """Start LeRobot policy inference/rollout."""
+        if rebot_native.selected(self, payload):
+            return rebot_native.start(self, "rollout", payload or {})
         raw_payload = dict(payload or {})
         request = LeRobotSessionRequest.model_validate(raw_payload)
         try:
@@ -2645,6 +2677,8 @@ class LeRobotBridge:
 
     def rollout_stop(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """Stop all rollout/inference sessions and stale rollout subprocesses idempotently."""
+        if rebot_native.selected(self, payload):
+            return rebot_native.stop(self, "rollout", payload or {})
         stop_payload = payload or {}
         if str(stop_payload.get("emergency_source") or "").strip().lower() == "plc_pb2":
             return self._stop_plc_enabled_rollout_sessions("lerobot.rollout.stop", stop_payload)
@@ -2656,6 +2690,8 @@ class LeRobotBridge:
 
     def replay_start(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """Start one local recorded episode under the normal process/stop boundary."""
+        if rebot_native.selected(self, payload):
+            return rebot_native.start(self, "replay", payload or {})
         with self._replay_start_lock:
             return self._replay_start_locked(dict(payload or {}))
 
@@ -2763,6 +2799,8 @@ class LeRobotBridge:
         return result
 
     def replay_stop(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if rebot_native.selected(self, payload):
+            return rebot_native.stop(self, "replay", payload or {})
         payload = dict(payload or {})
         session_id = str(payload.get("session_id") or "")
         with self._replay_start_lock:
@@ -8306,6 +8344,8 @@ class LeRobotBridge:
         mode = request.runtime_mode or request.mode
         session = (self._sessions.get(request.session_id) if strict_session else
                    self._resolve_session(request.session_id, workflow, prefer_active=True))
+        if session and session.get("native_rebot"):
+            return rebot_native.stop(self, workflow, payload)
         profile_id = str(session.get("profile_id") if session else request.profile_id or self._selected_profile_id)
         if session is None:
             cleanup_trace = self._cleanup_lerobot_processes(workflow)
@@ -8361,8 +8401,10 @@ class LeRobotBridge:
         """Stop every tracked session for a workflow, then remove stale project subprocesses."""
         request = LeRobotBaseRequest.model_validate(payload or {})
         mode = request.runtime_mode or request.mode
-        sessions = [session for session in self._sessions.values() if session.get("workflow") == workflow]
+        sessions = [session for session in self._sessions.values() if session.get("workflow") == workflow and not session.get("native_rebot")]
         selected = self._resolve_session(request.session_id, workflow, prefer_active=True)
+        if selected and selected.get("native_rebot"):
+            selected = None
         if selected is None and sessions:
             selected = sessions[-1]
         profile_id = str((selected or {}).get("profile_id") or request.profile_id or self._selected_profile_id)
@@ -8509,6 +8551,8 @@ class LeRobotBridge:
         )
 
     def _session_status(self, tool: str, payload: dict[str, Any], workflow: str, *, prefer_active: bool = False) -> dict[str, Any]:
+        if rebot_native.selected(self, payload):
+            return rebot_native.status(self, workflow, payload)
         request = LeRobotBaseRequest.model_validate(payload or {})
         mode = request.runtime_mode or request.mode
         session = self._resolve_session(request.session_id, workflow, prefer_active=prefer_active)
@@ -8716,6 +8760,8 @@ class LeRobotBridge:
         }
 
     def _session_response(self, tool: str, mode: str, session: dict[str, Any], step_trace: list[dict[str, Any]], **extra: Any) -> dict[str, Any]:
+        if session.get("native_rebot"):
+            return rebot_native.response(self, session, **extra)
         self._refresh_in_process_isaac_mirror_progress(session)
         post_render = self._current_isaac_rgbd_post_render_for_session(session)
         if post_render:
@@ -10753,6 +10799,8 @@ class LeRobotBridge:
         return _normalize_observation_pipeline_id(self._selected_observation_pipeline_id or self.config.default_observation_pipeline_id)
 
     def _public_session(self, session: dict[str, Any]) -> dict[str, Any]:
+        if session.get("native_rebot"):
+            return rebot_native.response(self, session)
         self._refresh_in_process_isaac_mirror_progress(session)
         post_render = self._current_isaac_rgbd_post_render_for_session(session)
         if post_render:
@@ -13585,7 +13633,8 @@ print("Updated Pi0.5 quantile stats for " + ", ".join(updated))
         calibration_dir = self._profile_calibration_dir(profile)
         if calibration_dir:
             args.append(f"--robot.calibration_dir={calibration_dir}")
-        port = self._device_port(profile, "follower", allow_fake=allow_fake)
+        args.extend(f"--robot.{key}={value}" for key, value in profile.robot_options.items())
+        port = self._device_port(profile, "follower", allow_fake=allow_fake) if profile.serial_port_arguments else ""
         if port:
             args.append(f"--robot.port={self._runtime_device_port(port, 'follower', live=mode == 'live')}")
         if workflow == "rollout" and self._is_pi05_policy(request.policy_type):
@@ -13847,7 +13896,8 @@ print("Updated Pi0.5 quantile stats for " + ", ".join(updated))
         calibration_dir = self._profile_calibration_dir(profile)
         if calibration_dir:
             args.append(f"--teleop.calibration_dir={calibration_dir}")
-        port = self._device_port(profile, "leader", allow_fake=allow_fake)
+        args.extend(f"--teleop.{key}={value}" for key, value in profile.teleop_options.items())
+        port = self._device_port(profile, "leader", allow_fake=allow_fake) if profile.serial_port_arguments else ""
         if port:
             args.append(f"--teleop.port={self._runtime_device_port(port, 'leader', live=mode == 'live')}")
         return args
@@ -13956,6 +14006,9 @@ print("Updated Pi0.5 quantile stats for " + ", ".join(updated))
             }
 
     def _refresh_process_status(self, session: dict[str, Any]) -> None:
+        if session.get("native_rebot"):
+            rebot_native.response(self, session)
+            return
         session_id = str(session.get("session_id", ""))
         process = self._processes.get(session_id)
         if not process:
@@ -14092,7 +14145,8 @@ print("Updated Pi0.5 quantile stats for " + ", ".join(updated))
     def _cleanup_lerobot_processes(self, workflow: str) -> list[dict[str, Any]]:
         """Terminate stale LeRobot subprocesses without killing unrelated GUI/test processes."""
         matched = [*self._project_lerobot_pids(workflow), *self._lerobot_display_viewer_pids(workflow)]
-        pids = self._expand_descendant_pids(matched)
+        protected = rebot_native.protected_pids(self)
+        pids = [pid for pid in self._expand_descendant_pids(matched) if pid not in protected]
         if not pids:
             return []
         current = {os.getpid(), os.getppid()}

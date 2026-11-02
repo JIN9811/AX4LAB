@@ -1,7 +1,7 @@
 """Folder-owned source APIs; clients cannot select server filesystem roots."""
 import asyncio
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
@@ -58,6 +58,21 @@ def install_source_routes(app, *, service_factory):
         found = await call(service.library.scan)
         service.request_scan()
         return {"ok": True, "scheduled": service.status()["enabled"], **found}
+
+    @app.post(prefix + "/upload")
+    async def upload(request: Request, filename: str = Query(min_length=1, max_length=240)):
+        from knowledge.source_upload import receive_source, SourceUploadConflict, SourceUploadTooLarge
+        service = service_factory()
+        try:
+            result = await receive_source(service.library, filename, request.stream())
+        except SourceUploadTooLarge as exc:
+            raise HTTPException(413, detail=str(exc)) from exc
+        except SourceUploadConflict as exc:
+            raise HTTPException(409, detail=str(exc)) from exc
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, detail=str(exc)) from exc
+        service.request_scan()
+        return {"ok": True, **result, "scheduled": service.status()["enabled"]}
 
     @app.post(prefix + "/retry")
     async def retry(request: SourceRetry):

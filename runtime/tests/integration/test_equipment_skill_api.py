@@ -1774,6 +1774,20 @@ def test_equipment_json_completion_retries_malformed_selected_model_response() -
     assert "strict RFC 8259 JSON" in calls[1]["system_prompt"]
 
 
+def test_keyboard_synthesis_keeps_full_resolution_event_context():
+    images = [object(), object(), object(), object(), object()]
+    evidence = main_module.SkillVisionEvidence(images=images, steps=[], timeline=[
+        {"image_index": 1, "role": "state_observation"},
+        {"image_index": 2, "role": "action_context", "event_number": 1},
+        {"image_index": 3, "role": "action_context", "event_number": 2},
+        {"image_index": 4, "role": "initial_state", "reason": "recording_start"},
+        {"image_index": 5, "role": "state_observation", "reason": "recording_stop"},
+    ])
+    retained = main_module._equipment_skill_synthesis_evidence(evidence, timeline_chunk_count=2)
+    assert retained.images == images[1:]
+    assert [item["image_index"] for item in retained.timeline] == [1, 2, 3, 4]
+
+
 def test_equipment_json_completion_repairs_retry_syntax_without_model_fallback() -> None:
     calls: list[dict] = []
 
@@ -1803,6 +1817,35 @@ def test_equipment_json_completion_repairs_retry_syntax_without_model_fallback()
     }
     assert response.model == "vision-model"
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize("partial", ["", '{"steps":[]}'])
+def test_equipment_json_completion_retries_token_exhaustion_with_larger_budget(partial):
+    calls = []
+    class Backend:
+        async def complete(self, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return LLMResponse(text=partial, model="selected", raw={"choices": [{"finish_reason": "length"}]})
+            return LLMResponse(text='{"steps":[{"step_id":"step-001"}]}', model="selected")
+    payload, _ = asyncio.run(main_module._complete_equipment_json_with_retry(
+        Backend(), model="selected", system_prompt="Return JSON", user_prompt="demo",
+        metadata={"task_type": "equipment_skill_annotation", "max_tokens": 1400, "no_fallback": True}, images=[]))
+    assert len(calls) == 2
+    assert calls[1]["metadata"]["max_tokens"] >= 8192
+    assert calls[1]["model"] == "selected"
+    assert payload["steps"] == [{"step_id": "step-001"}]
+
+
+def test_equipment_json_completion_does_not_repair_truncated_retry_into_success():
+    class Backend:
+        async def complete(self, **kwargs):
+            return LLMResponse(text='{"steps":[{"step_id":"step-001"}', model="selected",
+                               raw={"choices": [{"finish_reason": "length"}]})
+    with pytest.raises(ValueError, match="token limit"):
+        asyncio.run(main_module._complete_equipment_json_with_retry(
+            Backend(), model="selected", system_prompt="JSON", user_prompt="demo",
+            metadata={"max_tokens": 8192}, images=[]))
 
 
 def test_equipment_skill_synthesis_workflow_omits_duplicate_image_candidates() -> None:

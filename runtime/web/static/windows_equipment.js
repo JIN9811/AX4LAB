@@ -22,11 +22,7 @@ Modification guide:
 */
 
 const connectionDot = document.getElementById("equipment-connection-dot");
-const connectionLabel = document.getElementById("equipment-connection-label");
-const connectionDetail = document.getElementById("equipment-connection-detail");
-const actionDot = document.getElementById("equipment-action-dot");
-const actionLabel = document.getElementById("equipment-action-label");
-const actionDetail = document.getElementById("equipment-action-detail");
+const currentProfileName = document.getElementById("equipment-current-profile");
 const commandBanner = document.getElementById("equipment-command-banner");
 const commandTitle = document.getElementById("equipment-command-title");
 const commandDetail = document.getElementById("equipment-command-detail");
@@ -49,7 +45,6 @@ const btnLoadUtmProfile = document.getElementById("btn-equipment-load-utm-profil
 const btnOpenBridgeGui = document.getElementById("btn-equipment-open-bridge-gui");
 const localBridgeDot = document.getElementById("equipment-local-bridge-dot");
 const localBridgeStatus = document.getElementById("equipment-local-bridge-status");
-const localBridgeDetail = document.getElementById("equipment-local-bridge-detail");
 const btnLocalStart = document.getElementById("btn-equipment-local-start");
 const btnLocalStop = document.getElementById("btn-equipment-local-stop");
 const btnLocalHealth = document.getElementById("btn-equipment-local-health");
@@ -93,7 +88,6 @@ const btnNewProfile = document.getElementById("btn-equipment-new-profile");
 const btnApplyProfile = document.getElementById("btn-equipment-apply-profile");
 const btnDeleteProfile = document.getElementById("btn-equipment-delete-profile");
 const profileApplyStatus = document.getElementById("equipment-profile-apply-status");
-const profileConnectionStatus = document.getElementById("equipment-profile-connection-status");
 const profileEvidenceStatus = document.getElementById("equipment-profile-evidence-status");
 const profileRuntimeStatus = document.getElementById("equipment-profile-runtime-status");
 const computerUseProgressOutput = document.getElementById("equipment-computer-use-progress");
@@ -166,10 +160,11 @@ const locatorYInput = document.getElementById("equipment-locator-y");
 const locatorWidthInput = document.getElementById("equipment-locator-width");
 const locatorHeightInput = document.getElementById("equipment-locator-height");
 const {
+  PROFILE_VIEW_KEY,
   agenticRunTerminalBadgeView,
   candidateSelectionView,
   confirmCandidateSelection,
-  profileConnectionStatus: profileConnectionStatusValue,
+  equipmentProfileView,
   selectedCandidatesFirst,
   skillIdFromRecordingName,
 } = window.atrWindowsEquipmentSelection;
@@ -477,7 +472,7 @@ function renderWorkerRecordings(items) {
   if (!workerRecordings.length) {
     selectedRecordingId = "";
     if (btnImportRecording) btnImportRecording.disabled = true;
-    workerRecordingsEl.textContent = "No recordings are available on the selected Worker.";
+    workerRecordingsEl.textContent = "No recordings.";
     return;
   }
   if (selectedRecordingId && !workerRecordings.some((recording) => String(recording.recording_id || "") === selectedRecordingId)) {
@@ -493,13 +488,14 @@ function renderWorkerRecordings(items) {
     button.type = "button";
     button.className = `equipment-skill-row equipment-skill-item${selectedRecordingId === recordingId ? " selected" : ""}`;
     button.setAttribute("aria-pressed", selectedRecordingId === recordingId ? "true" : "false");
-    button.innerHTML = `<strong>${escapeHtml(recording.name || recordingId)}</strong><span>${escapeHtml(recordingId)} · ${escapeHtml(recording.status || "recorded")} · ${events} events · ${duration.toFixed(1)}s</span>`;
+    button.title = recordingId;
+    button.innerHTML = `<strong>${escapeHtml(recording.name || recordingId)}</strong><span>${escapeHtml(recording.status || "recorded")} · ${events} events · ${duration.toFixed(1)}s</span>`;
     button.addEventListener("click", () => {
       selectedRecordingId = recordingId;
       if (skillWorkerIdInput) skillWorkerIdInput.value = selectedBridgeId;
       if (skillIdInput) skillIdInput.value = skillIdFromRecordingName(recording.name, recordingId);
       renderWorkerRecordings(workerRecordings);
-      if (recordingStatus) recordingStatus.textContent = `Selected ${recordingId} from ${selectedBridgeId}.`;
+      if (recordingStatus) recordingStatus.textContent = "";
     });
     workerRecordingsEl.appendChild(button);
   });
@@ -510,7 +506,7 @@ async function refreshWorkerRecordings(options = {}) {
   const bridgeId = String(selectedBridgeId || "").trim();
   if (!bridgeId) {
     renderWorkerRecordings([]);
-    if (!silent && recordingStatus) recordingStatus.textContent = "Select a connected Worker before loading recordings.";
+    if (!silent && recordingStatus) recordingStatus.textContent = "Connect a device to load recordings.";
     return { ok: false, status: "worker_required" };
   }
   if (recordingListLoading) return { ok: false, status: "refresh_in_progress" };
@@ -519,7 +515,7 @@ async function refreshWorkerRecordings(options = {}) {
   try {
     const data = await apiJson(`/api/equipment/workers/${encodeURIComponent(bridgeId)}/recordings`);
     renderWorkerRecordings(data.recordings || []);
-    if (!silent && recordingStatus) recordingStatus.textContent = `${workerRecordings.length} recording(s) loaded from ${bridgeId}.`;
+    if (!silent && recordingStatus) recordingStatus.textContent = "";
     return data;
   } catch (err) {
     if (!silent) {
@@ -642,8 +638,8 @@ function renderSkillAuthoringJob(job) {
     skillAuthoringStatus.textContent = status === "COMPLETED" && review.reviewRequired ? "COMPLETED · REVIEW REQUIRED" : status === "RUNNING" ? `Working · ${stage}` : `${status} · ${stage}`;
   }
   if (skillAuthoringDetail) {
-    const detail = status === "COMPLETED" ? "Draft authoring completed. Open Workflow Editor to inspect evidence and review proposals." : String(payload.status_text || "New Windows recordings target 15 FPS using asynchronous capture. Select a recording to build a reviewed draft.");
-    skillAuthoringDetail.textContent = [detail, ...review.details].join(" · ");
+    const detail = status === "COMPLETED" ? "Draft ready. Review in Workflow Editor." : String(payload.status_text || payload.error || "");
+    skillAuthoringDetail.textContent = [detail, ...review.details].filter(Boolean).join(" · ");
   }
   if (btnStopSkillAuthoring) btnStopSkillAuthoring.disabled = !skillAuthoringIsActive(payload) || status === "STOPPING";
   if (skillAuthoringIsActive(payload)) {
@@ -831,6 +827,10 @@ function renderEquipmentProfiles(payload) {
   if (!profiles.some((profile) => profile.profile_id === selectedEquipmentProfileId)) {
     throw new Error("Selected equipment profile is unavailable. Select a registered profile.");
   }
+  const view = equipmentProfileView(payload, selectedEquipmentProfileId);
+  if (currentProfileName) currentProfileName.textContent = view.label;
+  // Remember the viewed workspace, never change the profile applied to experiments.
+  try { localStorage.setItem(PROFILE_VIEW_KEY, view.profileId); } catch (_) { /* Storage may be disabled. */ }
   if (!profileItems) return;
   profileItems.innerHTML = profiles.map((profile) => {
     const selected = profile.profile_id === selectedEquipmentProfileId ? " selected" : "";
@@ -839,8 +839,6 @@ function renderEquipmentProfiles(payload) {
   profileItems.onchange = () => {
     openEquipmentProfile(profileItems.value);
   };
-  if (profileApplyStatus) profileApplyStatus.textContent = payload.selected_profile_id === selectedEquipmentProfileId
-    ? "Applied profile" : "Not applied · this profile is open for setup";
   if (btnDeleteProfile) {
     const builtIn = ["utm_windows_v1", "windows_desktop_v1"].includes(selectedEquipmentProfileId);
     const applied = payload.selected_profile_id === selectedEquipmentProfileId;
@@ -878,11 +876,11 @@ async function createEquipmentProfile() {
 async function applyEquipmentProfile() {
   setBusy(btnApplyProfile, true);
   try {
-    const result = await apiJson(`/api/equipment/profiles/${encodeURIComponent(selectedEquipmentProfileId)}/apply`, {
+    await apiJson(`/api/equipment/profiles/${encodeURIComponent(selectedEquipmentProfileId)}/apply`, {
       method: "POST", body: JSON.stringify({worker_id: selectedBridgeId}),
     });
     await refreshConfig({logResult: false});
-    if (profileApplyStatus) profileApplyStatus.textContent = `Applied · ${result.worker_id} · used by the next execution`;
+    if (profileApplyStatus) profileApplyStatus.textContent = "Profile applied.";
   } catch (err) {
     if (profileApplyStatus) profileApplyStatus.textContent = err.message;
   } finally {
@@ -976,11 +974,6 @@ async function loadEquipmentProfileState() {
     apiJson(`/api/equipment/profiles/${encodeURIComponent(selectedEquipmentProfileId)}/state`),
   ]);
   renderEquipmentProfiles(profiles);
-  const connection = state.connection || {};
-  const readiness = state.readiness || {};
-  if (profileConnectionStatus) {
-    profileConnectionStatus.textContent = `profile=${state.profile?.label || "UTM"} · bridge=${profileConnectionStatusValue(connection)} · readiness=${readiness.status || "unknown"}`;
-  }
   const evidence = state.evidence && typeof state.evidence === "object" ? state.evidence : {};
   if (profileEvidenceStatus) {
     profileEvidenceStatus.textContent = evidence.analysis_handoff?.status || evidence.status || "No profile test result yet.";
@@ -1230,11 +1223,6 @@ function updateProofDashboard() {
 
 function setActionStatus(label, detail = "", kind = "idle") {
   const normalizedKind = kind === "ok" ? "ok" : kind === "blocked" || kind === "error" ? "blocked" : kind === "working" ? "working" : "idle";
-  if (actionDot) {
-    actionDot.className = `status-dot ${normalizedKind === "ok" ? "running" : normalizedKind === "blocked" ? "error" : normalizedKind === "working" ? "running" : "idle"}`;
-  }
-  if (actionLabel) actionLabel.textContent = label || "Idle";
-  if (actionDetail) actionDetail.textContent = detail || "Ready for Windows bridge operation.";
   if (commandBanner) {
     commandBanner.className = `equipment-command-banner ${normalizedKind === "ok" ? "ok" : normalizedKind === "blocked" ? "blocked" : normalizedKind === "working" ? "working" : ""}`.trim();
   }
@@ -1473,16 +1461,10 @@ function setConnectionStatus(connection) {
   }
   if (connectionDot) {
     connectionDot.className = `status-dot ${selected ? "running" : "idle"}`;
+    connectionDot.setAttribute("aria-label", selected ? "Saved worker selected" : "No worker selected");
   }
-  if (connectionLabel) {
-    const alias = connection && connection.selected_candidate ? `${connection.selected_candidate} · ` : "";
-    connectionLabel.textContent = selected ? `${alias}${connection.bridge_url}` : "No PyAutoGUI bridge candidate selected";
-  }
-  if (connectionDetail) {
-    const tokenText = connection && (connection.paired || connection.token_configured) ? "paired" : "pairing required";
-    const memoryPath = connection && connection.connection_memory_path ? connection.connection_memory_path : "memory/windows_pyautogui_connection.json";
-    const candidateCount = connection && Array.isArray(connection.candidates) ? `${connection.candidates.length} candidate(s)` : "0 candidates";
-    connectionDetail.textContent = `${tokenText} · ${candidateCount} · ${memoryPath}`;
+  if (btnRefresh) {
+    btnRefresh.title = selected ? `Refresh saved connection · ${selectedBridgeId}` : "Refresh saved connection · no worker selected";
   }
   renderSavedCandidates(connection && Array.isArray(connection.candidates) ? connection.candidates : []);
   updateProofDashboard();
@@ -1509,12 +1491,8 @@ function renderLocalBridgeStatus(payload) {
   const healthy = data.healthy === true;
   const connection = data.connection && typeof data.connection === "object" ? data.connection : {};
   const selected = connection.selected_candidate === "local_development";
-  const pyautogui = data.health && data.health.pyautogui && data.health.pyautogui.available === true;
   if (localBridgeDot) localBridgeDot.className = `status-dot ${healthy ? "running" : running ? "warning" : "idle"}`;
-  if (localBridgeStatus) localBridgeStatus.textContent = healthy ? "Ready" : running ? "Running · desktop control unavailable" : "Stopped";
-  if (localBridgeDetail) {
-    localBridgeDetail.textContent = `localhost:8767 · ${pyautogui ? "PyAutoGUI ready" : "PyAutoGUI not ready"} · ${selected ? "selected" : "standby"}`;
-  }
+  if (localBridgeStatus) localBridgeStatus.textContent = healthy ? "Ready" : running ? "Not ready" : "Stopped";
   if (btnLocalStart) btnLocalStart.disabled = running;
   if (btnLocalStop) btnLocalStop.disabled = !running;
   if (btnLocalSelect) btnLocalSelect.disabled = !healthy || selected;
@@ -1573,20 +1551,15 @@ function renderCandidates(candidates) {
   candidates.forEach((candidate) => {
     const card = document.createElement("div");
     card.className = "equipment-candidate-card";
-    const status = candidate.pairing_required ? "pairing required" : candidate.status || "ready";
-    const pyautogui = candidate.pyautogui && candidate.pyautogui.available === false ? "PyAutoGUI missing" : "PyAutoGUI ready/unknown";
     card.innerHTML = `
-      <div>
-        <strong>${candidate.bridge_url}</strong>
-        <p class="hint">${status} · ${candidate.hostname || "Windows worker"} · ${candidate.server_version || pyautogui}</p>
-      </div>
       <div class="equipment-candidate-save">
-        <input class="text-input equipment-alias-input" placeholder="candidate alias" />
-        <input class="text-input equipment-pairing-code-input" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" placeholder="4-digit pairing code" />
-        <button class="btn mini">Pair & Save</button>
+        <input class="text-input equipment-alias-input" aria-label="Worker name" placeholder="Worker name" />
+        <input class="text-input equipment-pairing-code-input" aria-label="Pairing code" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" placeholder="4-digit pairing code" />
+        <button class="btn mini primary">Pair &amp; Save</button>
       </div>
     `;
     const button = card.querySelector("button");
+    button.dataset.originalText = button.textContent;
     const aliasInput = card.querySelector(".equipment-alias-input");
     const pairingInput = card.querySelector(".equipment-pairing-code-input");
     if (aliasInput && candidate.host) {
@@ -1622,25 +1595,22 @@ function renderSavedCandidates(candidates) {
     const view = candidateSelectionView(candidate);
     card.className = view.cardClass;
     if (view.ariaCurrent) card.setAttribute("aria-current", view.ariaCurrent);
-    const selected = view.selected ? "selected" : "standby";
-    const target = candidate.managed_local ? "local managed" : `${candidate.platform || "windows"} · ${candidate.scope || "network"}`;
     card.innerHTML = `
       <div class="equipment-candidate-identity">
-        <strong>${candidate.candidate_alias}</strong>
-        <p class="hint">${candidate.bridge_url} · ${target} · ${selected} · ${candidate.allow_live_execute ? "live enabled" : "live blocked"}</p>
-        <p class="equipment-worker-update-state" data-update-state>Version not checked</p>
+        <strong>${escapeHtml(candidate.candidate_alias)}</strong>
       </div>
       <div class="equipment-worker-actions">
-        <div class="button-row compact">
-          <button class="btn mini" data-action="check-update">Check Update</button>
-          <button class="btn mini primary" data-action="apply-update">Update</button>
-          <button class="btn mini" data-action="rollback-update">Rollback</button>
-        </div>
         <div class="button-row compact">
           <button class="${view.buttonClass}" data-action="select" aria-pressed="${view.ariaPressed}">${view.buttonText}</button>
           <button class="btn mini danger" data-action="delete">Delete</button>
         </div>
+        <div class="button-row compact equipment-worker-maintenance">
+          <button class="btn mini" data-action="check-update">Check Update</button>
+          <button class="btn mini" data-action="apply-update">Update</button>
+          <button class="btn mini" data-action="rollback-update">Rollback</button>
+        </div>
       </div>
+      <p class="equipment-worker-update-state" data-update-state role="status" aria-live="polite"></p>
     `;
     const selectButton = card.querySelector('[data-action="select"]');
     const deleteButton = card.querySelector('[data-action="delete"]');
@@ -1966,7 +1936,7 @@ function hydrateUtmProfile(data) {
 
 function openSelectedBridgeGui() {
   window.open(`/equipment/windows/console?profile_id=${encodeURIComponent(selectedEquipmentProfileId)}`, "_blank", "noopener,noreferrer");
-  setActionStatus("Windows GUI opened", "Opened locally; bridge connectivity is checked only when a console action is requested.", "ok");
+  setActionStatus("Remote GUI opened", "Opened locally; bridge connectivity is checked only when a console action is requested.", "ok");
 }
 
 async function checkReadiness() {

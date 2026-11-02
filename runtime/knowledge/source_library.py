@@ -79,6 +79,8 @@ class SourceLibrary:
             errors: list[str] = []
             for path in sorted(self.inbox.rglob("*")):
                 relative = path.relative_to(self.inbox).as_posix()
+                if path.name.startswith(".source-upload-") and path.suffix == ".part":
+                    continue  # Private upload staging is not a complete source.
                 if path.is_symlink():
                     errors.append(f"{relative}: symlinks are not accepted")
                     continue

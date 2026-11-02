@@ -4,13 +4,28 @@ The human demonstrates the procedure; the selected vision-capable Local/API mode
 
 ## Record and interpret
 
+Before recording, use **Manuals & References** in Skill Recording to drop a manual or choose files. Originals go to the shared Knowledge Source Library; Equipment does not parse PDFs independently. Files are limited to 64 MiB each. Re-uploading the same file is harmless; different content with the same name requires renaming and never overwrites the original.
+
+Uploading and publishing are separate. If Knowledge processing is off, open **Source Library** and enable automatic curation. Wait for **Ready for reference** before building a draft that should use the manual. The VLM receives relevant Knowledge-published notes, source references and applicability conditions. No matching or unavailable references are recorded explicitly; a successful upload alone is not evidence that the manual was consulted. Reference text cannot replace recorded actions or bypass review.
+
 1. In **Windows Automation**, select the instrument profile and its paired Worker.
 2. Record the procedure in the Windows bridge console. Capture targets **15 FPS**. Screen acquisition and encoding/storage are separate; timestamped keyboard/mouse events and their before/after images are retained alongside the full timeline.
-3. Stop and save the recording. Finalization waits for pending writes. Check `evidence_complete`: disk errors, dropped evidence or capture failures must not be mistaken for a complete demonstration.
-4. Select the saved recording and choose **Import Selected & Build Draft**. The selected vision-capable endpoint analyzes event/transition frames and creates an editable Skill.
+3. Stop and save the recording. Finalization waits for pending writes. Check `evidence_complete`: disk errors, dropped evidence or capture failures must not be mistaken for a complete demonstration. Missed sampling deadlines are reported separately as `capture_timing_degraded` and require review; they do not mean a file write failed.
+4. Select the saved recording and choose **Create Draft**. The selected vision-capable endpoint analyzes event/transition frames and creates an editable Skill. Keyboard shortcuts retain their full-resolution event images, and Windows Ctrl-key characters are normalized without changing the original evidence. If the model exhausts its output budget, authoring retries once with a larger bounded budget; a truncated response is never accepted as a completed Skill.
 5. Open the workflow editor. Expand each step to review its intent, target, preconditions, expected outcome and success/failure evidence. Correct uncertain interpretations before saving the review.
 
 The VLM sees at most 128 selected frames per recording, not every frame of the 15 FPS stream. Full original files remain available. Missing action coverage is disclosed and requires review; long demonstrations may be easier to review as separate Skills.
+
+## Split a long demonstration
+
+In the workflow editor, save your changes and choose **Split Skills → Generate Proposal**. The selected Local/API model uses the existing action annotations, up to 12 recorded images and applicable Knowledge references to suggest task boundaries. It does not record again or operate the device. A single-purpose workflow may return **no split recommended**.
+
+- Review each part's steps, purpose, and before/after conditions. The proposal must cover every saved step exactly once in order, including waits; it cannot rewrite actions.
+- **Create Drafts** asks for confirmation and creates separate, review-required Skill versions. The original Skill and the active equipment flow stay unchanged. Open the child links to review each draft before compilation, validation and deployment.
+- Possible branches not demonstrated are marked **Needs demonstration**. They are saved as a non-executable composition proposal, not installed as runtime routes. Record the alternative before connecting it through the existing Skill Flow editor.
+- Refreshing and reopening **Split Skills** restores the latest proposal and created-draft links. If the source workflow, annotations or recording changed before confirmation, generate a new proposal. Repeating the same confirmation does not create duplicates.
+
+Proposals and composition records live in `memory/equipment_skill_splits/`; child packages live in the normal `memory/equipment_skills/` registry. Each child retains its source step IDs, source revision, and full original recording as evidence. Whole-recording evidence is context, not proof that the child is independently validated. A split does not itself make a Skill safe to execute.
 
 ## Review before deployment
 

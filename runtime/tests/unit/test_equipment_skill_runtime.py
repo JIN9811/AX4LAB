@@ -55,6 +55,14 @@ def test_canonical_hash_is_order_independent() -> None:
     assert canonical_sha256({"b": 2, "a": 1}) == canonical_sha256({"a": 1, "b": 2})
 
 
+@pytest.mark.parametrize("letter", ["a", "f", "i", "j", "m", "s", "z"])
+def test_windows_ctrl_character_import_preserves_raw_evidence(letter):
+    events = [{"kind": "hotkey", "at_ms": 0, "keys": ["ctrl", chr(ord(letter) - 96)]}]
+    original = deepcopy(events)
+    assert compile_recording_actions(events) == [{"action": "hotkey", "keys": ["ctrl", letter]}]
+    assert events == original
+
+
 def test_recording_actions_compile_to_existing_program_actions() -> None:
     actions = compile_recording_actions(_recording()["events"])
 
