@@ -49,7 +49,7 @@ def test_distribution_uses_positive_per_file_selection():
     selection = RUNTIME / 'distribution-files.json'
     assert selection.is_file(), 'positive code/resource selection is missing'
     contract = json.loads(selection.read_text())
-    assert len(contract['packages']) == 44
+    assert len(contract['packages']) == 47
     assert {'objectives', 'integrations.isaac_lab_robotis_omx',
             'device_bridges.serial_communication',
             'integrations.isaac_lab_robotis_omx.mdp',

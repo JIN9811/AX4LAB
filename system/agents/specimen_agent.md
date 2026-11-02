@@ -98,6 +98,18 @@ draft; existing explicit save/activation remains the execution boundary.
 
 ## Overview and Responsibilities
 
+### Shared Design geometry receipts
+
+Explicit Design Workspace requests carry the full normalized geometry request
+and hash-linked final receipt. Specimen validates source/request/STL identity
+before reuse and regenerates the same locked request when evidence is corrupt.
+Reuse never skips mesh/manufacturing checks. New families currently stop at the
+existing `MANUFACTURABILITY_REJECTED` / review-required boundary: actual-STL wall
+sampling does not establish an overhang/bridge/fixture policy. No slicer or printer
+is dispatched by that review result. Explicit legacy Gyroid retains existing
+manufacturing rules; legacy specs remain on their existing path. See the
+[Design Workspace guide](../../docs/gui/design_workspace.md).
+
 Live GUI identifies SPC as **Specimen Making Agent Module**. Its agent badge
 follows scoped agent execution and verified completion, not printer telemetry.
 Printer running/completed states stay inside the fabrication progress report;

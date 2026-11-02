@@ -1,6 +1,11 @@
 # Design Workspace and Metamaterial Unit Cell Designer
 
-Status: detailed design approved by the user on 2026-11-02. Implementation pending.
+Status: approved 2026-11-02; Tasks 1–7 implemented in isolated branch
+`feat/design-workspace`. Focused numerical/API/agent/browser and extracted-wheel
+verification completed, including a bounded real configured LLM run. Whole-project
+collection is blocked by isolated-environment dependencies; final controller review
+and integration remain pending. Production is unchanged. The delivered contract
+and limitations are in `docs/gui/design_workspace.md`.
 
 ## Intent and agreed direction
 

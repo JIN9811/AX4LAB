@@ -85,17 +85,17 @@ checks for final jobs; preview receipts cannot be used as manufacturing receipts
 **Interfaces:** produces `discover_modules`, `normalize_fields`; serial keeps its
 existing `ModuleCatalog` public methods and `ax4lab.serial_device.v1` schema.
 
-- [ ] Write failing tests: a temporary third module appears without registration;
+- [x] Write failing tests: a temporary third module appears without registration;
   duplicate IDs are excluded; descriptor/provider/icon symlinks cannot escape;
   discovery never imports a provider; malformed modules do not hide good modules.
-- [ ] Test number/integer/enum/boolean/text/vector fields, finite bounds, missing
+- [x] Test number/integer/enum/boolean/text/vector fields, finite bounds, missing
   defaults, unknown values, and equality/membership-only `visible_when` conditions.
-- [ ] Run `pytest runtime/tests/unit/test_workspace_catalog.py -q`; verify genuine red.
-- [ ] Implement shared primitives and a serial adapter; preserve serial-specific
+- [x] Run `pytest runtime/tests/unit/test_workspace_catalog.py -q`; verify genuine red.
+- [x] Implement shared primitives and a serial adapter; preserve serial-specific
   validation and restart-on-code-change behavior. Do not change serial sessions.
-- [ ] Run new catalog tests plus `runtime/tests/unit/test_serial_*` and
+- [x] Run new catalog tests plus `runtime/tests/unit/test_serial_*` and
   `runtime/tests/integration/test_serial_*`; all affected tests pass without ports.
-- [ ] Commit this independently testable contract with its reference document.
+- [x] Commit this independently testable contract with its reference document.
 
 ### Task 2: Geometry request, mesh pipeline and Gyroid compatibility
 
@@ -109,19 +109,19 @@ Each installed provider exports `generate_field(grid: dict, request: dict) -> di
 signed scalar (negative solid), with explicit units, bounds and method metadata.
 Legacy Gyroid is a dedicated adapter to the existing writer, not reimplemented math.
 
-- [ ] Write tests for invalid IDs/versions, negative/NaN dimensions, traversal,
+- [x] Write tests for invalid IDs/versions, negative/NaN dimensions, traversal,
   unsupported representations, repeatable hashes and preview/final separation.
-- [ ] Record legacy Gyroid semantic/mesh baselines at cell size 5/10 mm crossed
+- [x] Record legacy Gyroid semantic/mesh baselines at cell size 5/10 mm crossed
   with wall thickness 0.6/1.2 mm, including caps and orientation; tests compare
   old/new adapter outputs rather than assuming a visually similar mesh is equal.
-- [ ] Run new tests red, then implement normalized serialization and contained
+- [x] Run new tests red, then implement normalized serialization and contained
   immutable job artifacts. Request identity excludes destination directory.
-- [ ] Implement closed finite-domain meshing, orientation-before-clipping,
+- [x] Implement closed finite-domain meshing, orientation-before-clipping,
   boundary closure, normals/component/bounds/volume checks and STL reload checks.
   Keep sampled/approximated/unchecked quantities explicitly labelled.
-- [ ] Add a CPU job named `geometry.design_generate` to `runtime/utils/compute_jobs.py`;
+- [x] Add a CPU job named `geometry.design_generate` to `runtime/utils/compute_jobs.py`;
   trusted workers resolve the pinned provider fingerprint before computation.
-- [ ] Run contract, Gyroid serialization and existing mesh-quality regressions;
+- [x] Run contract, Gyroid serialization and existing mesh-quality regressions;
   verify identical normalized input and source identity produce identical receipts
   excluding timestamps/host paths. Commit.
 
@@ -135,26 +135,26 @@ Legacy Gyroid is a dedicated adapter to the existing writer, not reimplemented m
 `schwarz_d`, `iwp`, `neovius`, `fischer_koch_s`, `spinodoid`, `simple_cubic`, `bcc`,
 `fcc`, `octet`, `hexagonal_honeycomb`, `reentrant_honeycomb`, `voronoi`.
 
-- [ ] Before implementation inspect primary equations and any adopted source's
+- [x] Before implementation inspect primary equations and any adopted source's
   license/revision. Record source, parameter meaning, approximation and status per
   family. No unlicensed copying or runtime downloads; record research-only families.
-- [ ] Write and run failing field/mesh tests before each family implementation:
+- [x] Write and run failing field/mesh tests before each family implementation:
   distinct topology signatures, expected symmetries, boundary periodicity where
   declared, no box fallback, joined struts, finite envelope and STL reload.
-- [ ] TPMS: implement `sheet`, `network_positive`, `network_negative`; use mm wall
+- [x] TPMS: implement `sheet`, `network_positive`, `network_negative`; use mm wall
   target for sheet and dimensionless iso-level for network. Independently measure
   sheet error against voxel spacing and provider calibration; insufficient
   resolution fails final validity instead of falsely confirming physical thickness.
-- [ ] Spinodoid: seeded GRF with wavelength/wave count/cone angles and solid-fraction
+- [x] Spinodoid: seeded GRF with wavelength/wave count/cone angles and solid-fraction
   threshold. Bound wave accumulation memory; mark finite domains non-periodic.
   Test same seed reproducibility, different seed variation and cone anisotropy.
-- [ ] Struts: explicit graph definitions and union-distance fields for SC/BCC/FCC/
+- [x] Struts: explicit graph definitions and union-distance fields for SC/BCC/FCC/
   Octet. Test known edges/node valences and connected junctions separately from
   mesh watertightness; diameter remains diameter, never renamed wall thickness.
-- [ ] Cellular: extruded hexagonal and re-entrant wall geometry; test angle effects
+- [x] Cellular: extruded hexagonal and re-entrant wall geometry; test angle effects
   and wall interpretation. Voronoi: seeded strut network with contained boundary
   handling; do not represent nearest-cell interiors as Voronoi struts.
-- [ ] Test coarse/fine convergence, request bounds, numerical resource rejection,
+- [x] Test coarse/fine convergence, request bounds, numerical resource rejection,
   disconnected cases and meaningful volume fraction for each representation.
   Emit final success only for geometrically valid output; commit by family group.
 
@@ -169,20 +169,20 @@ Private roots: `<memory_root>/design_workspace/` and
 `<artifact_root>/design_workspace/<job_id>/`. Use existing compute pool, never
 web-process mesh computation or nested pool submission.
 
-- [ ] Write failing tests for atomic profile saves, stale revision conflict,
+- [x] Write failing tests for atomic profile saves, stale revision conflict,
   confirmed deletion, unavailable provider on saved profile and module enable state.
-- [ ] Write job tests: idempotency, bounded queue, pinned provider/config, refresh
+- [x] Write job tests: idempotency, bounded queue, pinned provider/config, refresh
   without resubmission, cancellation vs completion race, crash/restart interrupted
   state, file hash mismatch and failed writes leaving no successful receipt.
-- [ ] Implement submit/status/cancel and durable receipts. Pin provider fingerprint
+- [x] Implement submit/status/cancel and durable receipts. Pin provider fingerprint
   at acceptance; if removed code cannot run, return an explicit job error rather
   than substitute a provider. No automatic restart/resume of interrupted jobs.
-- [ ] Implement `/api/design/modules`, module refresh/icon/state/geometries;
+- [x] Implement `/api/design/modules`, module refresh/icon/state/geometries;
   profiles CRUD; `/validate`; `/jobs` list/create/detail/cancel and contained
   artifact download. Enforce loopback/same-origin, payload limits and revision rules.
-- [ ] Test API shapes using injected temporary roots and fake numeric executor;
+- [x] Test API shapes using injected temporary roots and fake numeric executor;
   then exercise actual generation via API without importing production controller.
-- [ ] Measure queue/memory limits on representative geometries and document exact
+- [x] Measure queue/memory limits on representative geometries and document exact
   supported resolution limits; repeat concurrent requests and cancellation. Commit.
 
 ### Task 5: Dynamic workspace GUI
@@ -194,16 +194,16 @@ GUI launcher; tests `runtime/tests/js/design_workspace.test.cjs` and
 **Interfaces:** GUI only consumes Task 4 API; forms use field keys/types/defaults
 from catalog. Reuse existing local 3D-viewer dependencies after inspecting them.
 
-- [ ] Write failing JS tests for metadata-rendered fields, visibility conditions,
+- [x] Write failing JS tests for metadata-rendered fields, visibility conditions,
   no hardcoded geometry list, dirty input preservation and stale response rejection.
-- [ ] Add module catalog, geometry selection, profiles, Preview/Generate/Download,
+- [x] Add module catalog, geometry selection, profiles, Preview/Generate/Download,
   bounded job history, concise checks and persistent 3D camera orientation.
-- [ ] Add enable/disable and Refresh modules; do not offer executable plugin uploads.
+- [x] Add enable/disable and Refresh modules; do not offer executable plugin uploads.
   Keep unavailable saved profiles/artifacts visible. Module removal changes new
   selections, not retained results. Selection changes cannot relabel old previews.
-- [ ] Test API numeric errors visibly, cancellation, reload/new tab, field edits
+- [x] Test API numeric errors visibly, cancellation, reload/new tab, field edits
   during generation and a third fixture module displayed without frontend changes.
-- [ ] Use frontend-testing-debugging skill and available browser tools against an
+- [x] Use frontend-testing-debugging skill and available browser tools against an
   isolated server: 1920x1080 and narrow viewport, actual STL preview/download and
   keyboard controls. Confirm no production/device calls. Commit.
 
@@ -221,23 +221,23 @@ and `geometry_receipt`. Legacy specs without these fields retain the old path.
 `tool_adapter.generate_tool(payload: dict) -> dict` emits the current geometry-tool
 result keys plus receipt; only trusted internal callers provide run output roots.
 
-- [ ] Write failing tests for schema propagation through real registered Design
+- [x] Write failing tests for schema propagation through real registered Design
   graph, new-family normalization, bounded candidate admission, state isolation,
   unknown/disabled provider, and no implicit changes to current Gyroid/BO defaults.
-- [ ] Implement family-specific preparation/validation; bypass legacy heuristic
+- [x] Implement family-specific preparation/validation; bypass legacy heuristic
   mechanical rankings for new requests. Stable candidate-ID order, unknown
   performance and null unsliced cost; keep existing LLM accept/inspect authority.
-- [ ] Extend decision summaries, locking/fingerprints, reports and required handoff
+- [x] Extend decision summaries, locking/fingerprints, reports and required handoff
   fields by capability. No fake wall/cell/mass values to satisfy old required fields.
-- [ ] Generate final selected geometry through the registered tool and preserve
+- [x] Generate final selected geometry through the registered tool and preserve
   receipt/metadata under the existing run archive. Candidate preview is distinct.
-- [ ] In Specimen geometry preparation verify identity, input/source/file hashes,
+- [x] In Specimen geometry preparation verify identity, input/source/file hashes,
   final quality and checks before artifact reuse; otherwise regenerate the same
   normalized request/seed. Bad receipt must not bypass manufacturing checks.
-- [ ] Run registered agent graph for TPMS, spinodoid and strut requests; inspect
+- [x] Run registered agent graph for TPMS, spinodoid and strut requests; inspect
   final STL. Advance Specimen preparation only through geometry/check operations,
   with a fail-fast tool allowlist preventing slicing or hardware.
-- [ ] Run legacy Design/Specimen/module lifecycle/contract/compute regressions and
+- [x] Run legacy Design/Specimen/module lifecycle/contract/compute regressions and
   compare candidate identity/report shape. Commit.
 
 ### Task 7: Distribution, actual LLM evidence, docs and final review
@@ -252,19 +252,19 @@ connections or jobs. Distribution explicitly includes shared modules, descriptor
 provider code and browser resources; add optional scientific dependency extra only
 if existing dependency declarations do not cover the installed engine requirements.
 
-- [ ] Write failing packaged-resource/standalone-import tests; implement packaging
+- [x] Write failing packaged-resource/standalone-import tests; implement packaging
   and lazy host binding. Verify extracted wheel discovery and GUI/API assets.
-- [ ] Run isolated full verification script with explicit roots and hardware calls
+- [x] Run isolated full verification script with explicit roots and hardware calls
   denied. Retain inputs, source hashes, receipts, STL, screenshots and timings in
   an untracked validation directory. Output individual failures rather than hide them.
-- [ ] Exercise a configured real LLM through existing AgentContext routing without
+- [x] Exercise a configured real LLM through existing AgentContext routing without
   loading/stopping models or mutating production settings. If unavailable, report
   exact blocker; deterministic graph evidence cannot substitute for LLM evidence.
-- [ ] Verify shared API vs agent request/mesh hashes, all fourteen providers and
+- [x] Verify shared API vs agent request/mesh hashes, all fourteen providers and
   representations, Gyroid boundary cases, serial parity and artifact reuse.
-- [ ] Run project default suite in isolation; classify unrelated dependency and
+- [x] Run project default suite in isolation; classify unrelated dependency and
   baseline failures without changing scientific checks to silence them.
-- [ ] Update usage/system docs with actual outcomes, supported parameter ranges,
+- [x] Update usage/system docs with actual outcomes, supported parameter ranges,
   source/license notices, installation and a third-provider extension example.
 - [ ] Use requesting-code-review for whole-branch review; address findings, rerun
   affected tests and use verification-before-completion before completion claims.
@@ -281,4 +281,9 @@ All five review-focus cases have explicit tests. Runtime numerical/resource
 measurements determine documented tolerances/limits; no physical experiment or
 claimed mechanical validation is part of this plan.
 
-Status: plan written; execution method and plan review pending. No task executed.
+Status: Tasks 1–7 implemented on isolated `feat/design-workspace`; focused
+verification includes actual API/registered-agent hash parity, all fourteen
+providers/modes, browser evidence, extracted wheel and one configured real LLM
+run. The full-project suite is not green (missing dependency collection blockers;
+known legacy golden mismatch remains documented). Controller whole-branch review
+and user-selected integration are pending. No merge, push or production activation.

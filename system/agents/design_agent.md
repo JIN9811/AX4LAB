@@ -108,6 +108,17 @@ package installation and Bridge migration are outside this change. See the
 
 ## Overview and Responsibilities
 
+### Explicit Design Workspace geometry
+
+The registered graph accepts an opt-in nested `geometry_request` in
+`run_metadata.orchestrator_design_contract` (plus optional bounded candidates).
+It shares the workspace engine and existing geometry tool/CPU pool; selection
+locks the full normalized request, seed, representation and source fingerprint.
+Final STL receipts and separate actual-STL preview PNGs stay in run-owned archives.
+No-nested-request legacy/BO behavior is unchanged. See the
+[Design Workspace contract](../../docs/gui/design_workspace.md) and
+[mathematical/source catalog](../references/metamaterial_geometry_catalog.md).
+
 The existing LLM decision boundary receives a bounded, reference-only
 [AX4LAB Wiki pack](../knowledge/wiki_memory.md). This supplies platform context
 without changing this agent's tools, numerical authority or execution gates.

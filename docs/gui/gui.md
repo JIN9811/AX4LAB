@@ -4,6 +4,10 @@ For the current page map and actual 1920 × 1080 screenshots, start with
 [GUI Structure and Screen Reference](../../system/runtime/gui/visual_structure.md).
 This page describes detailed behavior and operating requirements.
 
+The [Design Workspace](design_workspace.md) at `/design` provides installed
+metamaterial geometry modules, profiles, preview/final jobs and receipt-linked
+STL downloads. Numerical geometry success is not manufacturing approval.
+
 ![Live GUI shared shell](assets/screenshots/2026-09-29/live-overview.png)
 
 *Live GUI, 2026-09-29: runtime strip, agent binder, selected report, chat and event
