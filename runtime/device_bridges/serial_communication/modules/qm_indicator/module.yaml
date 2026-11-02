@@ -1,0 +1,23 @@
+schema: ax4lab.serial_device.v1
+id: qm_indicator
+version: 1.0.1
+label: Qmesys QM100T
+icon: icon.svg
+capabilities: [read]
+defaults: {port: '', baudrate: 115200, bytesize: 8, parity: N, stopbits: 1, flow_control: none, variant: observed60, timeout_s: 10, stale_after_s: 2, interval_s: 1}
+fields:
+  - {key: port, label: Port, type: port}
+  - {key: baudrate, label: Baud rate, type: select, options: [9600, 19200, 38400, 57600, 115200]}
+  - {key: bytesize, label: Data bits, type: select, options: [8]}
+  - {key: parity, label: Parity, type: select, options: [N]}
+  - {key: stopbits, label: Stop bits, type: select, options: [1]}
+  - {key: flow_control, label: Flow control, type: select, options: [none]}
+  - {key: variant, label: Frame format, type: select, options: [observed60, encoder42, encoder_pot52]}
+  - {key: timeout_s, label: Response timeout (s), type: number, min: 0.1, max: 30, step: 0.1}
+  - {key: stale_after_s, label: Stale after (s), type: number, min: 0.1, max: 3600, step: 0.1}
+channels:
+  - {key: load, label: Load}
+  - {key: disp1, label: DISP1}
+  - {key: disp2, label: DISP2}
+  - {key: load_range, label: Load Range, unavailable_label: Unknown range}
+source: Qmesys Indicator Manual, pp. 43–46; observed60 diagnostic variant

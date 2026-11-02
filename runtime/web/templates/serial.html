@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Serial Communication · AX4LAB</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/serial_workspace.css?v=4">
+  <script src="/static/serial_workspace.js?v=4" defer></script>
+</head>
+<body>
+<main class="page equipment-setup-page serial-page">
+  <header class="hero panel serial-header">
+    <div class="hero-copy"><p class="eyebrow">Device Workspace</p><h1>Serial Communication</h1></div>
+    <div class="equipment-header-actions"><button id="refresh-modules" class="btn">Refresh modules</button></div>
+  </header>
+  <div id="serial-message" class="serial-message" role="status" hidden></div>
+  <section id="serial-catalog" class="panel" aria-label="Device modules">
+    <div class="panel-title-row"><h2>Devices</h2></div>
+    <div id="serial-module-list" class="workspace-grid"></div>
+  </section>
+  <section id="serial-device" hidden>
+    <div class="panel serial-toolbar">
+      <button id="back-catalog" class="btn">← Devices</button><h2 id="device-title"></h2>
+      <label>Profile<select id="profile-select"></select></label>
+      <input id="profile-name" aria-label="Profile name" placeholder="Profile name" maxlength="100">
+      <button id="new-profile" class="btn">New</button><button id="delete-profile" class="btn danger">Delete</button>
+    </div>
+    <div class="serial-columns">
+      <section class="panel"><h2>Connection</h2><form id="serial-settings"><div id="serial-fields" class="serial-fields"></div>
+        <div class="button-row"><button id="refresh-ports" type="button" class="btn">Refresh ports</button><button id="save-settings" type="submit" class="btn primary">Set</button><span id="save-state" class="hint"></span></div>
+      </form><div class="button-row serial-connect"><button id="connect" class="btn primary">Connect</button><button id="disconnect" class="btn">Disconnect</button><span id="connection-state" class="serial-status">Disconnected</span></div>
+      <p id="reconnect-note" class="serial-message" hidden>Saved. Reconnect to apply changes.</p></section>
+      <section class="panel"><div class="panel-title-row"><h2>Communication</h2><span id="receive-state" class="serial-status">No data</span></div>
+        <div id="serial-values" class="serial-values"></div>
+        <div class="button-row"><button id="read-once" class="btn">Read once</button><button id="toggle-polling" class="btn">Start polling</button><button id="toggle-recording" class="btn">Start recording</button></div>
+        <p id="serial-counters" class="hint">RX 0 B · TX 0 B</p><p id="recording-state" class="hint"></p>
+      </section>
+    </div>
+    <section class="panel"><div class="panel-title-row"><h2>Activity</h2><button id="clear-events" class="btn mini">Clear</button></div>
+      <pre id="serial-activity" aria-label="Connection activity"></pre>
+      <details id="raw-events"><summary>Raw data</summary><span id="event-gap" class="hint"></span><pre id="serial-events" aria-label="Serial event log"></pre></details>
+    </section>
+  </section>
+  <section class="panel"><div class="panel-title-row"><h2>Recordings</h2><button id="refresh-recordings" class="btn mini">Refresh</button></div><div id="serial-recordings" class="serial-recordings"></div></section>
+</main>
+</body></html>

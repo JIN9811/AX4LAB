@@ -749,6 +749,8 @@ from utils.run_review import RunReviewRecorder
 app.include_router(review_router(controller._deps.run_root, templates, paths=RUNTIME_PATHS))
 from app.live_fullscreen import router as live_fullscreen_router
 app.include_router(live_fullscreen_router)
+from device_bridges.serial_communication.host import install_serial_workspace
+install_serial_workspace(app, RUNTIME_PATHS, templates)
 _RUN_REVIEW_RECORDER = None
 _ARTIFACT_PRESERVATION_SERVICE = None
 

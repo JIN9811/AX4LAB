@@ -25,7 +25,7 @@ Web dashboard panels:
 - global run metrics
 - run control buttons
 - registered local endpoint cards, with Loading/Unloading controls for configured managed servers
-- Device Workspaces panel with dedicated launchers for 3D Printer, Windows Automation, Manipulation, Bayesian Optimization, PLC Safety, Vision, and Knowledge; device evidence lives in those workspaces and run-owned Live reports
+- Device Workspaces panel with dedicated launchers for 3D Printer, Windows Automation, Manipulation, Bayesian Optimization, PLC Safety, Vision, Knowledge, and [Serial Communication](serial_communication.md); device evidence lives in those workspaces and run-owned Live reports
 - live loop timeline
 - agent status
 - device health

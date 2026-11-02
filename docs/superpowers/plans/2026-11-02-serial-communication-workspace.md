@@ -10,6 +10,23 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-02-serial-communication-workspace-design.md`
 
+## Execution result — 2026-11-02
+
+Tasks 1–4 implemented in the user-selected AX4LAB checkout after baseline commit
+`6731c25`. Task 5 scoped verification: 37 tests passed, real pseudo-terminal
+request/reply passed, desktop/mobile browser interactions passed, extracted wheel
+imports and device discovery passed. An existing Qm capture decoded 15,705 frames
+with no rejected frames. A fresh reviewer identified identity rebinding, unbounded
+drain, distribution omissions and session-cursor loss; all were reproduced and
+fixed. No physical port was opened and the operating server was not restarted.
+
+The default project suite could not complete collection in the isolated minimal
+environment (171 errors, including missing scientific/ML dependencies). Existing
+Windows tool-list expectations and archive file-mode checks also fail independently
+of this feature. No broad test-success claim, push or production deployment is made.
+The new implementation remains uncommitted for review; only the requested baseline
+snapshot was committed.
+
 ## Global Constraints
 
 - No experimental-loop changes, equipment motion, automatic physical connection, or server restart.

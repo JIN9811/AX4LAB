@@ -34,6 +34,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+serial = ["pyserial>=3.5,<4"]
 tts = ["piper-tts>=1.4.2"]
 realsense = ["pyrealsense2==2.58.2.10647"]
 desktop = [

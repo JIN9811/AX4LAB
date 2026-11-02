@@ -49,8 +49,9 @@ def test_distribution_uses_positive_per_file_selection():
     selection = RUNTIME / 'distribution-files.json'
     assert selection.is_file(), 'positive code/resource selection is missing'
     contract = json.loads(selection.read_text())
-    assert len(contract['packages']) == 43
+    assert len(contract['packages']) == 44
     assert {'objectives', 'integrations.isaac_lab_robotis_omx',
+            'device_bridges.serial_communication',
             'integrations.isaac_lab_robotis_omx.mdp',
             'integrations.isaac_lab_robotis_omx.robomimic'} <= set(contract['packages'])
     assert {p for p in contract['wheel'] if p.startswith('memory/')} == {
@@ -200,11 +201,19 @@ root = pathlib.Path(sys.argv[1]).resolve()
 sys.path.insert(0, str(root))
 for name in ('Pyautogui_server_for_window.bridge.computer_use_contract',
              'Pyautogui_server_for_window.bridge.computer_use_runtime',
-             'utils.equipment_computer_use_settings', 'agents.equipment.computer_use'):
+             'utils.equipment_computer_use_settings', 'agents.equipment.computer_use',
+             'device_bridges.serial_communication.host'):
     module = importlib.import_module(name)
     assert pathlib.Path(module.__file__).resolve().is_relative_to(root), module.__file__
 from utils.equipment_computer_use_settings import normalize_settings
 assert normalize_settings(None)['execution_mode'] == 'skill_flow'
+from device_bridges.serial_communication.catalog import ModuleCatalog
+catalog = ModuleCatalog()
+assert {m['id'] for m in catalog.list()} == {'cas_mwii_plus', 'qm_indicator'}
+assert catalog.protocol('cas_mwii_plus').request() == b'P'
+assert catalog.protocol('qm_indicator').request() is None
+for m in catalog.list():
+    assert catalog.icon(m['id']).is_file()
 ''', str(extracted)], cwd=tmp_path, capture_output=True, text=True)
     assert check.returncode == 0, check.stdout + check.stderr
     with tarfile.open(sdist) as archive:
