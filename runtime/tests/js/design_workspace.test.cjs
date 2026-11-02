@@ -210,3 +210,35 @@ test("concurrent poll and view share one artifact fetch without keeping old larg
   assert.equal(await first, "bytes");
   assert.equal(await second, "bytes");
 });
+
+test("representation drafts retain independent parameters and valid orientation by provider identity", async () => {
+  const model = Design.createModel();
+  const descriptor = {
+    ...geometry,
+    representation_orientation_axes: { solid: ["z"], network: ["x", "y", "z"] },
+  };
+  await model.selectModule("first", async () => ({ geometries: [descriptor] }));
+  model.draft.parameters.amount = 7;
+  model.draft.orientation_deg = [0, 0, 25];
+  model.selectRepresentation("network");
+  assert.deepEqual(model.draft.parameters, { level: 0 });
+  assert.deepEqual(model.draft.orientation_deg, [0, 0, 0]);
+  model.draft.parameters.level = 0.25;
+  model.draft.orientation_deg = [15, 10, 30];
+  model.selectRepresentation("solid");
+  assert.deepEqual(model.draft.parameters, { amount: 7 });
+  assert.deepEqual(model.draft.orientation_deg, [0, 0, 25]);
+  model.selectRepresentation("network");
+  assert.deepEqual(model.draft.parameters, { level: 0.25 });
+  assert.deepEqual(model.draft.orientation_deg, [15, 10, 30]);
+  await model.selectModule("second", async () => ({
+    geometries: [descriptor],
+  }));
+  assert.equal(model.draft.parameters.amount, 3);
+  await model.selectModule("first", async () => ({ geometries: [descriptor] }));
+  assert.equal(model.draft.parameters.amount, 7);
+  await model.selectModule("first", async () => ({
+    geometries: [{ ...descriptor, version: "2.0.0" }],
+  }));
+  assert.equal(model.draft.parameters.amount, 3);
+});

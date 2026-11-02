@@ -12,6 +12,7 @@ import socket
 import tempfile
 import threading
 import time
+import traceback
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -355,13 +356,158 @@ async def selection_probe(output,chromium):
     print(json.dumps(results,indent=2))
 
 
+async def draft_probe(output,chromium):
+    """Exercise actual boot/fields with real validation and delayed profile responses."""
+    output.mkdir(parents=True,exist_ok=True)
+    results=[]
+    with tempfile.TemporaryDirectory(prefix='design-drafts-') as temporary, fixture_server(Path(temporary)) as (url,service,modules,pool):
+        async with async_playwright() as playwright:
+            browser=await playwright.chromium.launch(executable_path=chromium,headless=True)
+            for case in ('representation_parameters','representation_orientation','save_new','save_edit','save_other'):
+                page=await browser.new_page(viewport={'width':1440,'height':1000})
+                gate=asyncio.Event()
+                evidence={}
+                try:
+                    base={'module_id':MODULE,'geometry_id':'simple_cubic','provider_version':'1.0.0'}
+                    original=service.create_profile({'name':'Original '+case,'request':base})
+                    other=service.create_profile({'name':'Other '+case,'request':dict(base,parameters={'cell_size_mm':17})})
+                    await page.goto(url+'/design')
+                    await page.get_by_role('button',name='Metamaterial Unit Cell Designer',exact=True).click()
+                    await async_expect(page.locator('#geometry-select')).to_be_visible()
+                    if case.startswith('representation'):
+                        await page.locator('#geometry-select').select_option('gyroid')
+                        await page.get_by_label('Cell size',exact=True).fill('13')
+                        await page.get_by_label('Orientation · X / Y / Z 3').fill('25')
+                        await page.locator('#representation-select').select_option('network_positive')
+                        await page.get_by_label('Cell size',exact=True).fill('21')
+                        await page.get_by_label('Dimensionless iso level',exact=True).fill('0.25')
+                        if case.endswith('orientation'):
+                            await page.get_by_label('Orientation · X / Y / Z 1').fill('15')
+                            await page.get_by_label('Orientation · X / Y / Z 2').fill('10')
+                            await page.get_by_label('Orientation · X / Y / Z 3').fill('30')
+                        await page.locator('#representation-select').select_option('sheet')
+                        if case.endswith('parameters'):
+                            await async_expect(page.get_by_label('Cell size',exact=True)).to_have_value('13')
+                            await page.locator('#representation-select').select_option('network_positive')
+                            await async_expect(page.get_by_label('Cell size',exact=True)).to_have_value('21')
+                            await async_expect(page.get_by_label('Dimensionless iso level',exact=True)).to_have_value('0.25')
+                        else:
+                            await async_expect(page.get_by_label('Orientation · X / Y / Z 1')).to_be_disabled()
+                            await async_expect(page.get_by_label('Orientation · X / Y / Z 1')).to_have_value('0')
+                            await async_expect(page.get_by_label('Orientation · X / Y / Z 2')).to_have_value('0')
+                            await async_expect(page.get_by_label('Orientation · X / Y / Z 3')).to_have_value('25')
+                            for representation,wanted in [('sheet',[0,0,25]),('network_positive',[15,10,30])]:
+                                await page.locator('#representation-select').select_option(representation)
+                                await page.get_by_role('button',name='New',exact=True).click()
+                                await page.get_by_label('Profile name',exact=True).fill('Orientation '+representation)
+                                async with page.expect_response(lambda r:r.url.endswith('/profiles') and r.request.method=='POST') as saved:
+                                    await page.get_by_role('button',name='Save profile',exact=True).click()
+                                response=await saved.value
+                                record=await response.json()
+                                assert response.status==201,record
+                                assert record['request']['orientation_deg']==wanted,record
+                                assert record['request']['representation']==representation,record
+                                evidence[representation]={'profile_id':record['id'],'normalized_orientation_deg':record['request']['orientation_deg']}
+                            await page.screenshot(path=str(output/'representation-roundtrip.png'))
+                    else:
+                        await page.evaluate('''() => {
+                            const select=document.getElementById('profile-select');
+                            const handler=select.onchange;
+                            select.onchange=async function(event) {
+                                window.__profileLoaded=false;
+                                await handler.call(this,event);
+                                window.__profileLoaded=true;
+                            };
+                        }''')
+                        await page.locator('#profile-select').select_option(original['id'])
+                        await page.wait_for_function('window.__profileLoaded === true')
+                        await async_expect(page.get_by_label('Cell size',exact=True)).to_have_value('10')
+                        await page.get_by_label('Cell size',exact=True).fill('11')
+                        entered=asyncio.Event()
+                        async def delayed_save(route):
+                            evidence['first_save_body']=route.request.post_data_json
+                            evidence['first_save_url']=route.request.url
+                            response=await route.fetch()
+                            evidence['first_save_response']=await response.json()
+                            entered.set()
+                            await gate.wait()
+                            await route.fulfill(response=response)
+                        await page.route(f'**/profiles/{original["id"]}',delayed_save)
+                        # Observe completion of the actual boot handler, including its
+                        # asynchronous list refresh, without replacing its behavior.
+                        await page.evaluate('''() => {
+                            const button=document.getElementById('save-profile');
+                            const handler=button.onclick;
+                            button.onclick=async function(event) {
+                                window.__saveFinished=false;
+                                await handler.call(this,event);
+                                window.__saveFinished=true;
+                            };
+                        }''')
+                        await page.get_by_role('button',name='Save profile',exact=True).click()
+                        await asyncio.wait_for(entered.wait(),5)
+                        assert evidence['first_save_body']['request']['parameters']['cell_size_mm']==11,evidence
+                        assert evidence['first_save_response']['id']==original['id'],evidence
+                        if case=='save_new':
+                            await page.get_by_role('button',name='New',exact=True).click()
+                            await page.get_by_label('Profile name',exact=True).fill('New draft')
+                            await page.get_by_label('Cell size',exact=True).fill('14')
+                            wanted_id,wanted_name,wanted_cell='','New draft','14'
+                        elif case=='save_edit':
+                            await page.get_by_label('Profile name',exact=True).fill('Edited draft')
+                            await page.get_by_label('Cell size',exact=True).fill('14')
+                            wanted_id,wanted_name,wanted_cell=original['id'],'Edited draft','14'
+                        else:
+                            await page.locator('#profile-select').select_option(other['id'])
+                            await page.wait_for_function('window.__profileLoaded === true')
+                            await async_expect(page.get_by_label('Cell size',exact=True)).to_have_value('17')
+                            await page.get_by_label('Cell size',exact=True).fill('18')
+                            wanted_id,wanted_name,wanted_cell=other['id'],other['name'],'18'
+                        async with page.expect_response(lambda r:r.url.endswith('/profiles/'+original['id']) and r.request.method=='PUT') as completed:
+                            gate.set()
+                        await (await completed.value).body()
+                        await page.wait_for_function('window.__saveFinished === true')
+                        await async_expect(page.locator('#profile-select')).to_have_value(wanted_id)
+                        await async_expect(page.get_by_label('Profile name',exact=True)).to_have_value(wanted_name)
+                        await async_expect(page.get_by_label('Cell size',exact=True)).to_have_value(wanted_cell)
+                        await async_expect(page.locator('#save-state')).to_have_text('Unsaved')
+                        await page.unroute(f'**/profiles/{original["id"]}',delayed_save)
+                        async with page.expect_response(lambda r:'/api/design/profiles' in r.url and r.request.method in ('POST','PUT')) as final_save:
+                            await page.get_by_role('button',name='Save profile',exact=True).click()
+                        response=await final_save.value
+                        saved=await response.json()
+                        evidence['next_save_body']=response.request.post_data_json
+                        evidence['next_save_response']=saved
+                        assert response.status in (200,201),saved
+                        assert saved['request']['parameters']['cell_size_mm']==float(wanted_cell),saved
+                        if case=='save_new':
+                            assert saved['id']!=original['id'],saved
+                        else:
+                            assert saved['id']==wanted_id,saved
+                        if case!='save_edit':
+                            assert service.profile(original['id'])['request']['parameters']['cell_size_mm']==11,service.profile(original['id'])
+                    results.append({'case':case,'passed':True,**evidence})
+                except Exception as error:
+                    results.append({'case':case,'passed':False,'error':repr(error),'traceback':traceback.format_exc(),**evidence})
+                finally:
+                    gate.set()
+                    await page.close()
+            await browser.close()
+    (output/'draft-evidence.json').write_text(json.dumps(results,indent=2))
+    print(json.dumps(results,indent=2))
+    assert all(result['passed'] for result in results),'Draft regressions failed'
+
+
 if __name__=='__main__':
     parser=argparse.ArgumentParser()
     parser.add_argument('--output',type=Path,default=Path(tempfile.mkdtemp(prefix='design-qa-')))
     parser.add_argument('--chromium',default=CHROMIUM)
     parser.add_argument('--selection-only',action='store_true')
+    parser.add_argument('--draft-only',action='store_true')
     args=parser.parse_args()
-    if args.selection_only:
+    if args.draft_only:
+        asyncio.run(draft_probe(args.output,args.chromium))
+    elif args.selection_only:
         asyncio.run(selection_probe(args.output,args.chromium))
     else:
         audit(args.output,args.chromium)

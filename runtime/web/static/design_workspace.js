@@ -37,6 +37,24 @@
   function createModel() {
     let selection = 0,
       poll = 0;
+    const representations = new Map();
+    const representationKey = (draft, representation = draft.representation) =>
+      JSON.stringify([
+        draft.module_id,
+        draft.provider_version,
+        draft.geometry_id,
+        representation,
+      ]);
+    function stateFor(draft, geometry, representation) {
+      const key = representationKey(draft, representation);
+      if (!representations.has(key)) {
+        representations.set(key, {
+          parameters: clone(parameters(geometry, representation).defaults),
+          orientation_deg: [0, 0, 0],
+        });
+      }
+      return clone(representations.get(key));
+    }
     return {
       moduleId: null,
       geometry: null,
@@ -62,7 +80,23 @@
         } else this.selectGeometry(this.geometries[0]?.id);
         return true;
       },
+      rememberRepresentation() {
+        if (this.draft)
+          representations.set(representationKey(this.draft), {
+            parameters: clone(this.draft.parameters),
+            orientation_deg: clone(this.draft.orientation_deg),
+          });
+      },
+      selectRepresentation(representation) {
+        this.rememberRepresentation();
+        Object.assign(
+          this.draft,
+          stateFor(this.draft, this.geometry, representation),
+          { representation },
+        );
+      },
       selectGeometry(id) {
+        this.rememberRepresentation();
         this.geometry = this.geometries.find((g) => g.id === id) || null;
         const g = this.geometry;
         this.draft = g
@@ -79,6 +113,11 @@
               seed: null,
             }
           : null;
+        if (this.draft)
+          Object.assign(
+            this.draft,
+            stateFor(this.draft, g, g.default_representation),
+          );
       },
       beginJobs() {
         return ++poll;
@@ -104,6 +143,9 @@
       assetToken = 0,
       catalogToken = 0,
       profileToken = 0,
+      profileContext = 0,
+      editGeneration = 0,
+      fieldGeneration = 0,
       viewer = null,
       noticeJob = null;
     const message = (text, error = false, jobId = null) => {
@@ -160,9 +202,18 @@
       return clone(model.draft);
     }
     function dirty() {
+      editGeneration++;
       $("save-state").textContent = "Unsaved";
     }
+    function changeProfileContext() {
+      profileContext++;
+      editGeneration = 0;
+      $("save-state").textContent = "";
+    }
+    for (const id of ["profile-name", "preview-resolution", "final-resolution"])
+      $(id).addEventListener("input", dirty);
     function renderFields() {
+      const generation = ++fieldGeneration;
       const g = model.geometry,
         d = model.draft;
       $("design-editor").hidden = !g;
@@ -183,6 +234,7 @@
         schema.fields,
         d.parameters,
         (values) => {
+          if (generation !== fieldGeneration) return;
           d.parameters = values;
           dirty();
         },
@@ -217,8 +269,9 @@
           },
         ],
         d,
-        () => {
-          readDraft();
+        (values) => {
+          if (generation !== fieldGeneration) return;
+          Object.assign(d, values);
           dirty();
         },
       );
@@ -226,7 +279,6 @@
       common.controls.orientation_deg.forEach((el, i) => {
         el.disabled = !axes.includes(["x", "y", "z"][i]);
       });
-      $("save-state").textContent = "";
       updateAvailability();
     }
     function updateAvailability() {
@@ -247,6 +299,7 @@
     }
     async function selectModule(id) {
       readIfPresent();
+      changeProfileContext();
       profile = null;
       $("profile-select").value = "";
       $("profile-name").value = "";
@@ -341,20 +394,19 @@
     }
     $("refresh-modules").onclick = action(refresh);
     $("geometry-select").onchange = () => {
+      readIfPresent();
       model.selectGeometry($("geometry-select").value);
       renderFields();
       dirty();
     };
     $("representation-select").onchange = () => {
       readDraft();
-      model.draft.representation = $("representation-select").value;
-      model.draft.parameters = clone(
-        parameters(model.geometry, model.draft.representation).defaults,
-      );
+      model.selectRepresentation($("representation-select").value);
       renderFields();
       dirty();
     };
     $("profile-select").onchange = action(async () => {
+      changeProfileContext();
       const id = $("profile-select").value;
       if (!id) {
         profile = null;
@@ -390,6 +442,8 @@
       }
     });
     $("new-profile").onclick = () => {
+      changeProfileContext();
+      profileToken++;
       profile = null;
       $("profile-select").value = "";
       $("profile-name").value = "";
@@ -397,6 +451,8 @@
       updateAvailability();
     };
     $("save-profile").onclick = action(async () => {
+      const context = profileContext,
+        generation = editGeneration;
       const request = readDraft();
       request.quality = request.quality || "preview";
       request.resolution = numberValue(
@@ -408,10 +464,14 @@
         profile ? "PUT" : "POST",
         profile ? { ...body, revision: profile.revision } : body,
       );
+      if (context !== profileContext) return;
       profile = saved;
       await refreshProfiles();
-      $("save-state").textContent = "Saved";
-      message("");
+      if (context !== profileContext) return;
+      updateAvailability();
+      $("save-state").textContent =
+        generation === editGeneration ? "Saved" : "Unsaved";
+      if (generation === editGeneration) message("");
     });
     $("delete-profile").onclick = action(async () => {
       if (!profile) return;
