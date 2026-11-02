@@ -129,6 +129,9 @@ class DesignAgent(BaseAgent):
 
     def _prepare_design_payload(self, state: OrchestratorState, ctx: AgentContext | Any) -> dict[str, Any]:
         """Prepare existing candidates and evidence without committing a winner."""
+        from agents.design import geometry_adapter
+        if geometry_adapter.explicit_contract(state) is not None:
+            return geometry_adapter.prepare(self, state, ctx)
         constraints = self._resolve_constraints(state)
         objective = self._objective_contract(state, constraints)
         prior_summary = self._prior_results_summary(ctx)
@@ -180,6 +183,9 @@ class DesignAgent(BaseAgent):
 
     def _finalize_design_steps(self, state, ctx, prepared, candidate, decision=None):
         """Use the existing report/handoff builders only after selection."""
+        if prepared.get("geometry_capability"):
+            from agents.design.geometry_adapter import finalize_steps
+            return (yield from finalize_steps(self, state, ctx, prepared, candidate, decision))
         constraints, objective = prepared["constraints"], prepared["objective"]
         prior_summary, failure_summary = prepared["prior_summary"], prepared["failure_summary"]
         bo_recommendation, knowledge_summary = prepared["bo_recommendation"], prepared["knowledge_summary"]
@@ -1096,6 +1102,9 @@ class DesignAgent(BaseAgent):
 
     @staticmethod
     def _candidate_fingerprint(candidate: dict[str, Any]) -> str:
+        if "geometry_request" in candidate:
+            from workspaces.design.engine import request_sha256
+            return request_sha256(candidate["geometry_request"])
         payload = {
             "geometry_type": candidate.get("geometry_type"),
             "specimen_size_mm": candidate.get("specimen_size_mm"),
@@ -1117,7 +1126,7 @@ class DesignAgent(BaseAgent):
         evaluation = source_spec.get("design_evaluation")
         if not isinstance(evaluation, dict):
             return adapted_spec
-        changed = [key for key in (*PARAMETERS, "material") if source_spec.get(key) != adapted_spec.get(key)]
+        changed = [key for key in (*PARAMETERS, "geometry_request", "material") if source_spec.get(key) != adapted_spec.get(key)]
         if not changed:
             return adapted_spec
         fingerprint = cls._candidate_fingerprint(adapted_spec)

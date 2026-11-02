@@ -17,7 +17,7 @@ DESIGN_MODULE = AgentModule(
     descriptor_json=json.dumps({
         "report_profile": REPORT_PROFILE,
         "contract_version": "design_candidate.v1",
-        "capabilities": ["design_candidate", "candidate_suitability_review"],
+        "capabilities": ["design_candidate", "candidate_suitability_review", "explicit_geometry_request"],
         "backend": {
             "entrypoint": "agents/design/agent.py",
             "decision": "agents/design/decision.py",

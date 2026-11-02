@@ -19,6 +19,8 @@ def fabrication_evidence(spec, geometry, mesh, manufacturing, execution, printer
               "cell_size_mm", "wall_thickness_mm", "relative_density", "material",
               "printer_profile", "layer_height_mm", "nozzle_diameter_mm",
               "top_cap_enabled", "bottom_cap_enabled", "require_flat_compression_faces")
+    if "geometry_request" in spec:
+        fields = (*fields, "geometry_request", "geometry_receipt")
     printer_payload = printer_payload or {}
     intent = {k: execution[k] for k in (
         "mode", "bridge", "requested_tool", "dry_run", "allow_physical") if k in execution}

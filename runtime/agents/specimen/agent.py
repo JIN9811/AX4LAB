@@ -77,7 +77,11 @@ class SpecimenMakingAgent(BaseAgent):
 
     def _required_missing(self, spec: dict[str, Any]) -> list[str]:
         missing: list[str] = []
-        for key in self.REQUIRED_FIELDS:
+        fields = self.REQUIRED_FIELDS
+        if "geometry_request" in spec:
+            from agents.design.geometry_adapter import REQUIRED_FIELDS
+            fields = REQUIRED_FIELDS
+        for key in fields:
             value = spec.get(key)
             if value in (None, "", []):
                 missing.append(key)
@@ -1177,6 +1181,21 @@ class SpecimenMakingAgent(BaseAgent):
         missing = self._required_missing(spec)
         if missing:
             raise RuntimeError(f"specimen_agent missing required experiment_spec fields: {', '.join(missing)}")
+        if "geometry_request" in spec:
+            from agents.design.geometry_adapter import specimen_geometry_steps, blocked_specimen_result
+            geometry_payload, geometry_result, mesh_result, manufacturing = yield from specimen_geometry_steps(state, ctx, spec)
+            if manufacturing.get("ok") is not True or manufacturing.get("manufacturability_status") != "pass":
+                return blocked_specimen_result(state, spec, geometry_result, mesh_result, manufacturing)
+            # Only the existing Gyroid-sheet manufacturing capability can pass.
+            # Project its REAL fields for the unchanged fabrication pipeline.
+            request = spec["geometry_request"]
+            if request["geometry_id"] != "gyroid" or request["representation"] != "sheet":
+                raise RuntimeError("No fabrication capability for explicit geometry family")
+            spec.update(request["parameters"], orientation_deg=request["orientation_deg"][2],
+                        relative_density=spec["geometry_receipt"]["volume_fraction"])
+            explicit_prepared = (geometry_payload, geometry_result, mesh_result, manufacturing)
+        else:
+            explicit_prepared = None
         live_gui_test_spec = self._is_live_gui_test_spec(state, spec)
         printer_test_path = self._printer_test_path(spec)
         execution_policy = spec.get("execution_policy") if isinstance(spec.get("execution_policy"), dict) else {}
@@ -1187,12 +1206,13 @@ class SpecimenMakingAgent(BaseAgent):
         )
         if live_gui_test_spec and not printer_test_path:
             return self._printer_path_choice_result(state, spec, candidate, specimen_id)
-        if self._should_disable_test_surface_caps(state, spec, live_gui_test_spec=live_gui_test_spec):
+        if explicit_prepared is None and self._should_disable_test_surface_caps(state, spec, live_gui_test_spec=live_gui_test_spec):
             spec = self._without_surface_caps(spec)
             state.current_experiment_spec = spec
-        spec = self._enforce_fdm_gyroid_hard_rules(spec)
+        if explicit_prepared is None:
+            spec = self._enforce_fdm_gyroid_hard_rules(spec)
         contract = state.run_metadata.get("orchestrator_design_contract") or {}
-        if spec.get("geometry_type") == "gyroid" and contract.get("parameter_space"):
+        if explicit_prepared is None and spec.get("geometry_type") == "gyroid" and contract.get("parameter_space"):
             from utils.gyroid_contract import validate_candidate
             validate_candidate(spec, contract["parameter_space"])
         state.current_experiment_spec = spec
@@ -1234,25 +1254,28 @@ class SpecimenMakingAgent(BaseAgent):
         for optional_key in ("tpms_surface", "tpms_thickness", "tpms_resolution"):
             if optional_key in spec and spec[optional_key] not in (None, "", []):
                 geometry_payload[optional_key] = spec[optional_key]
-        geometry_result = yield ("geometry.generate_metamaterial_stl", geometry_payload)
+        if explicit_prepared is not None:
+            geometry_result = explicit_prepared[1]
+        else:
+            geometry_result = yield ("geometry.generate_metamaterial_stl", geometry_payload)
         if not bool(geometry_result.get("ok")):
             raise RuntimeError(f"geometry.generate_metamaterial_stl failed: {geometry_result.get('error_message', 'unknown')}")
 
-        mesh_result = yield (
+        mesh_result = explicit_prepared[2] if explicit_prepared is not None else (yield (
             "geometry.check_mesh_quality",
             {
                 "stl_path": geometry_result.get("stl_path"),
                 "expected_bounding_box_mm": specimen_size,
                 "constraints": constraints,
             },
-        )
+        ))
         if not bool(mesh_result.get("ok")) or str(mesh_result.get("mesh_status", "fail")) != "pass":
             raise RuntimeError(
                 "geometry.check_mesh_quality failed: "
                 + ", ".join(str(item) for item in mesh_result.get("reject_reasons", []))
             )
 
-        manufacturability_result = yield (
+        manufacturability_result = explicit_prepared[3] if explicit_prepared is not None else (yield (
             "geometry.check_manufacturability",
             {
                 "stl_path": geometry_result.get("stl_path"),
@@ -1280,7 +1303,7 @@ class SpecimenMakingAgent(BaseAgent):
                 },
                 "mesh_report": mesh_result.get("mesh_report", {}),
             },
-        )
+        ))
         if not bool(manufacturability_result.get("ok")) or str(
             manufacturability_result.get("manufacturability_status", "fail")
         ) != "pass":

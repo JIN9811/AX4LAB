@@ -85,7 +85,7 @@ async def test_owner_uses_invocation_graph_and_never_replays_successful_fabricat
         calls.append(name)
         return original(name, payload)
     ctx.tools.call = call
-    monkeypatch.setattr(SpecimenMakingAgent, "_artifact_dir", lambda *args: tmp_path / "geometry")
+    monkeypatch.setattr(SpecimenMakingAgent, "_artifact_dir", lambda *args, **kwargs: tmp_path / "geometry")
     state = OrchestratorState(run_id="specimen-module", experiment_id="offline", mode=Mode.TEST,
                               stage=Stage.SPECIMEN, current_experiment_spec={**_valid_spec(), "tpms_resolution": 18})
     # A saved graph can route through two result projections, but fabricates only once.
@@ -143,7 +143,7 @@ async def test_uncertain_or_repeated_fabrication_never_replays_and_is_archived(t
     ctx.runtime_module_config = lambda: {"id": "specimen", "execution_graph": graph}
     state = OrchestratorState(run_id="no-replay", experiment_id="offline", mode=Mode.TEST, stage=Stage.SPECIMEN,
                               current_experiment_spec={**_valid_spec(), "tpms_resolution": 18})
-    monkeypatch.setattr(SpecimenMakingAgent, "_artifact_dir", lambda *args: tmp_path / "geometry")
+    monkeypatch.setattr(SpecimenMakingAgent, "_artifact_dir", lambda *args, **kwargs: tmp_path / "geometry")
     calls = []
     original = ctx.tools.call
     def call(name, payload):
@@ -204,7 +204,7 @@ async def test_deterministic_specimen_matches_complete_result_state_and_tool_pay
 
     monkeypatch.setattr(owner, "datetime", Clock)
     monkeypatch.setattr("agents.core.knowledge.context.uuid4", lambda: SimpleNamespace(hex="synthetic-request"))
-    monkeypatch.setattr(SpecimenMakingAgent, "_artifact_dir", lambda *args: tmp_path / "geometry")
+    monkeypatch.setattr(SpecimenMakingAgent, "_artifact_dir", lambda *args, **kwargs: tmp_path / "geometry")
     state = OrchestratorState(**fixture["state_input"])
     before = state.model_dump(mode="json")
     ctx = SimpleNamespace(tools=SyntheticTools(), force_real_llm_in_test=False)

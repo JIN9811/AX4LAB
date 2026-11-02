@@ -641,6 +641,9 @@ def _auxetic_reentrant_stl(name: str, size: list[float], wall: float, cell_size:
 
 
 def _generate_geometry_stl(payload: dict[str, Any]) -> dict[str, Any]:
+    if "geometry_request" in payload:
+        from workspaces.design.tool_adapter import generate_tool
+        return generate_tool(payload)
     from utils.compute_pool import compute_enabled, compute_sync
     if compute_enabled():
         return compute_sync('geometry.generate', payload)
@@ -864,7 +867,16 @@ def _check_mesh_quality(payload: dict[str, Any]) -> dict[str, Any]:
         return compute_sync('geometry.quality', payload)
     stl_path = Path(str(payload.get("stl_path", "")))
     from mcp_tools.mesh_quality import inspect_stl
-    mesh_report = inspect_stl(stl_path, payload.get('expected_bounding_box_mm'))
+    if "geometry_request" in payload:
+        from workspaces.design.catalog import DesignCatalog
+        from workspaces.design.engine import normalize_request
+        from workspaces.design.meshing import validate_mesh
+        request = normalize_request(payload["geometry_request"], DesignCatalog())
+        # New capability is a clipped solid, not a guarantee of full-box extents.
+        # validate_mesh still reloads topology, normals, volume and centered bounds.
+        mesh_report = validate_mesh(stl_path, request["specimen_size_mm"])
+    else:
+        mesh_report = inspect_stl(stl_path, payload.get('expected_bounding_box_mm'))
     mesh_ok = mesh_report['ok']
     return {
         "ok": mesh_ok,
@@ -887,6 +899,9 @@ def _check_manufacturability(payload: dict[str, Any]) -> dict[str, Any]:
     from utils.compute_pool import compute_enabled, compute_sync
     if compute_enabled():
         return compute_sync('geometry.manufacturability', payload)
+    if "geometry_request" in payload:
+        from agents.design.geometry_adapter import check_manufacturing
+        return check_manufacturing(payload)
     constraints = payload.get("constraints", {})
     constraints = constraints if isinstance(constraints, dict) else {}
     mesh_report = payload.get("mesh_report", {})
@@ -911,8 +926,8 @@ def _check_manufacturability(payload: dict[str, Any]) -> dict[str, Any]:
     fdm_max_gyroid_wall_cell_ratio = float(constraints.get("fdm_max_gyroid_wall_cell_ratio", 0.28) or 0.28)
     max_print_time = float(constraints.get("max_print_time_min", 120.0) or 120.0)
     max_mass = float(constraints.get("max_mass_g", 50.0) or 50.0)
-    expected_print_time = float(constraints.get("expected_print_time_min", 65.0) or 65.0)
-    expected_mass = float(constraints.get("expected_mass_g", 18.0) or 18.0)
+    expected_print_time = None if constraints.get("_geometry_unsliced") else float(constraints.get("expected_print_time_min", 65.0) or 65.0)
+    expected_mass = None if constraints.get("_geometry_unsliced") else float(constraints.get("expected_mass_g", 18.0) or 18.0)
     bbox = _vector3(mesh_report.get("bbox"), [30.0, 30.0, 30.0])
     bed_contact = float(bbox[0] * bbox[1])
 
@@ -943,9 +958,9 @@ def _check_manufacturability(payload: dict[str, Any]) -> dict[str, Any]:
             warnings.append("fdm_max_unsupported_overhang_deg is permissive; 45 degrees is safer for FDM")
         if rel_density > 0.60:
             warnings.append("gyroid relative_density is high; print time and heat accumulation may increase")
-    if expected_print_time > max_print_time:
+    if expected_print_time is not None and expected_print_time > max_print_time:
         reject_reasons.append("expected_print_time_min exceeds max_print_time_min")
-    if expected_mass > max_mass:
+    if expected_mass is not None and expected_mass > max_mass:
         reject_reasons.append("expected_mass_g exceeds max_mass_g")
     if bed_contact < 150.0:
         warnings.append("bed_contact_area_mm2 is low; adhesion risk may increase")
@@ -957,8 +972,8 @@ def _check_manufacturability(payload: dict[str, Any]) -> dict[str, Any]:
         "tool": "geometry.check_manufacturability",
         "manufacturability_status": "pass" if ok else "fail",
         "risk_score": round(min(1.0, risk), 3),
-        "expected_print_time_min": round(expected_print_time, 2),
-        "expected_mass_g": round(expected_mass, 3),
+        "expected_print_time_min": round(expected_print_time, 2) if expected_print_time is not None else None,
+        "expected_mass_g": round(expected_mass, 3) if expected_mass is not None else None,
         "minimum_feature_size_mm": round(min_feature, 3),
         "wall_thickness_verification": wall_verification,
         "overhang_risk": "low",

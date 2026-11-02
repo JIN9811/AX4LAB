@@ -152,7 +152,7 @@ async def test_specimen_failed_decision_never_reaches_printer_or_ready_handoff(t
     def forbidden(payload):
         pytest.fail("failed decision reached physical boundary")
     ctx.tools.register("printer.prepare", forbidden)
-    monkeypatch.setattr(SpecimenMakingAgent, "_artifact_dir", lambda *args: tmp_path / "geometry")
+    monkeypatch.setattr(SpecimenMakingAgent, "_artifact_dir", lambda *args, **kwargs: tmp_path / "geometry")
     spec = {**_valid_spec(), "tpms_resolution": 18}
     state = OrchestratorState(run_id="spc-denied", experiment_id="offline", mode=Mode.TEST,
                                stage=Stage.SPECIMEN, current_experiment_spec=spec)
@@ -201,7 +201,7 @@ async def test_design_json_handoff_reaches_specimen_selected_tool_without_hardwa
         received.append(payload)
         return _printer_prepare(payload)
     ctx.tools.register("printer.prepare", non_actuating_boundary)
-    monkeypatch.setattr(SpecimenMakingAgent, "_artifact_dir", lambda *args: tmp_path / "geometry")
+    monkeypatch.setattr(SpecimenMakingAgent, "_artifact_dir", lambda *args, **kwargs: tmp_path / "geometry")
     result = await SpecimenMakingAgent().run(state, ctx)
     assert result.success and len(received) == 1
     assert received[0]["candidate_id"] == spec["candidate_id"]
@@ -243,7 +243,7 @@ async def test_model_dispatch_absorbs_existing_execution_profiles(tmp_path, monk
         received.append(payload)
         return _printer_prepare(payload)
     ctx.tools.register("printer.prepare", non_actuating_boundary)
-    monkeypatch.setattr(SpecimenMakingAgent, "_artifact_dir", lambda *args: tmp_path / "geometry")
+    monkeypatch.setattr(SpecimenMakingAgent, "_artifact_dir", lambda *args, **kwargs: tmp_path / "geometry")
     result = await SpecimenMakingAgent().run(state, ctx)
     assert result.success and len(received) == 1
     payload = received[0]

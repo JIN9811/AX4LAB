@@ -78,7 +78,7 @@ async def test_dialogue_setup_contract_lhs_design_cycle(monkeypatch, tmp_path, t
     c._state.stage=Stage.SPECIMEN
     spc=_CtxStub()
     spc.tools.register("printer.prepare",lambda p:pytest.fail("Preparation must not actuate"))
-    monkeypatch.setattr(SpecimenMakingAgent,"_artifact_dir",lambda *args:tmp_path/"cycle-geometry")
+    monkeypatch.setattr(SpecimenMakingAgent,"_artifact_dir",lambda *args,**kwargs:tmp_path/"cycle-geometry")
     prepared=SpecimenMakingAgent()._prepare_fabrication(c._state,spc)
     assert not isinstance(prepared, AgentResult), prepared
     assert prepared["manufacturability_result"]["manufacturability_status"]=="pass"
@@ -145,7 +145,7 @@ async def test_valid_mesh_reaches_each_printer_dispatch_without_actuation(mode,t
         assert payload["experiment_spec"]["cell_size_mm"]==10.
         return _printer_prepare(payload)
     ctx.tools.register("printer.prepare",dispatch)
-    monkeypatch.setattr(SpecimenMakingAgent,"_artifact_dir",lambda *args:tmp_path/"geometry")
+    monkeypatch.setattr(SpecimenMakingAgent,"_artifact_dir",lambda *args,**kwargs:tmp_path/"geometry")
     result=await SpecimenMakingAgent().run(state,ctx)
     assert result.success and len(received)==1
     if mode!="live":
@@ -167,7 +167,7 @@ async def test_rejected_wall_is_reported_without_print_or_parameter_repair(tmp_p
     state=OrchestratorState(run_id="rejected-corner",experiment_id="offline",mode=Mode.LIVE,current_experiment_spec=spec)
     ctx=_CtxStub();ctx.artifact_run_root=tmp_path
     ctx.tools.register("printer.prepare",lambda p:pytest.fail("Rejected wall reached printer"))
-    monkeypatch.setattr(SpecimenMakingAgent,"_artifact_dir",lambda *args:tmp_path/"geometry")
+    monkeypatch.setattr(SpecimenMakingAgent,"_artifact_dir",lambda *args,**kwargs:tmp_path/"geometry")
     result=await SpecimenMakingAgent().run(state,ctx)
     assert result.success is False
     gate=next(g for g in result.data["fabrication_report"]["quality_gates"] if g["gate"]=="manufacturability")

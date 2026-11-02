@@ -24,6 +24,9 @@ PARAMETERS = ("geometry_type", "specimen_size_mm", "cell_size_mm", "wall_thickne
 
 def candidate_evaluation(agent, state, prepared, candidate):
     """Evaluate physical quantities/constraints, never manufacture performance."""
+    if prepared.get("geometry_capability"):
+        from agents.design.geometry_adapter import evaluate
+        return evaluate(state, prepared, candidate)
     constraints = prepared["constraints"]
     reasons = agent._reject_reasons(candidate, constraints=constraints, failure_summary=prepared["failure_summary"])
     for key in PARAMETERS:
@@ -107,7 +110,9 @@ async def decide_design(agent, state, ctx, prepared):
             candidate["design_evaluation"] = candidate_evaluation(agent, state, prepared, candidate)
         # Display stable IDs, not legacy score order: ranking must not prime the model.
         authorized_ids = {c["candidate_id"] for c in prepared["ranked"]}
-        summaries = [{"candidate_id":cid, "parameters":{k:c.get(k) for k in PARAMETERS},
+        summaries = [{"candidate_id":cid, "parameters":(
+                          {"geometry_request": deepcopy(c["geometry_request"])} if "geometry_request" in c
+                          else {k:c.get(k) for k in PARAMETERS}),
                       "evaluation":{k:v for k,v in c["design_evaluation"].items() if k != "constraint_margins"}}
                      for cid, c in sorted(candidates.items()) if cid in authorized_ids]
         evidence_refs = {"context:request", *[f"candidate:{cid}" for cid in candidates]}

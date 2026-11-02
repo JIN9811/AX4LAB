@@ -51,6 +51,9 @@ def project_design_report(metadata: dict, agent_payload: dict) -> dict:
             "hypothesis": report.get("hypothesis", {}),
             "prior_context": report.get("prior_context", {}),
         }
+        if "geometry_request" in report:
+            result["role_specific"].update(geometry_request=report["geometry_request"],
+                                         geometry_receipt=report.get("geometry_receipt"))
         if isinstance(result["design_agent_report"], dict):
             result["role_specific"]["design_agent_report"] = result["design_agent_report"]
         result["decisions"] = report.get("decision_register", []) if isinstance(report.get("decision_register"), list) else []
