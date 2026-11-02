@@ -1,0 +1,11 @@
+schema: ax4lab.geometry_provider.v1
+id: voronoi
+version: 1.0.0
+label: voronoi
+representations: [strut]
+default_representation: strut
+stochastic: true
+fields:
+  - {key: site_count, label: Interior site count, type: integer, min: 8, max: 128}
+  - {key: strut_diameter_mm, label: Strut diameter, type: number, min: 0.1, max: 50, unit: mm}
+defaults: {site_count: 16, strut_diameter_mm: 2}
