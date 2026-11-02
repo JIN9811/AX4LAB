@@ -339,6 +339,26 @@ test("preview-only module controls and manual-only provider disclosure follow me
     await h.node("generate-design").onclick(); // scripted calls must also fail closed
     assert.equal(h.sent.filter((r) => r.url.endsWith("/jobs")).length, 0);
     await h.choose("a");
-    assert.match(h.node("selection-state").textContent, /Agent handoff supported/);
+    assert.match(h.node("selection-state").textContent, /Manual only.*preview and generate/);
   } finally {h.close();}
 });
+
+for (const actions of [["generate"], ["preview", "generate"]]) {
+  test("new profile POST uses supported quality for " + actions.join("+"), async () => {
+    const h = await bootHarness(actions);
+    try {
+      // Select a module, not a saved profile: this draft has no quality yet.
+      await h.node("design-modules").children[0].children[0].onclick();
+      h.node("profile-name").value = "New supported draft";
+      await h.node("save-profile").onclick();
+      assert.equal(h.sent.at(-1).url, "/api/design/profiles");
+      assert.equal(h.sent.at(-1).method, "POST");
+      assert.equal(h.sent.at(-1).body.request.quality, actions.length === 1 ? "final" : "preview");
+      assert.equal(h.sent.at(-1).body.request.resolution, actions.length === 1 ? 96 : 48);
+      assert.equal(h.node("generate-design").disabled, false);
+      assert.equal(h.node("preview-design").disabled, actions.length === 1);
+      assert.match(h.node("selection-state").textContent, actions.length === 1
+        ? /Manual only.*preview and generate/ : /Agent handoff supported/);
+    } finally {h.close();}
+  });
+}

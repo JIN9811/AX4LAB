@@ -37,6 +37,9 @@ def enabled_catalog(ctx, request):
     record = catalog.resolve(normalized["module_id"], normalized["geometry_id"], normalized["provider_version"])
     if record["descriptor"]["agent_handoff"] is not True:
         raise ValueError("Design provider is manual-only; agent handoff is not supported")
+    module = next(m for m in catalog.modules if m["id"] == normalized["module_id"])
+    if not {"preview", "generate"} <= set(module["descriptor"]["actions"]):
+        raise ValueError("Design agent handoff requires both preview and generate module actions")
     state = Store(paths.memory_root / "design_workspace").data
     enabled = state["modules"].get(normalized["module_id"], {"enabled": True})
     if enabled.get("enabled") is not True:

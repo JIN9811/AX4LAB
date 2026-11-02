@@ -35,6 +35,13 @@ Module `actions` must be a nonempty unique subset of `[preview, generate]`, and
 excluded during discovery. Preview maps to `quality: preview`; Generate maps to
 `quality: final`. API/engine validation enforces the same controls as the GUI.
 Custom executable actions are not supported.
+Generate-only modules support manual final generation and final-quality profiles;
+the GUI uses final quality for new profiles when Preview is absent. Effective
+agent support additionally requires both `preview` and `generate`, even when a
+geometry declares `agent_handoff: true`. The existing agent workflow mandates
+separate preview evidence, so incompatible modules are rejected before generation,
+not by bypassing action checks or fabricating a preview. The GUI discloses this
+effective manual-only status. Two-action modules retain their existing behavior.
 Its fixed local wrapper implements `generate_field(grid, request)`:
 
 ```python

@@ -190,6 +190,36 @@ def test_manual_only_provider_really_generates_but_agent_admission_rejects(tmp_p
         geometry_adapter.enabled_catalog(ctx, req)
 
 
+def test_generate_only_module_accepts_final_profile_post_and_manual_generation(tmp_path):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from workspaces.design.api import create_router
+    from workspaces.design.catalog import DesignCatalog
+    from workspaces.design.engine import generate_geometry
+    from workspaces.design.service import DesignService
+    install_provider(tmp_path / "modules")
+    path = tmp_path / "modules/fixture/module.yaml"
+    descriptor = yaml.safe_load(path.read_text())
+    descriptor["actions"] = ["generate"]
+    path.write_text(yaml.safe_dump(descriptor))
+    catalog = DesignCatalog(tmp_path / "modules")
+    req = request(module_id="fixture", geometry_id="slab", quality="final", resolution=32)
+    service = DesignService(tmp_path / "memory", tmp_path / "artifacts", catalog=catalog)
+    app = FastAPI()
+    app.include_router(create_router(lambda: service))
+    try:
+        with TestClient(app, base_url="http://localhost", client=("127.0.0.1",1)) as client:
+            saved = client.post("/api/design/profiles", json={"name":"Final only", "request":req})
+            assert saved.status_code == 201, saved.text
+            assert saved.json()["available"] and saved.json()["request"]["quality"] == "final"
+            assert client.post("/api/design/profiles", json={"name":"Not supported",
+                "request":{**req, "quality":"preview"}}).status_code == 422
+        receipt = generate_geometry(req, tmp_path / "generated", identity={}, catalog=catalog)
+        assert receipt["final_geometry_valid"] and receipt["checks"]["stl_reload"] == "passed"
+    finally:
+        service.shutdown()
+
+
 @pytest.mark.parametrize("geometry,parameters,changes,reason", [
     ("simple_cubic", {"cell_size_mm":10, "strut_diameter_mm":6}, {}, "half cell"),
     ("simple_cubic", {}, {"resolution":16}, "voxels"),

@@ -299,7 +299,9 @@
         $("save-profile").disabled = true;
       $("selection-state").textContent = available
         ? model.geometry.agent_handoff === true
-          ? "Agent handoff supported · geometry checks required"
+          ? ["preview", "generate"].every((action) => module.actions?.includes(action))
+            ? "Agent handoff supported · geometry checks required"
+            : "Manual only · agent handoff requires preview and generate"
           : "Manual only · no agent handoff"
         : model.moduleId
           ? "Module unavailable"
@@ -462,7 +464,8 @@
       const context = profileContext,
         generation = editGeneration;
       const request = readDraft();
-      request.quality = request.quality || "preview";
+      const module = modules.find((m) => m.id === model.moduleId);
+      request.quality = request.quality || (module?.actions?.includes("preview") ? "preview" : "final");
       request.resolution = numberValue(
         request.quality === "final" ? "final-resolution" : "preview-resolution",
       );

@@ -254,6 +254,27 @@ async def test_no_pool_never_runs_explicit_geometry_inline(context):
 
 
 @pytest.mark.asyncio
+async def test_generate_only_module_rejects_agent_before_any_generation(context, tmp_path, monkeypatch):
+    import shutil
+    import yaml
+    from agents.design import geometry_adapter
+    from workspaces.design.catalog import DEFAULT_ROOT, DesignCatalog
+    modules = tmp_path / "generate-only-modules"
+    shutil.copytree(DEFAULT_ROOT, modules)
+    path = modules / MODULE / "module.yaml"
+    descriptor = yaml.safe_load(path.read_text())
+    descriptor["actions"] = ["generate"]
+    path.write_text(yaml.safe_dump(descriptor))
+    catalog = DesignCatalog(modules)
+    monkeypatch.setattr(geometry_adapter, "DesignCatalog", lambda: catalog)
+    with pytest.raises(ValueError) as error:
+        await DesignAgent().run(state_for(request()), context)
+    assert context.tools.calls == []
+    assert "agent handoff requires both preview and generate" in str(error.value)
+    assert not list(context.paths.run_root.rglob("receipt.json"))
+
+
+@pytest.mark.asyncio
 async def test_final_provider_error_has_no_fallback_or_ready_receipt(context):
     with pytest.raises((ValueError, compute_pool.ComputeError), match="resolution|sampling|wall|provider|voxel"):
         await DesignAgent().run(state_for(request("schwarz_p", resolution=16)), context)

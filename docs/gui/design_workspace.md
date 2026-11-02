@@ -6,6 +6,9 @@ The installed descriptors supply the controls, units, defaults and available mod
 Only declared actions are available: preview-only modules cannot Generate, even
 through the API. Provider status states **Manual only** or **Agent handoff
 supported**; support never implies manufacturing approval.
+New profiles in Generate-only modules use final quality and the final resolution.
+These modules remain manually usable, but agent handoff requires both Preview
+and Generate because the current workflow always produces separate preview evidence.
 
 ## Configure and generate
 
