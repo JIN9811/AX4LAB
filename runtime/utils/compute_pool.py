@@ -204,6 +204,14 @@ def compute_sync(job, payload, *, timeout=300):
     return future.result()
 
 
+def compute_submit(job, payload, *, timeout=300, cancellation=None):
+    """Submit to the configured pool only; never run numerical work inline."""
+    pool = _pool
+    if pool is None:
+        raise ComputeError('CPU pool is not configured')
+    return pool.submit(job, payload, timeout=timeout, cancellation=cancellation)
+
+
 async def compute_async(job, payload, *, timeout=300):
     pool = _pool
     if pool is None:
