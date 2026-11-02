@@ -284,6 +284,9 @@ claimed mechanical validation is part of this plan.
 Status: Tasks 1–7 implemented on isolated `feat/design-workspace`; focused
 verification includes actual API/registered-agent hash parity, all fourteen
 providers/modes, browser evidence, extracted wheel and one configured real LLM
-run. The full-project suite is not green (missing dependency collection blockers;
-known legacy golden mismatch remains documented). Controller whole-branch review
-and user-selected integration are pending. No merge, push or production activation.
+run. The earlier 77 dependency collection errors are resolved by isolated-environment
+dependency installation: guarded `pytest --collect-only` collected 7,633 tests
+without errors (exit 0, 3.03 seconds). The full suite was not executed; collection
+success does not establish a green suite. The known baseline specimen golden
+mismatch remains unresolved. Review findings, including N1, are addressed;
+user-selected integration remains pending. No merge, push or production activation.

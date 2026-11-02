@@ -2,9 +2,12 @@
 
 Status: approved 2026-11-02; Tasks 1–7 implemented in isolated branch
 `feat/design-workspace`. Focused numerical/API/agent/browser and extracted-wheel
-verification completed, including a bounded real configured LLM run. Whole-project
-collection is blocked by isolated-environment dependencies; final controller review
-and integration remain pending. Production is unchanged. The delivered contract
+verification completed, including a bounded real configured LLM run. The earlier
+77 dependency collection errors are resolved in the isolated environment:
+guarded `pytest --collect-only` collected 7,633 tests without errors (exit 0,
+3.03 seconds). The full suite was not executed, and the documented baseline
+specimen golden mismatch remains unresolved. Review findings, including N1,
+are addressed; integration remains pending. Production is unchanged. The delivered contract
 and limitations are in `docs/gui/design_workspace.md`.
 
 ## Intent and agreed direction

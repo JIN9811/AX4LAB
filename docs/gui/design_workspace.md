@@ -139,6 +139,11 @@ per-test XML and numerical/Serial regression evidence. It makes no LLM call.
 Isolated validation on 2026-11-02 also completed a separate real configured
 `endpoint:api-main` / `gpt-5.5` Design run through `AgentContext`, with no mock
 fallback. This is bounded model/geometry evidence, not equipment execution.
-The default whole-project suite remains blocked at collection by missing
-pyarrow/torch/h5py/cv2 in the isolated validation environment. Production was
-not restarted, configured, upgraded or activated by this worktree validation.
+The earlier 77 dependency collection errors were resolved by installing missing
+dependencies only in the isolated validation environment. A guarded full-project
+`pytest --collect-only` completed with exit 0: **7,633 tests collected, no collection
+errors, in 3.03 seconds**. It used a read-only root, disabled network, empty `/dev`,
+private `/tmp` and isolated `ATR_PATH_BINDINGS`. The full suite was **not executed**;
+collection success is not a test-pass claim. The previously documented baseline
+specimen golden mismatch remains unresolved. Production was not restarted,
+configured, upgraded or activated by this worktree validation.
