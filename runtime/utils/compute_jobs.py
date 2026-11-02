@@ -1,5 +1,15 @@
 """Explicit numerical entry points; never submit an AgentContext or device registry."""
 def execute(job, payload):
+    if job == 'geometry.design_generate':
+        from pathlib import Path
+        from workspaces.design.catalog import DesignCatalog
+        from workspaces.design.engine import generate_geometry, normalize_request
+        catalog = DesignCatalog(Path(payload['catalog_root']) if payload.get('catalog_root') else None)
+        request = normalize_request(payload['request'], catalog)
+        record = catalog.resolve(request['module_id'], request['geometry_id'], request['provider_version'])
+        if payload.get('source_fingerprint') != record['source_fingerprint']:
+            raise ValueError('Provider acceptance fingerprint mismatch')
+        return generate_geometry(request, Path(payload['output_dir']), identity=payload['identity'], catalog=catalog)
     if job.startswith('geometry.'):
         from mcp_tools.mock_tools import _generate_geometry_stl, _check_mesh_quality, _check_manufacturability
         functions = {'geometry.generate': _generate_geometry_stl,

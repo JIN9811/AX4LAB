@@ -22,7 +22,7 @@ import time
 from utils.runtime_paths import RuntimePaths, current_paths
 from utils.runtime_process import path_metadata, process_environment
 
-JOBS = frozenset({'geometry.generate', 'geometry.quality', 'geometry.manufacturability',
+JOBS = frozenset({'geometry.generate', 'geometry.design_generate', 'geometry.quality', 'geometry.manufacturability',
                   'analysis.read_curve', 'analysis.metrics', 'bo.propose', 'bo.render'})
 MAX_MESSAGE = 64 * 1024 * 1024
 _cancellation = ContextVar('cpu_cancellation', default=None)

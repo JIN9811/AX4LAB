@@ -1,0 +1,6 @@
+schema: ax4lab.design_module.v1
+id: metamaterial_unit_cell_designer
+version: 1.0.0
+label: Metamaterial Unit Cell Designer
+actions: [preview, generate]
+output_kinds: [stl]
