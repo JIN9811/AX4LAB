@@ -280,6 +280,10 @@ def test_representation_schema_replaces_inactive_parameters(tmp_path):
     ("mcp_tools.tpms_geometry", "return 1.5 * math.sin(", "return 1.4 * math.sin("),
     ("mcp_tools.mesh_quality", "if volume <= 0:", "if volume <= -1:"),
     ("workspaces.design.engine", 'ENGINE_VERSION = "1.0.0"', 'ENGINE_VERSION = "1.0.1"'),
+    ("workspaces.design.providers.tpms", "return cx+cy+cz", "return 2*cx+cy+cz"),
+    ("workspaces.design.providers.strut", "radius+2*max(spacing)", "radius+3*max(spacing)"),
+    ("workspaces.design.providers.spinodoid", "np.sqrt(2/count)", "np.sqrt(3/count)"),
+    ("workspaces.design.providers.cellular", "abs(angle)>=85", "abs(angle)>=84"),
 ])
 def test_first_generation_rejects_dependency_changed_after_preload(tmp_path, preloaded, before, after):
     """A fresh process's cached Python must never be labelled with newer disk bytes."""
