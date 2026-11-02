@@ -1,7 +1,7 @@
 schema: ax4lab.geometry_provider.v1
 id: spinodoid
 version: 1.0.0
-label: spinodoid
+label: Spinodoid
 representations: [grf]
 default_representation: grf
 stochastic: true

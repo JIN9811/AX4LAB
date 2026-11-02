@@ -1,7 +1,7 @@
 schema: ax4lab.geometry_provider.v1
 id: fcc
 version: 1.0.0
-label: fcc
+label: FCC
 representations: [strut]
 default_representation: strut
 stochastic: false

@@ -22,6 +22,22 @@ def catalog():
     return DesignCatalog()
 
 
+def test_orientation_capability_matches_each_representation(catalog):
+    from workspaces.design.engine import normalize_request
+    descriptor = catalog.resolve(MODULE, 'gyroid', '1.0.0')['descriptor']
+    for representation in descriptor['representations']:
+        axes = descriptor['representation_orientation_axes'][representation]
+        for axis, index in [('x', 0), ('y', 1), ('z', 2)]:
+            orientation = [0, 0, 0]
+            orientation[index] = 15
+            value = request(representation=representation, orientation_deg=orientation)
+            if axis in axes:
+                assert normalize_request(value, catalog)['orientation_deg'][index] == 15
+            else:
+                with pytest.raises(ValueError, match='orientation'):
+                    normalize_request(value, catalog)
+
+
 @pytest.mark.parametrize("overrides", [
     {"geometry_id": "unknown"}, {"module_id": "../outside"},
     {"geometry_id": "../gyroid"}, {"provider_version": "9.0.0"},

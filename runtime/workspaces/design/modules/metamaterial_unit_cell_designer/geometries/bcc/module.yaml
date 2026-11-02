@@ -1,7 +1,7 @@
 schema: ax4lab.geometry_provider.v1
 id: bcc
 version: 1.0.0
-label: bcc
+label: BCC
 representations: [strut]
 default_representation: strut
 stochastic: false

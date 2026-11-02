@@ -65,6 +65,33 @@ def service(tmp_path):
     service.shutdown()
 
 
+def test_job_order_is_newest_first_after_reload_and_retry_does_not_reorder(tmp_path):
+    worker = Worker()
+    service = DesignService(tmp_path/'memory', tmp_path/'artifacts', executor=worker)
+    try:
+        first = service.submit(request(), idempotency_key='first-order')
+        assert worker.ready.wait(2)
+        second = service.submit(request(resolution=64), idempotency_key='second-order')
+        assert [job['id'] for job in service.jobs()] == [second['id'], first['id']]
+        assert first['created_sequence'] < second['created_sequence']
+        assert service.submit(request(), idempotency_key='first-order')['created_sequence'] == first['created_sequence']
+    finally:
+        service.shutdown()
+    reloaded = DesignService(tmp_path/'memory', tmp_path/'artifacts', executor=Worker())
+    try:
+        assert [job['id'] for job in reloaded.jobs()] == [second['id'], first['id']]
+        assert reloaded.submit(request(), idempotency_key='first-order')['created_sequence'] == first['created_sequence']
+        # Legacy records remain visible, deterministically ordered behind sequenced records.
+        data = deepcopy(reloaded.store.data)
+        data['jobs'][first['id']].pop('created_sequence')
+        reloaded.store.save(data)
+        third = reloaded.submit(request(resolution=80), idempotency_key='third-order')
+        assert third['created_sequence'] > second['created_sequence']
+        assert [job['id'] for job in reloaded.jobs()] == [third['id'], second['id'], first['id']]
+    finally:
+        reloaded.shutdown()
+
+
 def test_profiles_revision_confirmation_and_restart(service, tmp_path):
     s, _ = service
     profile = s.create_profile({'name':'First', 'request':request()})

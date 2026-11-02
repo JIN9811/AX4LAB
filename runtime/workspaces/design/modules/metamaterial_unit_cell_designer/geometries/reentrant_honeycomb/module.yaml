@@ -1,7 +1,7 @@
 schema: ax4lab.geometry_provider.v1
 id: reentrant_honeycomb
 version: 1.0.0
-label: reentrant honeycomb
+label: Reentrant Honeycomb
 representations: [extruded_wall]
 default_representation: extruded_wall
 stochastic: false

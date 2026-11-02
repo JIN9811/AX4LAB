@@ -175,6 +175,7 @@ class DesignService:
                 raise DesignError('queue_full', 'Design job queue is full')
             job = {key:value for key, value in validated.items() if key != 'ok'}
             job.update(id=uuid.uuid4().hex, state='queued', idempotency_key=idempotency_key,
+                       created_sequence=1 + max((j.get('created_sequence', 0) for j in self.store.data['jobs'].values()), default=0),
                        submitted_request=deepcopy(request), catalog_root=str(self.catalog.root))
             data = deepcopy(self.store.data)
             data['jobs'][job['id']] = job
@@ -193,7 +194,9 @@ class DesignService:
 
     def jobs(self):
         with self.lock:
-            return [self.job(key) for key in self.store.data['jobs']]
+            ordered = sorted(self.store.data['jobs'].values(),
+                             key=lambda job: (job.get('created_sequence', 0), job['id']), reverse=True)
+            return [self.job(job['id']) for job in ordered]
 
     def cancel(self, job_id):
         with self.condition:

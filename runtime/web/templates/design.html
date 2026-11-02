@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Design · AX4LAB</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/serial_workspace.css?v=4">
+  <link rel="stylesheet" href="/static/design_workspace.css?v=1">
+  <script src="/static/vendor/vtk-34.15.4.js" defer></script>
+  <script src="/static/workspace_fields.js?v=1" defer></script>
+  <script src="/static/design_workspace.js?v=1" defer></script>
+</head>
+<body>
+<main id="design-page" class="page equipment-setup-page serial-page design-page">
+  <header class="hero panel serial-header">
+    <div class="hero-copy"><p class="eyebrow">Design Workspace</p><h1>Design</h1></div>
+    <div class="equipment-header-actions"><button id="refresh-modules" class="btn">Refresh modules</button></div>
+  </header>
+  <div id="design-message" class="serial-message" role="status" hidden></div>
+  <section class="panel" aria-label="Design modules">
+    <div class="panel-title-row"><h2>Modules</h2><span id="selection-state" class="hint"></span></div>
+    <div id="design-modules" class="workspace-grid"></div>
+  </section>
+  <section class="panel serial-toolbar" aria-label="Profiles">
+    <label>Profile<select id="profile-select"><option value="">New profile</option></select></label>
+    <input id="profile-name" aria-label="Profile name" placeholder="Profile name" maxlength="120">
+    <button id="new-profile" class="btn">New</button>
+    <button id="save-profile" class="btn" disabled>Save profile</button>
+    <button id="delete-profile" class="btn danger">Delete</button><span id="save-state" class="hint"></span>
+  </section>
+  <div class="design-columns">
+    <section id="design-editor" class="panel" hidden>
+      <h2>Geometry</h2>
+      <div class="workspace-fields design-selection">
+        <label>Geometry<select id="geometry-select"></select></label>
+        <label>Representation<select id="representation-select"></select></label>
+      </div>
+      <div id="design-fields" class="workspace-fields"></div>
+      <div id="design-common" class="workspace-fields design-common"></div>
+      <div class="design-actions">
+        <label>Preview resolution<input id="preview-resolution" type="number" min="16" max="160" step="1" value="48"></label>
+        <button id="preview-design" class="btn">Preview</button>
+        <label>Final resolution<input id="final-resolution" type="number" min="16" max="160" step="1" value="96"></label>
+        <button id="generate-design" class="btn primary">Generate</button>
+      </div>
+    </section>
+    <section class="panel design-result" aria-label="Geometry result">
+      <div class="panel-title-row"><h2>Preview</h2><button id="reset-camera" class="btn mini">Reset view</button></div>
+      <p id="result-title" class="hint">No result selected</p>
+      <div class="design-viewer-wrap"><div id="design-viewer" tabindex="0" role="img" aria-label="3D geometry. Arrow keys rotate, plus and minus zoom, R resets."></div><span id="viewer-empty" class="hint">Select a module to begin</span></div>
+      <p id="result-checks" class="hint"></p>
+      <a id="result-download" class="btn" hidden>Download STL</a>
+    </section>
+  </div>
+  <section class="panel" aria-label="Job history"><div class="panel-title-row"><h2>Jobs</h2><span class="hint">Latest 20</span></div><div id="design-jobs"></div></section>
+</main>
+</body></html>

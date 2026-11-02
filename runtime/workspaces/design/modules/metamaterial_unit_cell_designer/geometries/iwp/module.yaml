@@ -1,7 +1,7 @@
 schema: ax4lab.geometry_provider.v1
 id: iwp
 version: 1.0.0
-label: iwp
+label: I-WP
 representations: [sheet, network_positive, network_negative]
 default_representation: sheet
 fields:

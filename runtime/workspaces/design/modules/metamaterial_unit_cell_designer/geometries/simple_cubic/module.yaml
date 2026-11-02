@@ -1,7 +1,7 @@
 schema: ax4lab.geometry_provider.v1
 id: simple_cubic
 version: 1.0.0
-label: simple cubic
+label: Simple Cubic
 representations: [strut]
 default_representation: strut
 stochastic: false

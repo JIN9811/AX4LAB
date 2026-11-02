@@ -7,6 +7,10 @@ default_representation: sheet
 engine: legacy_gyroid
 stochastic: false
 orientation_axes: [z]
+representation_orientation_axes:
+  sheet: [z]
+  network_positive: [x, y, z]
+  network_negative: [x, y, z]
 fields:
   - {key: cell_size_mm, label: Cell size, type: number, min: 0.1, max: 200, unit: mm}
   - {key: wall_thickness_mm, label: Target wall thickness, type: number, min: 0.05, max: 50, unit: mm}
