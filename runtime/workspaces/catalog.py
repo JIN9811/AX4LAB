@@ -142,7 +142,7 @@ def discover_modules(
             if identity in found:
                 duplicates.add(identity)
             found[identity] = record
-        except (KeyError, OSError, TypeError, ValueError, yaml.YAMLError) as exc:
+        except (KeyError, OSError, OverflowError, TypeError, ValueError, yaml.YAMLError) as exc:
             errors.append({"module": module_name, "message": str(exc)})
 
     for identity in sorted(duplicates):

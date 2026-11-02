@@ -76,6 +76,53 @@ def test_duplicate_ids_are_all_excluded_and_malformed_module_is_isolated(tmp_pat
     assert next(error for error in errors if error["module"] == "duplicate")["message"] == "Duplicate module ID"
 
 
+def test_huge_integer_in_malformed_module_does_not_hide_good_module(tmp_path):
+    from workspaces.catalog import discover_modules
+    from workspaces.fields import normalize_fields
+
+    _install(tmp_path, "good")
+    malformed = _descriptor("malformed")
+    malformed["fields"] = [
+        {"key": "ratio", "label": "Ratio", "type": "number", "min": 0, "max": 10}
+    ]
+    malformed["defaults"] = {"ratio": 10**400}
+    _install(tmp_path, "malformed", malformed)
+
+    def validate(descriptor):
+        descriptor = _validate_workspace(descriptor)
+        descriptor["defaults"] = normalize_fields(
+            descriptor["fields"], descriptor["defaults"], {}
+        )
+        return descriptor
+
+    modules, errors = discover_modules(tmp_path, validate)
+
+    assert [module["id"] for module in modules] == ["good"]
+    assert len(errors) == 1
+    assert errors[0]["module"] == "malformed"
+    assert "bounds" in errors[0]["message"]
+
+
+def test_validator_overflow_is_isolated_from_good_module(tmp_path):
+    from workspaces.catalog import discover_modules
+
+    _install(tmp_path, "good")
+    _install(tmp_path, "overflow")
+
+    def validate(descriptor):
+        descriptor = _validate_workspace(descriptor)
+        if descriptor["id"] == "overflow":
+            raise OverflowError("synthetic arithmetic overflow")
+        return descriptor
+
+    modules, errors = discover_modules(tmp_path, validate)
+
+    assert [module["id"] for module in modules] == ["good"]
+    assert errors == [
+        {"module": "overflow", "message": "synthetic arithmetic overflow"}
+    ]
+
+
 @pytest.mark.parametrize("unsafe_key", ["provider", "python_import", "script", "shell", "equation"])
 def test_descriptor_cannot_supply_executable_metadata(tmp_path, unsafe_key):
     from workspaces.catalog import discover_modules
@@ -216,3 +263,24 @@ def test_visibility_does_not_bypass_authoritative_value_validation():
 
     with pytest.raises(ValueError, match="quality"):
         normalize_fields(_all_field_types(), defaults, {})
+
+
+def test_arbitrary_precision_integer_uses_bounds_not_float_finiteness():
+    from workspaces.fields import normalize_fields
+
+    fields = [
+        {"key": "ratio", "label": "Ratio", "type": "number", "min": 0, "max": 10}
+    ]
+
+    with pytest.raises(ValueError, match="bounds"):
+        normalize_fields(fields, {"ratio": 10**400}, {})
+
+
+def test_non_string_field_type_is_rejected_as_malformed_metadata():
+    from workspaces.fields import normalize_fields
+
+    fields = _all_field_types()
+    fields[0]["type"] = []
+
+    with pytest.raises(ValueError, match="field type"):
+        normalize_fields(fields, _all_defaults(), {})

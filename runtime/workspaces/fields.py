@@ -21,9 +21,11 @@ _TYPE_KEYS = {
 def _number(value, *, integer=False) -> bool:
     if isinstance(value, bool):
         return False
+    if isinstance(value, int):
+        return True
     if integer:
-        return isinstance(value, int)
-    return isinstance(value, (int, float)) and math.isfinite(value)
+        return False
+    return isinstance(value, float) and math.isfinite(value)
 
 
 def _validate_bounds(field: dict, *, integer=False):
@@ -46,7 +48,7 @@ def _validate_field(field: dict) -> dict:
     kind = field.get("type")
     if not isinstance(key, str) or not _KEY.fullmatch(key):
         raise ValueError("invalid field key")
-    if kind not in _TYPES:
+    if not isinstance(kind, str) or kind not in _TYPES:
         raise ValueError(f"invalid field type for {key}")
     if not isinstance(field.get("label"), str) or not field["label"].strip():
         raise ValueError(f"missing field label for {key}")
