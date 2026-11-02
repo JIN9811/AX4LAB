@@ -2,7 +2,7 @@ schema: ax4lab.geometry_provider.v1
 id: gyroid
 version: 1.0.0
 label: Gyroid
-representations: [sheet]
+representations: [sheet, network_positive, network_negative]
 default_representation: sheet
 engine: legacy_gyroid
 stochastic: false
@@ -23,3 +23,14 @@ defaults:
   skin_thickness_mm: 0.0
   top_cap_enabled: false
   bottom_cap_enabled: false
+representation_parameters:
+  network_positive:
+    fields:
+      - {key: cell_size_mm, label: Cell size, type: number, min: 0.1, max: 200, unit: mm}
+      - {key: iso_level, label: Dimensionless iso level, type: number, min: -2, max: 2}
+    defaults: {cell_size_mm: 12, iso_level: 0}
+  network_negative:
+    fields:
+      - {key: cell_size_mm, label: Cell size, type: number, min: 0.1, max: 200, unit: mm}
+      - {key: iso_level, label: Dimensionless iso level, type: number, min: -2, max: 2}
+    defaults: {cell_size_mm: 12, iso_level: 0}
