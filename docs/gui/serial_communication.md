@@ -16,6 +16,11 @@ reconnect to apply changed settings. Profiles persist across browser refresh and
 server restart; connections do not automatically resume after a server restart.
 Use **Delete** to remove a disconnected profile, with confirmation.
 
+For CAS, **Read once** sends one `P` request. If the device does not reply before
+the timeout, it reports the timeout without automatically sending again. Press
+**Read once** to retry; only **Start polling** enables periodic requests. UTM
+reads remain passive and transmit no command.
+
 ## Record
 
 Press **Start recording**, then **Stop recording** when finished. Downloads include

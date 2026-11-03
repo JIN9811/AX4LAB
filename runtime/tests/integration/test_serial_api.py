@@ -75,6 +75,49 @@ def test_api_connect_measure_record_download_and_delete(tmp_path):
         service.shutdown()
 
 
+def test_read_once_timeout_does_not_invite_http_request_replay(tmp_path):
+    from device_bridges.serial_communication.api import create_router
+    from device_bridges.serial_communication.service import SerialService
+    from tests.unit.test_serial_service import FakeTransport
+
+    transport = FakeTransport(reply=False)
+    service = SerialService(
+        tmp_path/'config.json', tmp_path/'logs',
+        port_provider=lambda: [{'port': '/virtual/scale', 'device_id': 'virtual', 'available': True}],
+        transport_factory=lambda settings: transport,
+    )
+    app = FastAPI()
+    app.include_router(create_router(service))
+    try:
+        with TestClient(app, base_url='http://127.0.0.1', client=('127.0.0.1', 123)) as c:
+            p = c.post('/api/serial/profiles', json={
+                'module_id': 'cas_mwii_plus', 'settings': {'port': '/virtual/scale'},
+            }).json()
+            base = '/api/serial/profiles/' + p['id']
+            assert c.post(base + '/connect').json()['state'] == 'connected'
+            response = c.post(base + '/read', json={'timeout_s': .1})
+
+            # 408 lets Firefox replay the POST, sending another instrument request.
+            # This is a downstream device timeout, not an incomplete HTTP request.
+            assert response.status_code == 504
+            assert response.json()['detail']['code'] == 'timeout'
+            assert c.get(base + '/latest').json()['measurement'] is None
+            status = c.get(base + '/status').json()
+            assert status['state'] == 'connected'
+            assert status['polling'] is False
+            assert status['tx_bytes'] == 1
+            assert transport.sent == [b'P']
+
+            # A later, explicit read still works after a timeout releases the gate.
+            transport.reply = True
+            retry = c.post(base + '/read', json={'timeout_s': 1})
+            assert retry.status_code == 200
+            assert retry.json()['values']['weight'] == 8.56
+            assert transport.sent == [b'P', b'P']
+    finally:
+        service.shutdown()
+
+
 def test_host_registration_is_lazy_and_bridge_discovery_is_pure(tmp_path,monkeypatch):
     from types import SimpleNamespace
     from device_bridges.serial_communication.host import install_serial_workspace

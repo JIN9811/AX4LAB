@@ -68,7 +68,9 @@ def create_router(service, templates=None):
             s = service() if callable(service) else service
             return operation(s)
         except SerialError as exc:
-            status = {'not_found':404, 'module_unavailable':404, 'timeout':408,
+            # The HTTP request arrived; the downstream instrument did not reply.
+            # 408 makes browsers such as Firefox replay POSTs and send another P.
+            status = {'not_found':404, 'module_unavailable':404, 'timeout':504,
                       'invalid_config':422, 'dependency_missing':503,
                       'config_invalid':503, 'config_write_failed':503}.get(exc.code,409)
             raise HTTPException(status, {'code':exc.code, 'message':str(exc)}) from exc

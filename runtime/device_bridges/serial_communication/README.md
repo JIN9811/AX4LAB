@@ -131,5 +131,9 @@ Create: `{"module_id":"cas_mwii_plus","name":"Balance"}`. Set:
 `{"revision":1,"settings":{"port":"<detected port>","baudrate":9600}}`.
 The response returns the next revision; stale writes return 409. Delete requires
 `{"revision":2,"confirmed":true}`. Optional read timeout: `{"timeout_s":10}`.
+An instrument response timeout returns HTTP **504** with `detail.code: "timeout"`.
+The request is not retried automatically; another read requires an explicit call
+(or explicitly enabled polling). Do not use HTTP 408 for this downstream timeout:
+Firefox can replay that response's POST and transmit the measurement request again.
 Do not send private `device_id`/`stable_path` values: Set derives them from the
 selected detected port. No start/connect request is implied by reading metadata.
