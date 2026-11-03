@@ -16,6 +16,14 @@
 .workspace-fields legend{font-size:13px;margin-bottom:6px}
 .workspace-vector{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
 .design-common{border-top:1px solid var(--line);padding-top:18px}
+.design-page h3{font-size:14px;margin:18px 0 0}
+.design-page details{border-top:1px solid var(--line);padding:12px 0;font-size:13px}
+.design-page summary{cursor:pointer;color:var(--muted)}
+.parameter-guide p,.parameter-guide dd{line-height:1.6;color:var(--muted);margin:6px 0 12px;overflow-wrap:anywhere}
+.parameter-guide dt{font-weight:600}
+.viewer-actions{display:flex;align-items:center;gap:14px}
+.stl-color-control{display:flex;align-items:center;gap:8px;font-size:13px}
+.design-page input[type=color]{width:40px;height:30px;min-height:0;padding:2px;cursor:pointer}
 .design-actions{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:end}
 .design-viewer-wrap{position:relative;min-width:0}
 #design-viewer{height:440px;overflow:hidden;border:1px solid var(--line);border-radius:10px;background:#f7faff}

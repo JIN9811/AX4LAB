@@ -76,6 +76,11 @@ async def test_registered_graph_final_stl_and_specimen_reuse(context, value):
     receipt = spec["geometry_receipt"]
     stl = Path(spec["geometry_result"]["stl_path"])
     assert receipt["quality"] == "final" and receipt["final_geometry_valid"]
+    assert len(context.tools.calls) == 1
+    assert context.tools.calls[0][1]["render_preview"] is True
+    assert spec["geometry_preview"]["stl_path"] == str(stl)
+    assert spec["geometry_preview"]["render_receipt"]["source_stl_sha256"] == receipt["artifacts"]["stl"]["sha256"]
+    assert spec["geometry_preview"]["render_receipt"]["quality"] == "final"
     assert receipt["checks"]["within_envelope"] and receipt["checks"]["watertight"]
     assert receipt["manufacturing_ready"] is False
     assert hashlib.sha256(stl.read_bytes()).hexdigest() == receipt["artifacts"]["stl"]["sha256"]
@@ -159,7 +164,7 @@ async def test_invalid_alternative_never_appears_valid_in_decision_or_breaks_han
     assert all(p["geometry_request"]["parameters"]["strut_diameter_mm"] != 6 for _, p in context.tools.calls)
 
 
-@pytest.mark.parametrize("value", [request("unknown"), request("spinodoid"),
+@pytest.mark.parametrize("value", [request("unknown"), request("spinodoid", seed=None),
     request(parameters={"strut_diameter_mm": -1}), request(provider_version="99.0")])
 def test_invalid_explicit_requests_never_fallback(context, value):
     with pytest.raises(ValueError):
@@ -254,7 +259,7 @@ async def test_no_pool_never_runs_explicit_geometry_inline(context):
 
 
 @pytest.mark.asyncio
-async def test_generate_only_module_rejects_agent_before_any_generation(context, tmp_path, monkeypatch):
+async def test_generate_only_module_admits_agent_final_generation(context, tmp_path, monkeypatch):
     import shutil
     import yaml
     from agents.design import geometry_adapter
@@ -267,10 +272,15 @@ async def test_generate_only_module_rejects_agent_before_any_generation(context,
     path.write_text(yaml.safe_dump(descriptor))
     catalog = DesignCatalog(modules)
     monkeypatch.setattr(geometry_adapter, "DesignCatalog", lambda: catalog)
-    with pytest.raises(ValueError) as error:
-        await DesignAgent().run(state_for(request()), context)
+    agent, state = DesignAgent(), state_for(request())
+    prepared = agent._prepare_design_payload(state, context)
+    steps = geometry_adapter.finalize_steps(agent, state, context, prepared, prepared["ranked"][0], None)
+    name, payload = next(steps)
+    steps.close()
+    assert name == "geometry.generate_metamaterial_stl"
+    assert payload["geometry_request"]["quality"] == "final"
+    assert payload["render_preview"] is True
     assert context.tools.calls == []
-    assert "agent handoff requires both preview and generate" in str(error.value)
     assert not list(context.paths.run_root.rglob("receipt.json"))
 
 
@@ -354,12 +364,69 @@ def test_preview_request_final_target_and_profile_changes_are_isolated(context):
     store.save(store.data)
     assert prepared["ranked"] == frozen
     assert prepared["ranked"][0]["geometry_request"]["quality"] == "final"
-    assert prepared["ranked"][0]["geometry_request"]["resolution"] == 96
+    assert prepared["ranked"][0]["geometry_request"]["resolution"] == 128
     assert state.run_metadata["orchestrator_design_contract"]["geometry_request"] == raw
 
 
+def test_explicit_final_resolution_below_workspace_minimum_is_rejected(context):
+    with pytest.raises(ValueError, match="resolution|96"):
+        DesignAgent()._prepare_design_payload(state_for(request(resolution=95)), context)
+    assert context.tools.calls == []
+
+
 @pytest.mark.asyncio
-async def test_shared_engine_candidate_previews_are_distinct_and_archived(context, monkeypatch):
+async def test_failed_alternative_does_not_erase_selected_final_artifact(context, monkeypatch):
+    state = state_for(request(), geometry_candidates=[request(orientation_deg=[0, 0, 90])])
+    selected_id = DesignAgent()._prepare_design_payload(state, context)["ranked"][0]["candidate_id"]
+    registered_call = context.tools.call
+    def fail_alternative(name, payload=None):
+        if payload["candidate_id"] != selected_id:
+            raise ValueError("Isolated alternative worker failure")
+        return registered_call(name, payload)
+    monkeypatch.setattr(context.tools, "call", fail_alternative)
+    result = await DesignAgent().run(state, context)
+    assert result.success
+    selected = result.data["experiment_spec"]
+    assert selected["candidate_id"] == selected_id
+    assert selected["geometry_preview"]["stl_path"] == selected["geometry_result"]["stl_path"]
+    assert Path(selected["geometry_result"]["stl_path"]).is_file()
+    assert len(context.tools.calls) == 1
+    generation = result.data["design_report"]["candidate_generation"]
+    assert generation["preview_status"] == "partial"
+    assert generation["valid_count"] == 1
+    assert generation["pending_count"] == 1
+    alternative = next(c for c in result.data["candidate_ledger"] if c["candidate_id"] != selected_id)
+    assert alternative["geometry_preview_error"] == {"status": "failed", "error_type": "ValueError"}
+    assert alternative["geometry_receipt"] is None
+
+
+@pytest.mark.asyncio
+async def test_failed_alternative_render_keeps_verified_final_geometry_evidence(context, monkeypatch):
+    state = state_for(request(), geometry_candidates=[request(orientation_deg=[0, 0, 90])])
+    selected_id = DesignAgent()._prepare_design_payload(state, context)["ranked"][0]["candidate_id"]
+    registered_call = context.tools.call
+    def mismatch_alternative_image(name, payload=None):
+        result = registered_call(name, payload)
+        if payload["candidate_id"] != selected_id:
+            result["render_receipt"]["source_stl_sha256"] = "0" * 64
+        return result
+    monkeypatch.setattr(context.tools, "call", mismatch_alternative_image)
+    result = await DesignAgent().run(state, context)
+    assert result.success
+    generation = result.data["design_report"]["candidate_generation"]
+    assert generation["preview_status"] == "partial"
+    assert generation["valid_count"] == 2
+    assert generation["pending_count"] == 0
+    alternative = next(c for c in result.data["candidate_ledger"] if c["candidate_id"] != selected_id)
+    assert alternative["geometry_preview_error"]["error_type"] == "ValueError"
+    assert alternative["design_evaluation"]["validity"]["status"] == "pass"
+    assert alternative["geometry_receipt"]["final_geometry_valid"] is True
+    assert "geometry_preview" not in alternative
+    assert "preview_image_path" not in alternative
+
+
+@pytest.mark.asyncio
+async def test_shared_engine_candidate_images_render_same_final_stls_and_are_archived(context, monkeypatch):
     from PIL import Image
     import mcp_tools.mock_tools as numerical_tools
     def no_parent_render(*args, **kwargs):
@@ -374,14 +441,17 @@ async def test_shared_engine_candidate_previews_are_distinct_and_archived(contex
     for candidate in ledger:
         preview = candidate["geometry_preview"]
         receipt = preview["geometry_receipt"]
-        assert receipt["quality"] == "preview" and receipt["final_geometry_valid"] is False
-        assert receipt["request"] == {**candidate["geometry_request"], "quality": "preview"}
-        assert receipt["request_sha256"] != candidate["candidate_fingerprint"]
-        assert Path(preview["stl_path"]) != Path(spec["geometry_result"]["stl_path"])
+        assert receipt["quality"] == "final" and receipt["final_geometry_valid"] is True
+        assert receipt["request"] == candidate["geometry_request"]
+        assert receipt["request_sha256"] == candidate["candidate_fingerprint"]
+        assert preview["stl_path"] == candidate["geometry_result"]["stl_path"]
+        assert candidate["design_evaluation"]["validity"]["status"] == "pass"
+        assert candidate["preview_render_source"] == "final_quality_stl"
         assert hashlib.sha256(Path(preview["stl_path"]).read_bytes()).hexdigest() == receipt["artifacts"]["stl"]["sha256"]
         png = Path(candidate["preview_image_path"])
         assert png.is_relative_to(context.paths.run_root / state.run_id)
         assert preview["render_receipt"]["source_stl_sha256"] == receipt["artifacts"]["stl"]["sha256"]
+        assert preview["render_receipt"]["quality"] == "final"
         assert preview["render_receipt"]["request_sha256"] == receipt["request_sha256"]
         assert hashlib.sha256(png.read_bytes()).hexdigest() == preview["render_receipt"]["image_sha256"]
         with Image.open(png) as image:
@@ -392,14 +462,16 @@ async def test_shared_engine_candidate_previews_are_distinct_and_archived(contex
     assert spec["geometry_receipt"]["quality"] == "final"
     archives = list(context.paths.run_root.rglob("manifest.json"))
     assert archives and any("preview.png" in path.read_text() for path in archives)
-    assert [payload["geometry_request"]["quality"] for name, payload in context.tools.calls] == ["final", "preview", "preview"]
-    assert compute_pool.compute_status()["completed"] == 3
+    assert [payload["geometry_request"]["quality"] for name, payload in context.tools.calls] == ["final", "final"]
+    assert compute_pool.compute_status()["completed"] == 2
+    assert result.data["design_report"]["candidate_generation"]["valid_count"] == 2
+    assert result.data["design_report"]["candidate_generation"]["pending_count"] == 0
 
 
 @pytest.mark.asyncio
 async def test_explicit_gyroid_existing_report_projection_retains_geometry_lineage(context):
     from agents.specimen.presentation import project_specimen_report
-    state = state_for(request("gyroid", specimen_size_mm=[10, 10, 10], resolution=48))
+    state = state_for(request("gyroid", specimen_size_mm=[10, 10, 10], resolution=96))
     result = await DesignAgent().run(state, context)
     spec = result.data["experiment_spec"]
     report = SpecimenMakingAgent()._build_fabrication_report(

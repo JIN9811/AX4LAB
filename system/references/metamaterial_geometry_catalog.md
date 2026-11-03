@@ -1,6 +1,6 @@
 # Metamaterial geometry catalog — numerical research generators
 
-Checked 2026-11-02. All code is an independent mathematical implementation;
+Parameter research updated 2026-11-03. All code is an independent mathematical implementation;
 no external geometry implementation was copied, no runtime downloads occur,
 and no third-party source adoption notice is needed. These are research
 geometries, not manufacturing or mechanical-property certificates.
@@ -22,7 +22,68 @@ Finite crops of periodic structures need not be connected. A different crop,
 angle, seed or density can fail; no automatic seed resampling takes place.
 Underresolved previews retain explicit failed provider validation. Final
 requests cannot publish a receipt when that check or serialized mesh checks
-fail. The common default resolution is 48 preview / 96 final, maximum 160.
+fail. New workspace/agent generation uses one final STL, default resolution 128
+(public job range 96–160). Historical preview receipts remain readable. A PNG or
+browser view is a rendering of the final artifact, not another geometry request.
+
+## Parameter selection: research versus implementation
+
+The descriptors are the machine-readable authority for names, units, technical
+bounds, defaults and roles. GET the geometry's `/contract` endpoint for one active
+representation. `design` means a useful study variable, `fixed` an editable setting
+normally controlled between comparisons, and `numerical` a discretization choice.
+These labels do not change BO constraints or authorize new experimental actions.
+Dimensioned defaults below are project starting examples, not universal optima.
+
+| Family | Independent inputs | Keep distinct from |
+| --- | --- | --- |
+| TPMS sheet | Conventional period L, target wall t | Dimensionless nodal threshold, achieved density |
+| TPMS positive/negative network | Period L, iso level c | Sheet wall t; c has family-specific meaning |
+| SC / BCC / FCC / Octet | Conventional cell edge L, full diameter d | Beam radius, beam length, derived d/L |
+| Honeycombs | Inclined length l, vertical length h, signed angle theta, full wall t | Derived h/l or t/l; extrusion crop |
+| Spinodoid | Wavelength, expected solid fraction rho, cone half-angles | Wave count, realization seed, achieved finite-crop density |
+| Voronoi | Integer site count N, uniform full diameter d | Realization seed, target-density inversion |
+
+### Case comparisons and limits
+
+- [TPMSgen, authors' implementation](https://github.com/albertforesg/TPMSgen)
+  separates specimen/cell dimensions, shell thickness and skeletal level-set C.
+  AX4LAB follows that distinction but does not claim its projected-distance sheet
+  algorithm is the same as TPMSgen's mesh processing. Threshold values are not
+  interchangeable across families or mathematical conventions.
+- [Kumar et al. (2020)](https://www.nature.com/articles/s41524-020-0341-6) studies
+  the spinodoid design vector `(rho, theta1, theta2, theta3)`; wavelength adds the
+  absolute scale in a finite specimen. Its research domain uses rho≥0.3 and active
+  cone angles≥15°. These are advisory study limits, not newly imposed software
+  bounds. The [authors' repository](https://github.com/mmc-group/inverse-designed-spinodoids)
+  links to the geometry implementation. [GIBBON's documented example](https://www.gibboncode.org/html/HELP_spinodoid.html)
+  uses 1000 waves; AX4LAB's 64-wave default is a bounded numerical approximation,
+  not paper-level statistical convergence. Any enabled 90° cone already samples
+  all directions, so the three isotropic angles are redundant, not three useful
+  independent anisotropy variables at that point.
+- [Libonati et al. (2021)](https://pubs.acs.org/doi/10.1021/acsbiomaterials.0c01708)
+  compares lattice topology with geometry chosen for its manufacturing/test setup.
+  AX4LAB's fixed graph and capsule-union nodes have no fillet-radius control.
+  [Deshpande et al. (2001)](https://www.sciencedirect.com/science/article/pii/S0022509601000102)
+  uses strut-level geometric conventions; a conventional-cell edge is not every
+  beam's length. Do not reuse analytical density formulas without those conversions
+  and node-overlap assumptions. Our FCC is face-diagonal-only, not an Octet alias.
+- [NASA's honeycomb unit-cell study](https://ntrs.nasa.gov/api/citations/20200002443/downloads/20200002443.pdf)
+  distinguishes cell angle, wall dimensions and out-of-plane width. Our l6/h12/30°
+  default is stretched hexagonal, **not regular equal-side hexagonal**. Regular
+  equal-side geometry uses h=l and theta=30° under our convention. NASA's bonded
+  wall constructions are not our uniform-wall model. Negative-angle re-entrant
+  geometry alone does not establish measured negative Poisson ratio.
+- [Boualleg et al. (2025)](https://link.springer.com/article/10.1007/s40964-025-01274-3)
+  compares 80/122 sites and diameters 0.7/1.0/1.3 mm in a 30×30×24-mm initial box.
+  It also removes edges shorter than 2 mm and merges their endpoints. AX4LAB does
+  not implement that modification, so copying those numbers is **not** replication
+  of the paper. The project's N16/d2/seed42 case is a separate finite-crop baseline.
+
+No field for spatial grading, node fillets, Lloyd relaxation, weighted Voronoi or
+individual strut widths is advertised: the numerical providers do not implement
+those features. Defaults and research citations guide the input choice; serialized
+mesh validation and later manufacturing review remain separate evidence.
 
 ## TPMS: six Fourier nodal approximations
 
@@ -190,8 +251,8 @@ pieces, spinodoid seed5/default density can disconnect, and Voronoi seed42
 with 24 sites can create a tiny closed inner shell. These are explicit
 regression rejection cases, not silently altered requests.
 
-The source audit records exact official source locations and license findings
-in `.superpowers/sdd/2026-11-02-design-workspace/task3-source-audit.md`.
+The primary source locations and license findings are recorded in this document;
+the original detailed audit is retained with the isolated validation artifacts.
 Mathematics above was independently coded; mutable third-party repository
 revisions are not runtime dependencies or adopted-code identities. Each shared
 provider module attests its source at import. Common catalog fingerprints cover

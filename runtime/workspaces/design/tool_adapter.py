@@ -11,8 +11,11 @@ def render_generated_preview(output, receipt):
     from mcp_tools.mock_tools import _try_write_stl_iso_capture_png
     from .engine import canonical_json
     output = Path(output)
-    if receipt["quality"] != "preview":
-        raise ValueError("Preview rendering requires a distinct preview geometry receipt")
+    quality = receipt["quality"]
+    if (quality not in {"preview", "final"} or receipt.get("ok") is not True
+            or receipt.get("request", {}).get("quality") != quality
+            or (quality == "final" and receipt.get("final_geometry_valid") is not True)):
+        raise ValueError("STL rendering requires a valid geometry receipt")
     stl = output / "geometry.stl"
     if hashlib.sha256(stl.read_bytes()).hexdigest() != receipt["artifacts"]["stl"]["sha256"]:
         raise ValueError("Preview STL does not match generation receipt")
@@ -21,7 +24,7 @@ def render_generated_preview(output, receipt):
             specimen_id=receipt["identity"].get("specimen_id", ""),
             geometry_type=receipt["request"]["geometry_id"]):
         raise ValueError("Actual STL preview renderer unavailable or failed; no placeholder")
-    metadata = {"schema": "ax4lab.geometry_render.v1", "quality": "preview",
+    metadata = {"schema": "ax4lab.geometry_render.v1", "quality": quality, "source_quality": quality,
         "request_sha256": receipt["request_sha256"], "identity": receipt["identity"],
         "source_stl_sha256": receipt["artifacts"]["stl"]["sha256"],
         "image_basename": image.name, "image_sha256": hashlib.sha256(image.read_bytes()).hexdigest(),
@@ -66,8 +69,8 @@ def generate_tool(payload: dict) -> dict:
     output = Path(payload["output_dir"])
     from utils.compute_pool import compute_enabled, compute_sync
     render_preview = payload.get("render_preview", False)
-    if type(render_preview) is not bool or (render_preview and request["quality"] != "preview"):
-        raise ValueError("render_preview must be boolean and requires preview quality")
+    if type(render_preview) is not bool:
+        raise ValueError("render_preview must be boolean")
     if render_preview and not compute_enabled():
         raise ValueError("Preview rendering requires configured CPU pool")
     if compute_enabled():
@@ -84,7 +87,9 @@ def generate_tool(payload: dict) -> dict:
         import json
         render_receipt = json.loads((output / "render.json").read_text())
         image = output / "preview.png"
-        if (render_receipt.get("quality") != "preview"
+        if (render_receipt.get("schema") != "ax4lab.geometry_render.v1"
+                or render_receipt.get("quality") != receipt["quality"]
+                or render_receipt.get("source_quality") != receipt["quality"]
                 or render_receipt.get("request_sha256") != receipt["request_sha256"]
                 or render_receipt.get("source_stl_sha256") != receipt["artifacts"]["stl"]["sha256"]
                 or render_receipt.get("identity") != receipt["identity"]

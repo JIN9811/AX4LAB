@@ -6,10 +6,10 @@
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/styles.css">
   <link rel="stylesheet" href="/static/serial_workspace.css?v=4">
-  <link rel="stylesheet" href="/static/design_workspace.css?v=1">
+  <link rel="stylesheet" href="/static/design_workspace.css?v=3">
   <script src="/static/vendor/vtk-34.15.4.js" defer></script>
   <script src="/static/workspace_fields.js?v=1" defer></script>
-  <script src="/static/design_workspace.js?v=2" defer></script>
+  <script src="/static/design_workspace.js?v=3" defer></script>
 </head>
 <body>
 <main id="design-page" class="page equipment-setup-page serial-page design-page">
@@ -36,17 +36,18 @@
         <label>Geometry<select id="geometry-select"></select></label>
         <label>Representation<select id="representation-select"></select></label>
       </div>
+      <h3>Design variables</h3>
       <div id="design-fields" class="workspace-fields"></div>
+      <details id="design-settings-panel"><summary>Fixed / numerical settings</summary><div id="design-settings" class="workspace-fields"></div></details>
+      <details class="parameter-guide"><summary>Parameter guide &amp; sources</summary><div id="parameter-guide"></div></details>
       <div id="design-common" class="workspace-fields design-common"></div>
       <div class="design-actions">
-        <label>Preview resolution<input id="preview-resolution" type="number" min="16" max="160" step="1" value="48"></label>
-        <button id="preview-design" class="btn">Preview</button>
-        <label>Final resolution<input id="final-resolution" type="number" min="16" max="160" step="1" value="96"></label>
-        <button id="generate-design" class="btn primary">Generate</button>
+        <label>STL resolution<input id="final-resolution" type="number" min="96" max="160" step="1" value="128"></label>
+        <button id="generate-design" class="btn primary">Generate STL</button>
       </div>
     </section>
     <section class="panel design-result" aria-label="Geometry result">
-      <div class="panel-title-row"><h2>Preview</h2><button id="reset-camera" class="btn mini">Reset view</button></div>
+      <div class="panel-title-row"><h2>STL</h2><div class="viewer-actions"><label class="stl-color-control" title="Viewer color only; STL geometry is unchanged">Color<input id="stl-color" type="color" value="#3d94b8" aria-label="STL viewer color"></label><button id="reset-camera" class="btn mini">Reset view</button></div></div>
       <p id="result-title" class="hint">No result selected</p>
       <div class="design-viewer-wrap"><div id="design-viewer" tabindex="0" role="img" aria-label="3D geometry. Arrow keys rotate, plus and minus zoom, R resets."></div><span id="viewer-empty" class="hint">Select a module to begin</span></div>
       <p id="result-checks" class="hint"></p>

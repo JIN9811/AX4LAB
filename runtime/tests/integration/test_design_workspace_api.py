@@ -38,7 +38,7 @@ def test_public_catalog_profile_validation_and_revision_shapes(client):
     assert client.get(f'/api/design/modules/{MODULE}/icon').headers['content-type'].startswith('image/svg+xml')
     assert client.post('/api/design/modules/refresh').status_code == 200
     valid = client.post('/api/design/validate', json={'request':request()}).json()
-    assert valid['request']['resolution'] == 48
+    assert valid['request']['resolution'] == 128
     p = client.post('/api/design/profiles', json={'name':'Cubic', 'request':request()})
     assert p.status_code == 201
     p = p.json()
@@ -122,7 +122,7 @@ def test_public_fake_worker_queue_and_cancel_contract(tmp_path):
             a = c.post('/api/design/jobs', json=body).json()
             assert worker.started.wait(2)
             assert c.post('/api/design/jobs', json=body).json()['id'] == a['id']
-            assert c.post('/api/design/jobs', json={**body,'request':request(resolution=64)}).status_code == 409
+            assert c.post('/api/design/jobs', json={**body,'request':request(resolution=96)}).status_code == 409
             b = c.post('/api/design/jobs', json={**body,'idempotency_key':'two'}).json()
             assert c.post('/api/design/jobs', json={**body,'idempotency_key':'three'}).status_code == 429
             assert c.post(f"/api/design/jobs/{b['id']}/cancel").json()['state'] == 'cancelled'

@@ -7,8 +7,29 @@ representations: [grf]
 default_representation: grf
 stochastic: true
 fields:
-  - {key: wavelength_mm, label: GRF wavelength, type: number, min: 1, max: 200, unit: mm}
-  - {key: wave_count, label: Wave count, type: integer, min: 16, max: 512}
-  - {key: cone_angles_deg, label: Double-cone half angles (zero disables), type: vector, length: 3, min: 0, max: 90, unit: deg}
-  - {key: solid_fraction, label: Expected solid fraction, type: number, min: 0.1, max: 0.9}
+  - {key: wavelength_mm, label: GRF wavelength, type: number, min: 1, max: 200, unit: mm, description: "Spatial wavelength of the Gaussian random field; sets its characteristic feature spacing."}
+  - {key: wave_count, label: Wave count, type: integer, min: 16, max: 512, description: "Number of sampled waves approximating the random field; controls numerical cost and convergence."}
+  - {key: cone_angles_deg, label: Double-cone half angles (zero disables), type: vector, length: 3, min: 0, max: 90, unit: deg, description: "Three double-cone half angles around x, y and z; zero disables that axis, 90 admits all directions."}
+  - {key: solid_fraction, label: Expected solid fraction, type: number, min: 0.1, max: 0.9, description: "Expected solid fraction set by the Gaussian threshold, not an exact cropped-mesh density."}
 defaults: {wavelength_mm: 12, wave_count: 64, cone_angles_deg: [90, 90, 90], solid_fraction: 0.55}
+design_family: spinodoid
+parameter_roles:
+  wavelength_mm: design
+  wave_count: numerical
+  cone_angles_deg: design
+  solid_fraction: design
+default_basis: "Editable project starting values for a 30 mm specimen crop, not universal optima or paper-calibrated material properties."
+design_notes:
+  - "Wavelength, expected solid fraction and three directional cone angles are design variables; wave count is a numerical approximation setting."
+  - "The research design envelope recommends solid fraction >= 0.3 and active cone angles >= 15 degrees. These are advisory; wider existing technical bounds remain available."
+  - "At least one cone must be active. A 90 degree cone admits all directions, so the default is isotropic in expectation."
+  - "The 64-wave default is a project computational compromise, not the 1000-wave GIBBON reference configuration; finite crop and realization alter measured density."
+  - "Seed selects a repeatable realization; it does not prescribe a distinct density or mechanical property."
+research_sources:
+  - title: "Inverse-designed spinodoid metamaterials"
+    url: https://www.nature.com/articles/s41524-020-0341-6
+  - title: "Author implementation of inverse-designed spinodoids"
+    url: https://github.com/mmc-group/inverse-designed-spinodoids
+  - title: "GIBBON spinodoid parameter reference"
+    url: https://www.gibboncode.org/html/HELP_spinodoid.html
+default_seed: 42

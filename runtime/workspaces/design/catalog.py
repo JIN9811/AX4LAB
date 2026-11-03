@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import platform
 
-from workspaces.catalog import discover_modules
+from workspaces.catalog import discover_modules, _safe_reference_url
 from workspaces.fields import normalize_fields
 from utils.source_identity import attest_module_source
 
@@ -53,6 +53,29 @@ def _geometry_schema(value):
         if not isinstance(group, dict) or set(group) != {"fields", "defaults"}:
             raise ValueError("Representation parameters require fields and defaults")
         normalize_fields(group["fields"], group["defaults"], {})
+    keys = {field["key"] for mode in modes for field in parameter_schema(value, mode)[0]}
+    if "parameter_roles" in value:
+        roles = value["parameter_roles"]
+        if (not isinstance(roles, dict) or set(roles) != keys or
+                any(not isinstance(role, str) or role not in {"design", "fixed", "numerical"}
+                    for role in roles.values())):
+            raise ValueError("parameter_roles must cover all representation fields with valid roles")
+    for key in ("design_family", "default_basis"):
+        if key in value and (not isinstance(value[key], str) or not value[key].strip()):
+            raise ValueError(f"{key} must be non-empty text")
+    if "design_notes" in value and (not isinstance(value["design_notes"], list) or
+            any(not isinstance(note, str) or not note.strip() for note in value["design_notes"])):
+        raise ValueError("design_notes must be a list of non-empty text")
+    if "research_sources" in value:
+        sources = value["research_sources"]
+        if (not isinstance(sources, list) or any(
+                not isinstance(item, dict) or set(item) != {"title", "url"} or
+                not isinstance(item["title"], str) or not item["title"].strip() or
+                not _safe_reference_url(item["url"]) for item in sources)):
+            raise ValueError("research_sources require a title and valid HTTPS URL")
+    if "default_seed" in value and (type(value["default_seed"]) is not int or
+                                    not 0 <= value["default_seed"] <= 2**32 - 1):
+        raise ValueError("default_seed must be a uint32 integer")
     return value
 
 
@@ -81,7 +104,7 @@ def source_files(record, module):
             raise ValueError("Provider source escapes installed module")
     paths = [RUNTIME_ROOT / name for name in (
         "workspaces/catalog.py", "workspaces/fields.py", "workspaces/design/catalog.py",
-        "workspaces/design/engine.py", "workspaces/design/meshing.py", "workspaces/design/tool_adapter.py",
+        "workspaces/design/engine.py", "workspaces/design/contracts.py", "workspaces/design/meshing.py", "workspaces/design/tool_adapter.py",
         "mcp_tools/tpms_geometry.py", "mcp_tools/mesh_quality.py", "utils/source_identity.py")]
     paths.extend(sorted((RUNTIME_ROOT / "workspaces/design/providers").glob("*.py")))
     for path in paths:

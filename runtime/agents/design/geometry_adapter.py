@@ -38,8 +38,8 @@ def enabled_catalog(ctx, request):
     if record["descriptor"]["agent_handoff"] is not True:
         raise ValueError("Design provider is manual-only; agent handoff is not supported")
     module = next(m for m in catalog.modules if m["id"] == normalized["module_id"])
-    if not {"preview", "generate"} <= set(module["descriptor"]["actions"]):
-        raise ValueError("Design agent handoff requires both preview and generate module actions")
+    if "generate" not in module["descriptor"]["actions"]:
+        raise ValueError("Design agent handoff requires the generate module action")
     state = Store(paths.memory_root / "design_workspace").data
     enabled = state["modules"].get(normalized["module_id"], {"enabled": True})
     if enabled.get("enabled") is not True:
@@ -51,9 +51,11 @@ def final_request(value):
     if not isinstance(value, dict):
         raise ValueError("geometry_request must be an object")
     result = deepcopy(value)
-    # Preview evidence is never promoted: a separate final generation is required.
+    # Upgrade the request, never historical evidence; generate and render one final STL.
     result["quality"] = "final"
-    result.setdefault("resolution", 96)
+    result.setdefault("resolution", 128)
+    if type(result["resolution"]) is not int or result["resolution"] < 96:
+        raise ValueError("Explicit geometry final resolution must be at least 96")
     return result
 
 
@@ -224,7 +226,8 @@ def finalize_steps(agent, state, ctx, prepared, candidate, decision):
         constraints=deepcopy(constraints), objective_type=prepared["objective"]["objective_type"],
         objective_direction=prepared["objective"]["direction"], generation_strategy="explicit_geometry_requests",
         score_semantics="unassessed_no_mechanical_proxy", design_evaluation=evaluation)
-    generated = yield ("geometry.generate_metamaterial_stl", output_payload(state, ctx, selected, "design_geometry"))
+    generated = yield ("geometry.generate_metamaterial_stl",
+        {**output_payload(state, ctx, selected, "design_geometry"), "render_preview": True})
     selected.update(geometry_result=generated, geometry_receipt=generated.get("geometry_receipt"))
     if verified_geometry(state, ctx, selected, catalog) is None:
         raise ValueError("Final geometry tool returned invalid receipt/artifact")
@@ -234,39 +237,57 @@ def finalize_steps(agent, state, ctx, prepared, candidate, decision):
     evaluation["cost"]["volume"].update(value=selected["expected_volume_mm3"], status="serialized_mesh")
     ledger = [deepcopy(selected if c["candidate_id"] == selected["candidate_id"] else c) for c in prepared["ranked"]]
     for item in ledger:
-        preview_spec = {**item, "specimen_id": "specimen-" + item["candidate_fingerprint"][:16],
-            "geometry_request": {**deepcopy(item["geometry_request"]), "quality": "preview"}}
+        is_selected = item["candidate_id"] == selected["candidate_id"]
+        item["specimen_id"] = "specimen-" + item["candidate_fingerprint"][:16]
         try:
-            preview = yield ("geometry.generate_metamaterial_stl",
-                {**output_payload(state, ctx, preview_spec, "design_candidates"), "render_preview": True})
+            if is_selected:
+                preview = generated
+            else:
+                preview = yield ("geometry.generate_metamaterial_stl",
+                    {**output_payload(state, ctx, item, "design_candidates"), "render_preview": True})
+            item.update(geometry_result=preview, geometry_receipt=preview.get("geometry_receipt"))
+            if verified_geometry(state, ctx, item, catalog) is None:
+                raise ValueError("Candidate final geometry differs from admitted request/source")
+            preview_receipt = preview["geometry_receipt"]
+            if not is_selected:
+                item["design_evaluation"] = evaluate(state, prepared, item)
+                item["design_evaluation"]["validity"].update(status="pass", reasons=[],
+                    source="verified final serialized geometry receipt")
+                item["candidate_status"] = "valid"
+                item["expected_volume_mm3"] = preview_receipt["volume_mm3"]
+                item["design_evaluation"]["cost"]["volume"].update(value=item["expected_volume_mm3"], status="serialized_mesh")
+            render = preview["render_receipt"]
+            image = contained(Path(ctx.paths.run_root) / state.run_id, Path(preview["preview_image_path"]))
+            if (render.get("schema") != "ax4lab.geometry_render.v1"
+                    or render.get("quality") != "final"
+                    or render.get("request_sha256") != preview_receipt["request_sha256"]
+                    or render.get("source_stl_sha256") != preview_receipt["artifacts"]["stl"]["sha256"]
+                    or render.get("identity") != preview_receipt["identity"]
+                    or render.get("image_basename") != image.name
+                    or render.get("image_sha256") != hashlib.sha256(image.read_bytes()).hexdigest()):
+                raise ValueError("Candidate image does not render its final STL")
+            for key in ("preview_image_path", "viewer_capture_path", "capture_image_path"):
+                path = contained(Path(ctx.paths.run_root) / state.run_id, Path(preview[key]))
+                if path != image:
+                    raise ValueError("Candidate image aliases must reference the same final STL render")
+                item[key] = str(path)
+                item[key.replace("_path", "_url")] = agent._run_artifact_url(state.run_id, path, run_root=ctx.paths.run_root)
         except Exception as exc:
-            if item["candidate_id"] == selected["candidate_id"]:
+            if is_selected:
                 raise
             item["geometry_preview_error"] = {"status": "failed", "error_type": type(exc).__name__}
             continue
-        preview_receipt = preview["geometry_receipt"]
-        if (preview.get("ok") is not True or preview_receipt.get("quality") != "preview"
-                or preview_receipt.get("final_geometry_valid") is not False
-                or preview_receipt.get("request") != preview_spec["geometry_request"]
-                or preview_receipt.get("identity") != identity(state, preview_spec)
-                or preview_receipt.get("source_fingerprint") != item["source_fingerprint"]):
-            raise ValueError("Candidate preview differs from admitted request/source")
         item["geometry_preview"] = preview
-        for key in ("preview_image_path", "viewer_capture_path", "capture_image_path"):
-            path = contained(Path(ctx.paths.run_root) / state.run_id, Path(preview[key]))
-            if not path.is_file():
-                raise ValueError("Candidate preview image missing")
-            item[key] = str(path)
-            item[key.replace("_path", "_url")] = agent._run_artifact_url(state.run_id, path, run_root=ctx.paths.run_root)
-        item.update(preview_render_kind="viewer_capture_png", preview_render_source="preview_quality_stl",
+        item.update(preview_render_kind="viewer_capture_png", preview_render_source="final_quality_stl",
                     preview_render_engine="geometry.design_generate", preview_geometry_hash=preview_receipt["request_sha256"])
-        if item["candidate_id"] == selected["candidate_id"]:
+        if is_selected:
             selected.update(deepcopy(item))
+    valid_count = sum(item.get("design_evaluation", {}).get("validity", {}).get("status") == "pass" for item in ledger)
     report = {"schema": "design_report.v1", "run_id": state.run_id,
         "report_id": f"design-report-{state.run_id}-{state.loop_count + 1}", "loop_index": state.loop_count + 1,
         "status": "selected", "evaluation_semantics": "evidence_based_v1", "objective": prepared["objective"],
         "candidate_generation": {"strategy": prepared["strategy"], "candidate_count": len(ledger),
-            "valid_count": 1, "pending_count": len(ledger)-1,
+            "valid_count": valid_count, "pending_count": len(ledger)-valid_count,
             "rejected_count": len(prepared["rejected"]), "rejected": deepcopy(prepared["rejected"]), "repaired_count": 0,
             "candidate_ledger": ledger, "top_candidates": ledger,
             "preview_status": "partial" if any("geometry_preview_error" in c for c in ledger) else "generated"},

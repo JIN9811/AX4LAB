@@ -16,6 +16,17 @@
   const orientationAxes = (geometry, representation) =>
     geometry.representation_orientation_axes?.[representation] ||
     geometry.orientation_axes || ["x", "y", "z"];
+  function parameterGroups(geometry, representation) {
+    const groups = {design: [], settings: []};
+    for (const field of parameters(geometry, representation).fields) {
+      const role = geometry.parameter_roles?.[field.key] || "design";
+      groups[role === "design" ? "design" : "settings"].push(field.key);
+    }
+    return groups;
+  }
+  const normalizeColor = (value) => typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value)
+    ? value.toLowerCase() : "#3d94b8";
+  const colorRGB = (value) => normalizeColor(value).slice(1).match(/../g).map(v => parseInt(v, 16) / 255);
   function errorMessage(body) {
     const d = body?.detail ?? body;
     return typeof d === "string"
@@ -113,7 +124,9 @@
               ),
               specimen_size_mm: [30, 30, 30],
               orientation_deg: [0, 0, 0],
-              seed: g.stochastic ? 42 : null,
+              seed: g.default_seed ?? (g.stochastic ? 42 : null),
+              quality: "final",
+              resolution: 128,
             }
           : null;
         if (this.draft)
@@ -214,7 +227,7 @@
       editGeneration = 0;
       $("save-state").textContent = "";
     }
-    for (const id of ["profile-name", "preview-resolution", "final-resolution"])
+    for (const id of ["profile-name", "final-resolution"])
       $(id).addEventListener("input", dirty);
     function renderFields() {
       const generation = ++fieldGeneration;
@@ -243,6 +256,14 @@
           dirty();
         },
       );
+      const groups = parameterGroups(g, d.representation);
+      $("design-settings").replaceChildren();
+      for (const key of groups.settings) $("design-settings").append(fields.rows[key]);
+      $("design-settings-panel").hidden = !groups.settings.length;
+      for (const field of schema.fields) {
+        if (field.description) fields.rows[field.key].title = field.description;
+      }
+      renderGuide(g, schema);
       common = WorkspaceFields.render(
         $("design-common"),
         [
@@ -283,15 +304,37 @@
       common.controls.orientation_deg.forEach((el, i) => {
         el.disabled = !axes.includes(["x", "y", "z"][i]);
       });
+      common.rows.seed.hidden = !g.stochastic && !("defect_ratio" in d.parameters);
       updateAvailability();
+    }
+    function renderGuide(g, schema) {
+      const root = $("parameter-guide");
+      root.replaceChildren();
+      for (const text of [g.default_basis, ...(g.design_notes || [])].filter(Boolean)) {
+        const p = document.createElement("p"); p.textContent = text; root.append(p);
+      }
+      const list = document.createElement("dl");
+      for (const field of schema.fields) {
+        const term = document.createElement("dt"); term.textContent = field.label;
+        const detail = document.createElement("dd");
+        detail.textContent = `${field.description || ""} Default: ${JSON.stringify(schema.defaults[field.key])}${field.unit ? " " + field.unit : ""}.`;
+        list.append(term, detail);
+      }
+      root.append(list);
+      for (const source of g.research_sources || []) {
+        if (!/^https:\/\//i.test(source.url || "")) continue;
+        const link = document.createElement("a");
+        link.href = source.url; link.textContent = source.title;
+        link.target = "_blank"; link.rel = "noopener noreferrer";
+        const p = document.createElement("p"); p.append(link); root.append(p);
+      }
     }
     function updateAvailability() {
       const module = modules.find((m) => m.id === model.moduleId);
       const available =
         module?.state.enabled &&
         Boolean(model.geometry);
-      $("save-profile").disabled = !available;
-      $("preview-design").disabled = !available || !module.actions?.includes("preview");
+      $("save-profile").disabled = !available || !module.actions?.includes("generate");
       $("generate-design").disabled = !available || !module.actions?.includes("generate");
       const selectedProfile =
         profiles.find((p) => p.id === profile?.id) || profile;
@@ -299,9 +342,9 @@
         $("save-profile").disabled = true;
       $("selection-state").textContent = available
         ? model.geometry.agent_handoff === true
-          ? ["preview", "generate"].every((action) => module.actions?.includes(action))
+          ? module.actions?.includes("generate")
             ? "Agent handoff supported · geometry checks required"
-            : "Manual only · agent handoff requires preview and generate"
+            : "Unavailable · requires Generate"
           : "Manual only · no agent handoff"
         : model.moduleId
           ? "Module unavailable"
@@ -442,13 +485,14 @@
         model.selectGeometry(chosen.request.geometry_id);
         if (model.geometry?.version !== chosen.request.provider_version)
           throw Error("Profile provider unavailable");
-        model.draft = clone(chosen.request);
-        if (chosen.request.quality === "final")
-          $("final-resolution").value = chosen.request.resolution;
-        else $("preview-resolution").value = chosen.request.resolution;
+        model.draft = {...clone(chosen.request), quality: "final",
+          resolution: chosen.request.quality === "final" && chosen.request.resolution >= 96
+            ? chosen.request.resolution : 128};
+        $("final-resolution").value = model.draft.resolution;
         renderFields();
         renderModules();
-        message("");
+        message(chosen.request.quality !== "final" || chosen.request.resolution < 96
+          ? "Loaded as high-resolution STL draft. Save to update profile." : "");
       }
     });
     $("new-profile").onclick = () => {
@@ -465,10 +509,9 @@
         generation = editGeneration;
       const request = readDraft();
       const module = modules.find((m) => m.id === model.moduleId);
-      request.quality = request.quality || (module?.actions?.includes("preview") ? "preview" : "final");
-      request.resolution = numberValue(
-        request.quality === "final" ? "final-resolution" : "preview-resolution",
-      );
+      if (!module?.actions?.includes("generate")) throw Error("Module requires Generate");
+      request.quality = "final";
+      request.resolution = numberValue("final-resolution");
       const body = { name: $("profile-name").value, request };
       const saved = await api(
         profile ? `/profiles/${profile.id}` : "/profiles",
@@ -505,35 +548,25 @@
       const raw = $(id).value;
       return raw.trim() === "" ? null : Number(raw);
     }
-    async function submit(quality) {
+    async function submit() {
       const module = modules.find((m) => m.id === model.moduleId);
-      if (!module?.state.enabled || !module.actions?.includes(quality === "final" ? "generate" : "preview"))
+      if (!module?.state.enabled || !module.actions?.includes("generate"))
         throw Error("Module does not support this action");
       const request = readDraft();
-      request.quality = quality;
-      request.resolution = numberValue(
-        quality === "preview" ? "preview-resolution" : "final-resolution",
-      );
+      request.quality = "final";
+      request.resolution = numberValue("final-resolution");
       const job = await api("/jobs", "POST", {
         request,
         idempotency_key: crypto.randomUUID(),
       });
-      if (quality === "preview") desiredJob = job.id;
-      message(
-        `${quality === "preview" ? "Preview" : "Generation"} queued`,
-        false,
-        job.id,
-      );
+      desiredJob = job.id;
+      message("STL generation queued", false, job.id);
       await pollJobs();
     }
-    for (const [id, quality] of [
-      ["preview-design", "preview"],
-      ["generate-design", "final"],
-    ])
-      $(id).onclick = action(async () => {
-        $(id).disabled = true;
+      $("generate-design").onclick = action(async () => {
+        $("generate-design").disabled = true;
         try {
-          await submit(quality);
+          await submit();
         } finally {
           updateAvailability();
         }
@@ -570,7 +603,7 @@
         }
         if (job.state === "succeeded") {
           const show = button(
-            job.request.quality === "preview" ? "View preview" : "View final",
+            job.request.quality === "preview" ? "View legacy preview" : "View STL",
             () => {
               desiredJob = job.id;
               return showJob(job);
@@ -605,7 +638,7 @@
       const notice = jobs.find((j) => j.id === noticeJob);
       if (notice && !["queued", "running"].includes(notice.state))
         message(
-          `${notice.request.quality === "preview" ? "Preview" : "Generation"} ${notice.state}${notice.error ? `: ${notice.error.message}` : ""}`,
+          `STL generation ${notice.state}${notice.error ? `: ${notice.error.message}` : ""}`,
           ["failed", "interrupted"].includes(notice.state),
         );
       const selected = jobs.find((j) => j.id === desiredJob);
@@ -618,6 +651,18 @@
         return null;
       }
     }
+    let viewerColor;
+    try { viewerColor = normalizeColor(localStorage.getItem("ax4lab.design.color")); }
+    catch { viewerColor = normalizeColor(null); }
+    $("stl-color").value = viewerColor;
+    $("stl-color").oninput = () => {
+      viewerColor = normalizeColor($("stl-color").value);
+      try { localStorage.setItem("ax4lab.design.color", viewerColor); } catch {}
+      if (viewer) {
+        viewer.actor.getProperty().setColor(...colorRGB(viewerColor));
+        viewer.win.getRenderWindow().render();
+      }
+    };
     function makeViewer() {
       const win = vtk.Rendering.Misc.vtkGenericRenderWindow.newInstance({
         background: [0.97, 0.98, 1],
@@ -626,8 +671,10 @@
       const renderer = win.getRenderer(),
         mapper = vtk.Rendering.Core.vtkMapper.newInstance(),
         actor = vtk.Rendering.Core.vtkActor.newInstance();
+      // Binary STL facet attributes must not override the user's solid color.
+      mapper.setScalarVisibility(false);
       actor.setMapper(mapper);
-      actor.getProperty().setColor(0.24, 0.58, 0.72);
+      actor.getProperty().setColor(...colorRGB(viewerColor));
       renderer.addActor(actor);
       const camera = renderer.getActiveCamera();
       const saved = savedCamera();
@@ -652,7 +699,7 @@
       win.getInteractor().onEndAnimation(save);
       window.addEventListener("pagehide", save);
       new ResizeObserver(() => win.resize()).observe($("design-viewer"));
-      return { win, renderer, mapper, camera, save, hasCamera: Boolean(saved) };
+      return { win, renderer, mapper, actor, camera, save, hasCamera: Boolean(saved) };
     }
     const loadArtifact = createArtifactLoader(async (url) => {
       const response = await fetch(url);
@@ -747,6 +794,9 @@
     window.addEventListener("pagehide", () => clearTimeout(timer));
   }
   return {
+    parameterGroups,
+    normalizeColor,
+    colorRGB,
     parameters,
     orientationAxes,
     errorMessage,

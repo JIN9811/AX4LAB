@@ -6,17 +6,30 @@ label: Fischer-Koch S
 representations: [sheet, network_positive, network_negative]
 default_representation: sheet
 fields:
-  - {key: cell_size_mm, label: Cell size, type: number, min: 0.1, max: 200, unit: mm}
-  - {key: wall_thickness_mm, label: Target wall thickness, type: number, min: 0.05, max: 20, unit: mm}
+  - {key: cell_size_mm, label: Cell size, type: number, min: 0.1, max: 200, unit: mm, description: "Conventional periodic cell edge length; sets feature spacing, not specimen dimensions."}
+  - {key: wall_thickness_mm, label: Target wall thickness, type: number, min: 0.05, max: 20, unit: mm, description: "Full physical target wall thickness; finite sampling and curved junctions affect the realized local wall."}
 defaults: {cell_size_mm: 16.666666666666668, wall_thickness_mm: 1.4}
 representation_parameters:
   network_positive:
     fields:
-      - {key: cell_size_mm, label: Cell size, type: number, min: 0.1, max: 200, unit: mm}
-      - {key: iso_level, label: Dimensionless iso level, type: number, min: -2, max: 2}
+      - {key: cell_size_mm, label: Cell size, type: number, min: 0.1, max: 200, unit: mm, description: "Conventional periodic cell edge length; sets feature spacing, not specimen dimensions."}
+      - {key: iso_level, label: Dimensionless iso level, type: number, min: -2, max: 2, description: "Dimensionless implicit-field threshold; not a wall thickness or a directly prescribed density."}
     defaults: {cell_size_mm: 12, iso_level: 0}
   network_negative:
     fields:
-      - {key: cell_size_mm, label: Cell size, type: number, min: 0.1, max: 200, unit: mm}
-      - {key: iso_level, label: Dimensionless iso level, type: number, min: -2, max: 2}
+      - {key: cell_size_mm, label: Cell size, type: number, min: 0.1, max: 200, unit: mm, description: "Conventional periodic cell edge length; sets feature spacing, not specimen dimensions."}
+      - {key: iso_level, label: Dimensionless iso level, type: number, min: -2, max: 2, description: "Dimensionless implicit-field threshold; not a wall thickness or a directly prescribed density."}
     defaults: {cell_size_mm: 12, iso_level: 0}
+design_family: tpms
+parameter_roles:
+  cell_size_mm: design
+  wall_thickness_mm: design
+  iso_level: design
+default_basis: "Editable project starting values for a 30 mm specimen crop, not universal optima or paper-calibrated material properties."
+design_notes:
+  - "Sheet mode uses a physical target wall thickness; network modes use a dimensionless iso level and expose no wall-thickness input."
+  - "Cell size and iso level do not prescribe exact relative density; inspect the generated mesh volume fraction."
+  - "Implicit approximations and finite-grid wall sampling are implementation limits, not validated physical performance."
+research_sources:
+  - title: "TPMSgen: shell and skeletal TPMS parameterizations"
+    url: https://github.com/albertforesg/TPMSgen

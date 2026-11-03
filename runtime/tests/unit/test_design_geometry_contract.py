@@ -60,14 +60,15 @@ def test_defaults_are_explicit_and_request_hash_ignores_mapping_order(catalog):
     normalized = normalize_request(request(), catalog)
     assert normalized["schema"] == "ax4lab.geometry_request.v1"
     assert normalized["representation"] == "sheet"
-    assert normalized["quality"] == "preview"
+    assert normalized["quality"] == "final"
+    assert normalized["resolution"] == 128
     assert normalized["orientation_deg"] == [0., 0., 0.]
     assert normalized["parameters"]["cell_size_mm"] == 5.
     assert normalized["parameters"]["wall_thickness_mm"] == 0.8
     assert normalized["seed"] is None
     assert normalize_request(normalized, catalog) == normalized
     assert request_sha256(normalized) == request_sha256(dict(reversed(list(normalized.items()))))
-    assert request_sha256(normalized) != request_sha256({**normalized, "quality": "final"})
+    assert request_sha256(normalized) != request_sha256({**normalized, "quality": "preview"})
 
 
 def install_provider(root, *, stochastic=False):
@@ -155,7 +156,7 @@ def test_preview_only_module_rejects_final_in_api_and_engine(tmp_path):
     service = DesignService(tmp_path / "memory", tmp_path / "artifacts", catalog=catalog)
     app = FastAPI()
     app.include_router(create_router(lambda: service))
-    req = request(module_id="fixture", geometry_id="slab")
+    req = request(module_id="fixture", geometry_id="slab", quality="preview")
     try:
         with TestClient(app, base_url="http://localhost", client=("127.0.0.1", 1)) as client:
             assert client.post("/api/design/validate", json={"request": req}).status_code == 200
@@ -300,7 +301,7 @@ def test_repeatable_receipts_and_immutable_contained_artifacts(tmp_path):
     other = generate_geometry(req, tmp_path / "b", identity={"candidate_id": "candidate_1"}, catalog=cat)
     assert receipt == other
     assert receipt["manufacturing_ready"] is False
-    assert receipt["quality"] == "preview"
+    assert receipt["quality"] == "final"
     assert json.loads((tmp_path / "a" / "receipt.json").read_text()) == receipt
     with pytest.raises(FileExistsError):
         generate_geometry(req, tmp_path / "a", identity={}, catalog=cat)
@@ -351,7 +352,7 @@ def test_provider_accuracy_gate_rejects_final_but_labels_preview(tmp_path):
     req = request(module_id="fixture", geometry_id="slab")
     with pytest.raises(ValueError, match="insufficient_wall_resolution"):
         generate_geometry({**req, "quality": "final"}, tmp_path / "final", identity={}, catalog=cat)
-    preview = generate_geometry(req, tmp_path / "preview", identity={}, catalog=cat)
+    preview = generate_geometry({**req, "quality": "preview"}, tmp_path / "preview", identity={}, catalog=cat)
     assert not preview["checks"]["provider_validation"]["ok"]
     assert preview["final_geometry_valid"] is False
 

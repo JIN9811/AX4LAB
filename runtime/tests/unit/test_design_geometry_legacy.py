@@ -52,7 +52,7 @@ def test_tool_adapter_preserves_nested_request_receipt_and_unknown_mass(tmp_path
         generate_tool({"geometry_request": req})
 
 
-@pytest.mark.parametrize("quality,flag,error", [("final", True, "preview quality"),
+@pytest.mark.parametrize("quality,flag,error", [("final", True, "CPU pool"),
     ("preview", "yes", "boolean"), ("preview", True, "CPU pool")])
 def test_preview_render_requires_explicit_quality_flag_and_cpu_pool(tmp_path, quality, flag, error):
     from workspaces.design.tool_adapter import generate_tool

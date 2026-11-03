@@ -113,6 +113,10 @@ def create_router(service, templates=None):
     def geometries(module_id: str):
         return call(lambda s:{'geometries':s.geometries(module_id)})
 
+    @router.get('/api/design/modules/{module_id}/geometries/{geometry_id}/contract')
+    def contract(module_id: str, geometry_id: str, representation: str | None = None):
+        return call(lambda s:s.contract(module_id, geometry_id, representation))
+
     @router.get('/api/design/modules/{module_id}/state')
     def state(module_id: str):
         return call(lambda s:s.module_state(module_id))

@@ -7,8 +7,22 @@ representations: [extruded_wall]
 default_representation: extruded_wall
 stochastic: false
 fields:
-  - {key: inclined_length_mm, label: Inclined wall length, type: number, min: 0.1, max: 200, unit: mm}
-  - {key: vertical_length_mm, label: Vertical wall length, type: number, min: 0.1, max: 200, unit: mm}
-  - {key: angle_deg, label: Signed angle from horizontal, type: number, min: 5, max: 75, unit: deg}
-  - {key: wall_thickness_mm, label: Full wall thickness, type: number, min: 0.1, max: 20, unit: mm}
+  - {key: inclined_length_mm, label: Inclined wall length, type: number, min: 0.1, max: 200, unit: mm, description: "Centerline length of an inclined honeycomb wall."}
+  - {key: vertical_length_mm, label: Vertical wall length, type: number, min: 0.1, max: 200, unit: mm, description: "Centerline length of a vertical honeycomb wall."}
+  - {key: angle_deg, label: Signed angle from horizontal, type: number, min: 5, max: 75, unit: deg, description: "Signed angle of inclined walls measured from horizontal; negative angles form reentrant cells."}
+  - {key: wall_thickness_mm, label: Full wall thickness, type: number, min: 0.1, max: 20, unit: mm, description: "Full physical target wall thickness; finite sampling and curved junctions affect the realized local wall."}
 defaults: {inclined_length_mm: 6, vertical_length_mm: 12, angle_deg: 30, wall_thickness_mm: 1.4}
+design_family: honeycomb
+parameter_roles:
+  inclined_length_mm: design
+  vertical_length_mm: design
+  angle_deg: design
+  wall_thickness_mm: design
+default_basis: "Editable project starting values for a 30 mm specimen crop, not universal optima or paper-calibrated material properties."
+design_notes:
+  - "Inclined and vertical wall centerline lengths, signed angle and full wall thickness control the planar cell."
+  - "Specimen z dimension controls extrusion crop; it is separate from planar unit-cell geometry."
+  - "The 6 mm inclined / 12 mm vertical / 30 degree default is a vertically stretched hexagon, not a regular hexagon."
+research_sources:
+  - title: "NASA: honeycomb geometry and mechanical response"
+    url: https://ntrs.nasa.gov/api/citations/20200002443/downloads/20200002443.pdf

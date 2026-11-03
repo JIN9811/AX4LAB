@@ -32,16 +32,29 @@ the GUI discloses the boundary. This flag is not manufacturing approval.
 
 Module `actions` must be a nonempty unique subset of `[preview, generate]`, and
 `output_kinds` must be `[stl]`. Missing/malformed/unknown actions and outputs are
-excluded during discovery. Preview maps to `quality: preview`; Generate maps to
-`quality: final`. API/engine validation enforces the same controls as the GUI.
-Custom executable actions are not supported.
-Generate-only modules support manual final generation and final-quality profiles;
-the GUI uses final quality for new profiles when Preview is absent. Effective
-agent support additionally requires both `preview` and `generate`, even when a
-geometry declares `agent_handoff: true`. The existing agent workflow mandates
-separate preview evidence, so incompatible modules are rejected before generation,
-not by bypassing action checks or fabricating a preview. The GUI discloses this
-effective manual-only status. Two-action modules retain their existing behavior.
+excluded during discovery. Generate maps to `quality: final`; the old Preview
+action remains an internal compatibility capability only. New public jobs use
+final quality, default resolution 128, minimum 96 and maximum 160.
+Custom executable actions are not supported. Generate-only modules support both
+the workspace and agent handoff when `agent_handoff: true`. Agent PNGs render the
+same final geometry; they do not require a second Preview action or STL.
+
+Geometry metadata may declare `design_family`, `parameter_roles` (field key to
+`design`, `fixed` or `numerical`), field `description`, `design_notes`,
+`default_basis`, `research_sources` (`title` and HTTPS `url`), and `default_seed`.
+Role keys can cover the union of all representation fields; the contract and UI
+only present the active fields. Missing role means `design`. URLs are reference
+metadata only and never executable provider or asset locations.
+
+`GET /api/design/modules/{module}/geometries/{geometry}/contract?representation=...`
+returns `ax4lab.geometry_input_contract.v1`, with active `parameters` including
+roles/defaults and a normalized `request_template`. Other local agents can copy
+that template, override inputs, call `/api/design/validate`, then `/api/design/jobs`
+and poll the returned job ID. Unknown parameters and unsupported representations
+are errors. Omitted stochastic seed uses its declared default; explicit zero stays
+zero and required explicit null remains invalid. Color belongs to the viewer and
+must not be added to geometry inputs.
+
 Its fixed local wrapper implements `generate_field(grid, request)`:
 
 ```python

@@ -63,17 +63,17 @@ def normalize_request(request: dict, catalog: DesignCatalog) -> dict:
             parameters[field["key"]] = [float(x) for x in parameters[field["key"]]]
     size = _vector(request.get("specimen_size_mm", [30, 30, 30]), "specimen_size_mm", positive=True)
     orientation = _vector(request.get("orientation_deg", [0, 0, 0]), "orientation_deg")
-    quality = request.get("quality", "preview")
+    quality = request.get("quality", "final")
     if not isinstance(quality, str) or quality not in {"preview", "final"}:
         raise ValueError("quality must be preview or final")
     module = next(m for m in catalog.modules if m["id"] == record["module_id"])
     action = "generate" if quality == "final" else "preview"
     if action not in module["descriptor"]["actions"]:
         raise ValueError(f"Module does not support requested action: {action}")
-    resolution = request.get("resolution", 48 if quality == "preview" else 96)
+    resolution = request.get("resolution", 48 if quality == "preview" else 128)
     if type(resolution) is not int or not 16 <= resolution <= MAX_RESOLUTION:
         raise ValueError(f"resolution must be an integer in [16, {MAX_RESOLUTION}]")
-    seed = request.get("seed")
+    seed = request.get("seed", descriptor.get("default_seed"))
     if seed is not None and (type(seed) is not int or not 0 <= seed <= 2**32 - 1):
         raise ValueError("seed must be a uint32 integer")
     if (descriptor.get("stochastic", False) or parameters.get("defect_ratio", 0) > 0) and seed is None:

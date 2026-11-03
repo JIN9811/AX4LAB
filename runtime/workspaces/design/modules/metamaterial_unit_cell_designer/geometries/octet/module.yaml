@@ -7,6 +7,20 @@ representations: [strut]
 default_representation: strut
 stochastic: false
 fields:
-  - {key: cell_size_mm, label: Cell size, type: number, min: 0.1, max: 200, unit: mm}
-  - {key: strut_diameter_mm, label: Strut diameter, type: number, min: 0.1, max: 50, unit: mm}
+  - {key: cell_size_mm, label: Cell size, type: number, min: 0.1, max: 200, unit: mm, description: "Conventional periodic cell edge length; sets feature spacing, not specimen dimensions."}
+  - {key: strut_diameter_mm, label: Strut diameter, type: number, min: 0.1, max: 50, unit: mm, description: "Full circular strut diameter, not radius; junction unions change measured solid fraction."}
 defaults: {cell_size_mm: 10, strut_diameter_mm: 2}
+design_family: periodic_strut
+parameter_roles:
+  cell_size_mm: design
+  strut_diameter_mm: design
+default_basis: "Editable project starting values for a 30 mm specimen crop, not universal optima or paper-calibrated material properties."
+design_notes:
+  - "Cell size is the conventional cubic cell edge; strut diameter is a full diameter, not radius."
+  - "Graph topology is fixed by the selected provider; density is measured after junction union and specimen cropping."
+  - "Literature mechanical trends depend on topology, material and manufacturing; these defaults are not fitted mechanical models."
+research_sources:
+  - title: "Strut-based lattice architectures and mechanical behavior"
+    url: https://pubs.acs.org/doi/10.1021/acsbiomaterials.0c01708
+  - title: "Effective properties of the octet-truss lattice material"
+    url: https://www.sciencedirect.com/science/article/pii/S0022509601000102

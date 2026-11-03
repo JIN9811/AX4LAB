@@ -64,9 +64,10 @@ assert len(catalog.geometries) == 14
 assert Path(sys.modules['workspaces.design.catalog'].__file__).is_relative_to(root)
 for record in catalog.geometries.values():
     assert 'utils/source_identity.py' in record['source_files']
+    assert 'workspaces/design/contracts.py' in record['source_files']
     assert record['provider_path'].is_file() and record['descriptor_path'].is_file()
 from workspaces.design.engine import normalize_request
-assert normalize_request(dict(module_id='metamaterial_unit_cell_designer',geometry_id='simple_cubic',provider_version='1.0.0'),catalog)['resolution'] == 48
+assert normalize_request(dict(module_id='metamaterial_unit_cell_designer',geometry_id='simple_cubic',provider_version='1.0.0'),catalog)['resolution'] == 128
 from agents.design import geometry_adapter
 assert Path(geometry_adapter.__file__).is_relative_to(root)
 from workspaces.design.engine import generate_geometry
@@ -80,6 +81,9 @@ with TestClient(app, base_url='http://localhost', client=('127.0.0.1',1)) as c:
     page = c.get('/design')
     assert page.status_code == 200
     assert len(c.get('/api/design/modules/metamaterial_unit_cell_designer/geometries').json()['geometries']) == 14
+    contract = c.get('/api/design/modules/metamaterial_unit_cell_designer/geometries/spinodoid/contract')
+    assert contract.status_code == 200, contract.text
+    assert contract.json()['request_template']['seed'] == 42
     for asset in ('design_workspace.js','design_workspace.css','workspace_icons/design.svg'):
         assert c.get('/static/'+asset).status_code == 200, asset
     for asset in re.findall(r'(?:src|href)="(/static/[^" ]+)"', page.text):

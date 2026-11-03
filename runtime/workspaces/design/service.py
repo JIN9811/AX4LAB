@@ -7,6 +7,7 @@ import threading
 import uuid
 
 from .catalog import DesignCatalog
+from .contracts import geometry_input_contract
 from .engine import normalize_request, request_sha256
 from .jobs import TERMINAL, contained, verify_receipt
 from .profiles import DesignError, Store
@@ -67,6 +68,17 @@ class DesignService:
         with self.lock:
             record = self._module(module_id)
             return contained(record['root'], record['icon_path'])
+
+    def contract(self, module_id, geometry_id, representation=None):
+        with self.lock:
+            self._module(module_id)
+            record = self.catalog.geometries.get((module_id, geometry_id))
+            if record is None:
+                raise DesignError('not_found', 'Geometry unavailable')
+            try:
+                return geometry_input_contract(self.catalog, record, representation)
+            except (ValueError, TypeError, KeyError) as exc:
+                raise DesignError('invalid_request', str(exc)) from exc
 
     def refresh(self):
         with self.lock:
@@ -163,6 +175,8 @@ class DesignService:
                 if validated['request'] != existing['request']:
                     raise DesignError('idempotency_conflict', 'Conflicting idempotency key')
                 return self.job(existing['id'])
+            if validated['request']['quality'] != 'final' or validated['request']['resolution'] < 96:
+                raise DesignError('invalid_request', 'New Design jobs require final quality and resolution >= 96')
             if self.executor is None:
                 from utils.compute_pool import compute_enabled
                 if not compute_enabled():

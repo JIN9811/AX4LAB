@@ -71,7 +71,7 @@ def test_job_order_is_newest_first_after_reload_and_retry_does_not_reorder(tmp_p
     try:
         first = service.submit(request(), idempotency_key='first-order')
         assert worker.ready.wait(2)
-        second = service.submit(request(resolution=64), idempotency_key='second-order')
+        second = service.submit(request(resolution=96), idempotency_key='second-order')
         assert [job['id'] for job in service.jobs()] == [second['id'], first['id']]
         assert first['created_sequence'] < second['created_sequence']
         assert service.submit(request(), idempotency_key='first-order')['created_sequence'] == first['created_sequence']
@@ -85,7 +85,7 @@ def test_job_order_is_newest_first_after_reload_and_retry_does_not_reorder(tmp_p
         data = deepcopy(reloaded.store.data)
         data['jobs'][first['id']].pop('created_sequence')
         reloaded.store.save(data)
-        third = reloaded.submit(request(resolution=80), idempotency_key='third-order')
+        third = reloaded.submit(request(resolution=160), idempotency_key='third-order')
         assert third['created_sequence'] > second['created_sequence']
         assert [job['id'] for job in reloaded.jobs()] == [third['id'], second['id'], first['id']]
     finally:
@@ -141,7 +141,7 @@ def test_idempotency_queue_pin_refresh_and_no_resubmission(service):
     original['geometry_id'] = 'missing'
     assert s.submit(request(), idempotency_key='a')['id'] == a['id']
     with pytest.raises(DesignError, match='idempotency'):
-        s.submit(request(resolution=64), idempotency_key='a')
+        s.submit(request(resolution=96), idempotency_key='a')
     b = s.submit(request(), idempotency_key='b')
     with pytest.raises(DesignError, match='queue'):
         s.submit(request(), idempotency_key='c')

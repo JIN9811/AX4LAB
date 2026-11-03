@@ -346,17 +346,17 @@ test("delayed delete cannot clear another selected profile or change next update
   } finally {h.close();}
 });
 
-test("preview-only module controls and manual-only provider disclosure follow metadata", async () => {
+test("preview-only modules cannot create new workspace geometry", async () => {
   const h=await bootHarness(["preview"]);
   try {
     await h.choose("b");
-    assert.equal(h.node("preview-design").disabled, false);
     assert.equal(h.node("generate-design").disabled, true);
+    assert.equal(h.node("save-profile").disabled, true);
     assert.match(h.node("selection-state").textContent, /Manual only/);
     await h.node("generate-design").onclick(); // scripted calls must also fail closed
     assert.equal(h.sent.filter((r) => r.url.endsWith("/jobs")).length, 0);
     await h.choose("a");
-    assert.match(h.node("selection-state").textContent, /Manual only.*preview and generate/);
+    assert.match(h.node("selection-state").textContent, /requires Generate/);
   } finally {h.close();}
 });
 
@@ -370,12 +370,35 @@ for (const actions of [["generate"], ["preview", "generate"]]) {
       await h.node("save-profile").onclick();
       assert.equal(h.sent.at(-1).url, "/api/design/profiles");
       assert.equal(h.sent.at(-1).method, "POST");
-      assert.equal(h.sent.at(-1).body.request.quality, actions.length === 1 ? "final" : "preview");
-      assert.equal(h.sent.at(-1).body.request.resolution, actions.length === 1 ? 96 : 48);
+      assert.equal(h.sent.at(-1).body.request.quality, "final");
+      assert.equal(h.sent.at(-1).body.request.resolution, 96);
       assert.equal(h.node("generate-design").disabled, false);
-      assert.equal(h.node("preview-design").disabled, actions.length === 1);
-      assert.match(h.node("selection-state").textContent, actions.length === 1
-        ? /Manual only.*preview and generate/ : /Agent handoff supported/);
+      assert.match(h.node("selection-state").textContent, /Agent handoff supported/);
     } finally {h.close();}
   });
 }
+
+test("parameter roles group only active fields without dropping values", () => {
+  const g = {...geometry, parameter_roles:{amount:"numerical",level:"design"}};
+  assert.deepEqual(Design.parameterGroups(g,"solid"), {design:[],settings:["amount"]});
+  assert.deepEqual(Design.parameterGroups(g,"network"), {design:["level"],settings:[]});
+  assert.deepEqual(Design.parameterGroups(geometry,"solid"), {design:["amount"],settings:[]});
+});
+test("loading an old preview profile edits a final draft without rewriting history", async () => {
+  const h=await bootHarness();
+  try {
+    await h.choose("a");
+    assert.equal(h.node("final-resolution").value,"128");
+    assert.equal(h.sent.length,0);
+    await h.node("save-profile").onclick();
+    assert.equal(h.sent.at(-1).body.request.quality,"final");
+    assert.equal(h.sent.at(-1).body.request.resolution,128);
+  } finally {h.close();}
+});
+test("color preferences produce bounded RGB and reject non-colors", () => {
+  assert.deepEqual(Design.colorRGB("#ff8000"),[1,128/255,0]);
+  assert.equal(Design.normalizeColor("#AAbb00"),"#aabb00");
+  for (const bad of [null,"red","#fff","javascript:bad"]) {
+    assert.equal(Design.normalizeColor(bad),"#3d94b8");
+  }
+});

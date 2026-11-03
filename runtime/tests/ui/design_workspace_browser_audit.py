@@ -59,6 +59,7 @@ def fixture_server(root):
         geometry['fields'] += [{'key':'mode','label':'Fixture mode','type':'enum','options':['plain','detail']},
             {'key':'note','label':'Fixture note','type':'text','visible_when':{'field':'mode','equals':'detail'}}]
         geometry['defaults'].update(mode='plain',note='retained')
+        geometry.setdefault('parameter_roles', {}).update(mode='fixed', note='fixed')
         geometry_file.write_text(yaml.safe_dump(geometry))
         # Explicit fixture wrapper owns its graph; its public identity is not a
         # built-in graph name. It is deliberately manual-only.
@@ -125,6 +126,7 @@ def audit(output, chromium):
         page.screenshot(path=str(output/'catalog.png'),full_page=True,animations='disabled')
         assert page.get_by_role('button',name='Third Fixture',exact=True).bounding_box()['width'] > 100
         page.get_by_role('button',name='Third Fixture',exact=True).click()
+        page.locator('#design-settings-panel').evaluate('(e)=>e.open=true')
         expect(page.get_by_label('Fixture mode')).to_be_visible()
         expect(page.get_by_label('Fixture note')).to_be_hidden()
         page.get_by_label('Fixture mode').select_option('detail')
@@ -136,10 +138,10 @@ def audit(output, chromium):
         page.get_by_label('Cell size',exact=True).fill('11')
         page.get_by_role('button',name='Refresh modules',exact=True).click()
         expect(page.get_by_label('Cell size',exact=True)).to_have_value('11')
-        page.locator('#preview-resolution').fill('17.5')
-        page.get_by_role('button',name='Preview',exact=True).click()
+        page.locator('#final-resolution').fill('17.5')
+        page.get_by_role('button',name='Generate STL',exact=True).click()
         expect(page.locator('#design-message')).to_contain_text('resolution must be an integer')
-        page.locator('#preview-resolution').fill('48')
+        page.locator('#final-resolution').fill('128')
         page.get_by_label('Cell size',exact=True).fill('10')
         page.get_by_label('Profile name',exact=True).fill('Browser cubic')
         page.get_by_role('button',name='Save profile',exact=True).click()
@@ -157,16 +159,17 @@ def audit(output, chromium):
         expect(second.locator('#design-message')).to_contain_text('Stale or invalid revision')
         expect(second.get_by_label('Cell size',exact=True)).to_have_value('13')
         second.close()
-        # Saving an existing final profile must not silently change its quality/resolution.
+        # A legacy low-resolution profile is upgraded only in the editing draft.
         pinned = service.create_profile({'name':'Pinned final','request':{'module_id':MODULE,
             'geometry_id':'simple_cubic','provider_version':'1.0.0','quality':'final','resolution':80}})
         page.get_by_role('button',name='Refresh modules',exact=True).click()
         page.locator('#profile-select').select_option(pinned['id'])
-        expect(page.locator('#final-resolution')).to_have_value('80')
+        expect(page.locator('#final-resolution')).to_have_value('128')
+        assert service.profile(pinned['id'])['request']['resolution']==80
         page.get_by_role('button',name='Save profile',exact=True).click()
         expect(page.locator('#save-state')).to_have_text('Saved')
         assert service.profile(pinned['id'])['request']['quality']=='final'
-        assert service.profile(pinned['id'])['request']['resolution']==80
+        assert service.profile(pinned['id'])['request']['resolution']==128
         page.once('dialog',lambda dialog:dialog.accept())
         page.get_by_role('button',name='Delete',exact=True).click()
         expect(page.locator('#profile-select')).not_to_contain_text('Pinned final')
@@ -174,14 +177,14 @@ def audit(output, chromium):
         page.locator('#profile-select').select_option(profile_id)
         expect(page.get_by_label('Cell size',exact=True)).to_have_value('12')
         page.get_by_label('Cell size',exact=True).fill('10')
-        page.get_by_role('button',name='Preview',exact=True).click()
+        page.get_by_role('button',name='Generate STL',exact=True).click()
         page.get_by_label('Cell size',exact=True).fill('14')
-        print('Preview submitted; checking real STL viewer',flush=True)
+        print('Final STL submitted; checking the same-file viewer',flush=True)
         expect(page.locator('#design-viewer')).to_have_attribute('data-job-id',__import__('re').compile('.+'),timeout=40000)
         preview_id=page.locator('#design-viewer').get_attribute('data-job-id')
         expect(page.get_by_label('Cell size',exact=True)).to_have_value('14')
         expect(page.locator('#result-title')).to_contain_text('simple_cubic')
-        expect(page.locator('#result-checks')).to_contain_text('Preview only')
+        assert service.job(preview_id)['receipt']['final_geometry_valid'] is True
         page.wait_for_timeout(3200)
         assert assets.count(url+f'/api/design/jobs/{preview_id}/artifacts/stl')==1,assets
         page.locator('#design-viewer').focus()
@@ -189,14 +192,19 @@ def audit(output, chromium):
         camera=page.evaluate("localStorage.getItem('ax4lab.design.camera')")
         assert camera
         page.get_by_label('Cell size',exact=True).fill('10')
-        page.get_by_role('button',name='Generate',exact=True).click()
+        page.locator('#final-resolution').fill('96')
+        page.get_by_role('button',name='Generate STL',exact=True).click()
         expect(page.locator('#design-jobs article').first).to_contain_text('final 96')
         expect(page.locator('#design-jobs article').first).to_contain_text('succeeded',timeout=40000)
-        expect(page.locator('#design-message')).to_have_text('Generation succeeded')
+        expect(page.locator('#design-message')).to_have_text('STL generation succeeded')
         final=service.jobs()[0]
         assert final['receipt']['final_geometry_valid'] is True
-        expect(page.locator('#design-viewer')).to_have_attribute('data-job-id',preview_id)
-        assert not any(final['id'] in asset for asset in assets)
+        expect(page.locator('#design-viewer')).to_have_attribute('data-job-id',final['id'])
+        assert assets.count(url+f'/api/design/jobs/{final["id"]}/artifacts/stl')==1
+        jobs_before_color = len(service.jobs())
+        page.locator('#stl-color').fill('#ea6d45')
+        assert page.evaluate("localStorage.getItem('ax4lab.design.color')") == '#ea6d45'
+        assert len(service.jobs()) == jobs_before_color
         with page.expect_download() as download:
             page.locator('#design-jobs article').first.get_by_text('Download STL').click()
         destination=output/'actual-final.stl'
@@ -234,7 +242,7 @@ def audit(output, chromium):
         page.get_by_label('Seed',exact=True).fill('42')
         page.locator('#final-resolution').fill('160')
         with page.expect_response(lambda response:response.url.endswith('/api/design/jobs') and response.request.method=='POST') as submitted:
-            page.get_by_role('button',name='Generate',exact=True).click()
+            page.get_by_role('button',name='Generate STL',exact=True).click()
         submit_response=submitted.value
         cancelled_job=submit_response.json()
         assert submit_response.status==202,cancelled_job
@@ -243,8 +251,8 @@ def audit(output, chromium):
         assert cancelled_job['request']['resolution']==160,cancelled_job
         cancelled_row=page.locator(f'#design-jobs [data-job-id="{cancelled_job["id"]}"]')
         expect(cancelled_row).to_contain_text('spinodoid')
-        page.locator('#preview-resolution').fill('17.5')
-        page.get_by_role('button',name='Preview',exact=True).click()
+        page.locator('#final-resolution').fill('17.5')
+        page.get_by_role('button',name='Generate STL',exact=True).click()
         expect(page.locator('#design-message')).to_contain_text('resolution must be an integer')
         cancelled_row.get_by_role('button',name='Cancel').click()
         expect(cancelled_row).to_contain_text('cancelled')
@@ -252,7 +260,7 @@ def audit(output, chromium):
         expect(cancelled_row.get_by_text('Download STL')).to_have_count(0)
         expect(page.locator('#result-title')).to_contain_text('simple_cubic')
         page.get_by_role('button',name='Disable Metamaterial Unit Cell Designer').click()
-        expect(page.get_by_role('button',name='Preview',exact=True)).to_be_disabled()
+        expect(page.get_by_role('button',name='Generate STL',exact=True)).to_be_disabled()
         expect(page.locator('#profile-select')).to_contain_text('Browser cubic · Unavailable')
         expect(page.locator('#result-download')).to_be_visible()
         page.get_by_role('button',name='Third Fixture',exact=True).click()
@@ -270,7 +278,8 @@ def audit(output, chromium):
         page.reload()
         expect(page.locator('#design-jobs article')).to_have_count(3)
         expect(page.locator('#profile-select')).to_contain_text('Browser cubic · Unavailable')
-        page.locator(f'[data-job-id="{preview_id}"]').get_by_role('button',name='View preview').click()
+        page.locator(f'#design-jobs [data-job-id="{preview_id}"]').get_by_role('button',name='View STL').click()
+        expect(page.locator('#stl-color')).to_have_value('#ea6d45')
         expect(page.locator('#design-viewer')).to_have_attribute('data-job-id',preview_id)
         assert json.loads(page.evaluate("localStorage.getItem('ax4lab.design.camera')"))==json.loads(camera)
         page.get_by_role('button',name='Third Fixture',exact=True).click()
@@ -283,10 +292,71 @@ def audit(output, chromium):
         evidence={'url':url+'/design','viewports':['1920x1080','390x844'],'browser':'Playwright; Browser plugin not available',
             'errors':errors,'software_renderer_warnings':render_warnings,'preview_id':preview_id,'final_id':final['id'],'final_bytes':destination.stat().st_size,
             'requests':len(requests),'cancelled_job':{key:cancelled_job[key] for key in ('id','request','request_sha256','created_sequence')},
-            'checks':'catalog, visibility, dirty inputs, numeric error, profile conflict, real preview/final download, camera, cancel, removal, reload, narrow'}
+            'checks':'catalog, visibility, dirty inputs, numeric error, profile conflict, same final STL viewing/download, color, camera, cancel, removal, reload, narrow'}
         (output/'evidence.json').write_text(json.dumps(evidence,indent=2))
         browser.close()
         print(json.dumps(evidence,indent=2))
+
+
+def parameter_probe(output, chromium):
+    """Real stochastic final meshes, public input contracts, and viewer-only color."""
+    output.mkdir(parents=True, exist_ok=True)
+    evidence = []
+    with tempfile.TemporaryDirectory(prefix='design-parameters-') as temporary, fixture_server(Path(temporary)) as (url, service, modules, pool), sync_playwright() as playwright:
+        browser = playwright.chromium.launch(executable_path=chromium, headless=True, args=['--enable-unsafe-swiftshader'])
+        page = browser.new_page(viewport={'width':1920, 'height':1080}, accept_downloads=True)
+        errors, posts = [], []
+        page.on('pageerror', lambda error:errors.append(str(error)))
+        page.on('request', lambda request:posts.append(request.post_data_json) if request.method=='POST' and request.url.endswith('/api/design/jobs') else None)
+        page.goto(url+'/design')
+        page.get_by_role('button', name='Metamaterial Unit Cell Designer', exact=True).click()
+        expect(page.locator('#preview-resolution')).to_have_count(0)
+        for geometry in ('spinodoid', 'voronoi'):
+            page.locator('#geometry-select').select_option(geometry)
+            expect(page.get_by_label('Seed', exact=True)).to_have_value('42')
+            expect(page.locator('#final-resolution')).to_have_value('128')
+            contract_response = page.request.get(url+f'/api/design/modules/{MODULE}/geometries/{geometry}/contract')
+            assert contract_response.status == 200
+            contract = contract_response.json()
+            assert contract['request_template']['seed'] == 42
+            if geometry == 'spinodoid':
+                expect(page.locator('#design-settings').get_by_label('Wave count', exact=True)).to_have_count(1)
+                expect(page.locator('#design-fields').get_by_label('GRF wavelength', exact=True)).to_be_visible()
+            with page.expect_response(lambda r:r.request.method=='POST' and r.url.endswith('/api/design/jobs')) as submitted:
+                page.get_by_role('button', name='Generate STL', exact=True).click()
+            assert submitted.value.status == 202, submitted.value.text()
+            job_id = submitted.value.json()['id']
+            expect(page.locator('#design-viewer')).to_have_attribute('data-job-id', job_id, timeout=120000)
+            job = service.job(job_id)
+            assert job['state'] == 'succeeded', job
+            assert job['request']['quality'] == 'final'
+            assert job['request']['resolution'] == 128
+            assert job['receipt']['final_geometry_valid'] is True
+            with page.expect_download() as download:
+                page.locator('#result-download').click()
+            destination = output/f'{geometry}.stl'
+            download.value.save_as(destination)
+            digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+            assert digest == job['receipt']['artifacts']['stl']['sha256']
+            before = len(posts)
+            page.locator('#stl-color').fill('#3d94b8')
+            original_pixels = page.locator('#design-viewer').screenshot()
+            page.locator('#stl-color').fill('#ea6d45')
+            changed_pixels = page.locator('#design-viewer').screenshot()
+            assert original_pixels != changed_pixels, 'Color control must change rendered mesh pixels'
+            assert page.evaluate("localStorage.getItem('ax4lab.design.color')") == '#ea6d45'
+            assert len(posts) == before
+            page.screenshot(path=str(output/f'{geometry}.png'), full_page=True)
+            evidence.append({'geometry':geometry, 'job_id':job_id, 'resolution':128,
+                'final_geometry_valid':True, 'stl_bytes':destination.stat().st_size, 'sha256':digest,
+                'contract_roles':{p['key']:p['role'] for p in contract['parameters']}})
+        page.reload()
+        expect(page.locator('#stl-color')).to_have_value('#ea6d45')
+        assert len(posts) == 2, posts
+        assert not errors, errors
+        browser.close()
+    (output/'parameter-evidence.json').write_text(json.dumps(evidence, indent=2))
+    print(json.dumps(evidence, indent=2), flush=True)
 
 
 async def selection_probe(output,chromium):
@@ -334,7 +404,7 @@ async def selection_probe(output,chromium):
                 if phase=='after_seed':
                     await release_refresh()
                 async with page.expect_response(lambda response:response.url.endswith('/api/design/jobs') and response.request.method=='POST') as submitted:
-                    await page.get_by_role('button',name='Generate',exact=True).click()
+                    await page.get_by_role('button',name='Generate STL',exact=True).click()
                 response=await submitted.value
                 job=await response.json()
                 assert response.status==202,job
@@ -515,8 +585,11 @@ if __name__=='__main__':
     parser.add_argument('--chromium',default=CHROMIUM)
     parser.add_argument('--selection-only',action='store_true')
     parser.add_argument('--draft-only',action='store_true')
+    parser.add_argument('--parameters-only',action='store_true')
     args=parser.parse_args()
-    if args.draft_only:
+    if args.parameters_only:
+        parameter_probe(args.output,args.chromium)
+    elif args.draft_only:
         asyncio.run(draft_probe(args.output,args.chromium))
     elif args.selection_only:
         asyncio.run(selection_probe(args.output,args.chromium))
