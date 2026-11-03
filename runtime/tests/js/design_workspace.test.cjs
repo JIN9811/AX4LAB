@@ -129,6 +129,23 @@ test("representation schemas replace inactive fields without geometry-name branc
     ["x", "y", "z"],
   );
 });
+test("stochastic geometry selection supplies a repeatable seed and refresh preserves user seed", async () => {
+  const model = Design.createModel();
+  const geometries = [geometry, ...["spinodoid", "voronoi"].map(id => ({...geometry, id, stochastic: true}))];
+  await model.selectModule("third", async () => ({geometries}));
+  assert.equal(model.draft.seed, null);
+  for (const id of ["spinodoid", "voronoi"]) {
+    model.selectGeometry(id);
+    assert.ok(Number.isInteger(model.draft.seed), `${id} must submit an integer seed`);
+    assert.ok(model.draft.seed >= 0 && model.draft.seed <= 4294967295);
+    const seed = model.draft.seed;
+    model.selectGeometry(id);
+    assert.equal(model.draft.seed, seed);
+    model.draft.seed = 0;
+    await model.selectModule("third", async () => ({geometries}));
+    assert.equal(model.draft.seed, 0);
+  }
+});
 test("catalog-driven selection accepts a third provider and rejects stale geometry responses", async () => {
   const model = Design.createModel();
   let release;

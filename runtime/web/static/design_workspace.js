@@ -113,7 +113,7 @@
               ),
               specimen_size_mm: [30, 30, 30],
               orientation_deg: [0, 0, 0],
-              seed: null,
+              seed: g.stochastic ? 42 : null,
             }
           : null;
         if (this.draft)
