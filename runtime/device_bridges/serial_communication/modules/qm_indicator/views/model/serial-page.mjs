@@ -6,6 +6,7 @@ const profileId=new URLSearchParams(window.location.search).get('profile_id') ||
 const backParams=new URLSearchParams({module_id:document.body.dataset.moduleId});
 if (profileId) backParams.set('profile_id',profileId);
 $('backSerial').href='/serial?'+backParams;
+$('fullWorkcell').href='/serial/modules/qm_indicator/views/workcell'+(profileId?'?'+new URLSearchParams({profile_id:profileId}):'');
 let timer=null, controller=null, stopped=false;
 
 function render(snapshot) {
@@ -23,7 +24,7 @@ function render(snapshot) {
     $(id).textContent=value==null ? '—' : String(value)+(unit?' '+unit:'');
   }
   $('serialSourceNote').textContent=snapshot.error || (profileId
-    ? '기존 통신 세션의 수신값입니다. 캘리브레이션 전에는 수동 간격을 유지합니다.'
+    ? '실측 기준: |DISP2| 677.8mm → 간격 30mm. 변위가 증가하면 간격이 줄어듭니다.'
     : 'QM100T 통신 화면에서 프로필을 선택하면 수신값을 연결할 수 있습니다.');
   applyCalibration(snapshot);
 }
@@ -32,7 +33,7 @@ function applyCalibration(snapshot) {
   if (!window.qm100tModel) return;
   try {
     const gap=calibratedGapMm(snapshot, measurementToGapMm, window.qm100tModel.limits);
-    $('calibrationState').textContent=gap===null ? '캘리브레이션 대기' : '캘리브레이션 적용';
+    $('calibrationState').textContent=gap===null ? '위치 반영 대기' : 'DISP2 · 위치 반영 중';
     if (gap!==null) window.qm100tModel.setGapMm(gap);
   } catch (error) {
     $('calibrationState').textContent='캘리브레이션 오류';

@@ -23,7 +23,7 @@ def test_qm_model_deployment_is_complete_and_preserves_corrected_geometry():
     root=Path(__file__).resolve().parents[2]
     contract=json.loads((root/'distribution-files.json').read_text())
     assets=root/'device_bridges/serial_communication/modules/qm_indicator/views/model'
-    for path in assets.rglob('*'):
+    for path in assets.parent.rglob('*'):
         if path.is_file():
             relative=path.relative_to(root).as_posix()
             assert relative in contract['wheel'],relative

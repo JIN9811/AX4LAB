@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="ko">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<base href="/api/serial/modules/qm_indicator/views/workcell/assets/">
+<title>AX4LAB · QM100T 전체 작업공간</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#edf0ec;color:#23332d;font:14px system-ui}header{min-height:60px;display:flex;align-items:center;gap:24px;padding:12px 24px;border-bottom:1px solid #dbe2db;background:white;flex-wrap:wrap}header strong{margin-right:auto}a{color:#286e59;text-decoration:none}iframe{display:block;width:100%;height:calc(100dvh - 96px);border:0}details{padding:8px 24px;background:#fff;font-size:12px;color:#59675e}summary{cursor:pointer}code{overflow-wrap:anywhere}@media(max-width:640px){header{gap:12px;padding:10px 16px}iframe{height:calc(100dvh - 128px)}}
+</style>
+<header><a id="serial" href="/serial?module_id=qm_indicator">← QM100T 통신</a><strong>전체 모델 · 로봇 + UTM</strong><a id="standalone" href="http://127.0.0.1:8878/" target="_blank" rel="noopener">넓게 열기 ↗</a></header>
+<iframe id="workcell" title="QM100T와 양팔 작업대 전체 모델"></iframe>
+<details><summary>모델이 표시되지 않을 때</summary><p>장비 PC의 로컬 작업공간 뷰어가 필요합니다. 실제 MoveIt 작업공간에서 <code>python3 tools/workcell_preview.py</code>로 실행한 뒤 새로고침하세요. 이 페이지는 기존 수신값을 표시하며 장비 연결이나 이동 명령을 보내지 않습니다.</p></details>
+<script type="module">
+const profile=new URLSearchParams(location.search).get('profile_id');
+const query=new URLSearchParams(profile?{profile_id:profile}:{});
+const viewer=new URL('http://127.0.0.1:8878/');
+// Preserve localhost when used locally so the read-only viewer's same-site gate holds.
+if(location.hostname==='localhost')viewer.hostname='localhost';
+viewer.search=query.toString();
+document.getElementById('workcell').src=viewer.href;
+document.getElementById('standalone').href=viewer.href;
+query.set('module_id','qm_indicator');
+document.getElementById('serial').href='/serial?'+query;
+</script>
+</html>

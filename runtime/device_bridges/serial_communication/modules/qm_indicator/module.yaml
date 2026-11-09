@@ -1,11 +1,12 @@
 schema: ax4lab.serial_device.v1
 id: qm_indicator
-version: 1.1.0
+version: 1.2.0
 label: Qmesys QM100T
 icon: icon.svg
 capabilities: [read]
 views:
   - {id: model, label: 3D model}
+  - {id: workcell, label: 전체 모델 · 로봇 + UTM}
 defaults: {port: '', baudrate: 115200, bytesize: 8, parity: N, stopbits: 1, flow_control: none, variant: observed60, timeout_s: 10, stale_after_s: 2, interval_s: 1}
 fields:
   - {key: port, label: Port, type: port}

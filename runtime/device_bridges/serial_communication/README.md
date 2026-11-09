@@ -78,8 +78,10 @@ Adding a deployed view also requires explicit wheel/sdist entries in
 `runtime/distribution-files.json`, preserving the positive packaging contract.
 
 QM100T's `views/model/` contains its measured scene, viewer, vendor licenses and
-`calibration.mjs`. The calibration function returns `null` until supplied by the
-operator. The view reads the existing latest-measurement API only. See
+`calibration.mjs`. The installed reference maps |DISP2|=677.8 mm to the operator's
+30 mm compression gap. The view reads the existing latest-measurement API only.
+The module-owned `views/workcell/` entry embeds the local MoveIt workcell viewer
+at port 8878, preserving the selected profile. See
 [model integration](../../../docs/gui/qm100t_model.md).
 
 ### Included protocols

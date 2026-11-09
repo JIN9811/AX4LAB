@@ -10,6 +10,18 @@ const sample = {
 };
 const limits = {min:0, max:740};
 
+test('installed QM100T maps real DISP2 frames to the measured compression gap', () => {
+  const snapshot={state:'connected',stale:false,age_s:.02,measurement:{valid:true,checksum_valid:true,
+    values:{load:0,disp1:1.93,disp2:677.8,pot:0,load_range:2000},
+    units:{load:'kgf',disp1:'mm',disp2:'mm',pot:'mm',load_range:'kgf'}}};
+  for(const [value,want] of [[677.8,30],[-677.8,30],[687.8,20],[667.8,40],[708.8,null]]){
+    snapshot.measurement.values.disp2=value;
+    assert.equal(calibratedGapMm(snapshot,measurementToGapMm,limits),want);
+  }
+  snapshot.measurement.values.disp2=677.8;
+  assert.equal(calibratedGapMm({...snapshot,stale:true},measurementToGapMm,limits),null);
+});
+
 test('reads only the selected existing session and preserves units and displacement', async () => {
   const requests=[];
   const snapshot=await readSerialSnapshot('profile/1', {fetch:async(url,options)=>{

@@ -1,16 +1,18 @@
 /**
  * Operator calibration seam. Return the physical platen contact gap in mm,
- * or null to keep the manual model position. The reference remains unset.
+ * or null to keep the manual model position.
  *
  * measurement: existing serial record (values, units, unit_codes, received_at,
  * valid, checksum_valid, quality, session_id). snapshot: connection/freshness.
  * User confirmed: use absolute displacement; it increases when moving down.
  * Instrument datum is associated with the upper tensile fixture, not the
- * compression contact gap. Confirm the channel and same-pose reference here.
+ * compression contact gap. The operator's 30 mm gap corresponds to |DISP2|
+ * 677.8 mm, confirmed against the received frame on 2026-11-09.
+ * This is the installed workcell reference, not a QM100T factory calibration.
  */
 export const calibration = Object.freeze({
-  channel: 'disp1',
-  referenceAbsMm: null,
+  channel: 'disp2',
+  referenceAbsMm: 677.8,
   referenceGapMm: 30,
 });
 

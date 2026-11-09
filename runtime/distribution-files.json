@@ -647,7 +647,8 @@
     "device_bridges/serial_communication/modules/qm_indicator/views/model/vendor/RoomEnvironment.js",
     "device_bridges/serial_communication/modules/qm_indicator/views/model/vendor/THREE-LICENSE.txt",
     "device_bridges/serial_communication/modules/qm_indicator/views/model/vendor/three.module.js",
-    "device_bridges/serial_communication/modules/qm_indicator/views/model/viewer.js"
+    "device_bridges/serial_communication/modules/qm_indicator/views/model/viewer.js",
+    "device_bridges/serial_communication/modules/qm_indicator/views/workcell/index.html"
   ],
   "bound_resources": [
     "web/static/workspace_fields.js",
@@ -2362,7 +2363,8 @@
     "device_bridges/serial_communication/modules/qm_indicator/views/model/vendor/RoomEnvironment.js",
     "device_bridges/serial_communication/modules/qm_indicator/views/model/vendor/THREE-LICENSE.txt",
     "device_bridges/serial_communication/modules/qm_indicator/views/model/vendor/three.module.js",
-    "device_bridges/serial_communication/modules/qm_indicator/views/model/viewer.js"
+    "device_bridges/serial_communication/modules/qm_indicator/views/model/viewer.js",
+    "device_bridges/serial_communication/modules/qm_indicator/views/workcell/index.html"
   ],
   "optional_tts": "Existing tracked Piper assets are sdist-only; no wheel source fallback."
 }

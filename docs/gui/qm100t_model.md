@@ -40,8 +40,8 @@ Edit `runtime/device_bridges/serial_communication/modules/qm_indicator/views/mod
 
 ```js
 export const calibration = Object.freeze({
-  channel: 'disp1',          // Confirm the instrument's displacement channel.
-  referenceAbsMm: null,     // Absolute displacement at the reference pose.
+  channel: 'disp2',          // Installed indicator's position channel.
+  referenceAbsMm: 677.8,     // Absolute displacement at the reference pose.
   referenceGapMm: 30,       // Measured compression gap at that same pose.
 });
 ```
@@ -53,11 +53,13 @@ with the upper tensile fixture. The prepared mapping is therefore:
 
 `gap_mm = referenceGapMm - (abs(displacement_mm) - referenceAbsMm)`
 
-The reference remains unset, so serial data cannot move the preview yet. Confirm
-the channel and measure displacement and compression gap at the same pose before
-setting `referenceAbsMm`. The mentioned 677.8 mm was tentative and is not applied.
-If confirmed at a 30 mm gap, the result would be `707.8 - abs(displacement_mm)`;
-a 10 mm increase in absolute displacement then reduces the gap to 20 mm.
+The installed workcell uses the operator-reported 30 mm gap and 677.8 mm
+reference. On 2026-11-09 the live frame showed DISP1=1.93 mm and DISP2=677.8 mm,
+identifying DISP2 as the reference channel. The mapping is
+`707.8 - abs(DISP2_mm)`; a 10 mm increase reduces the gap to 20 mm.
+This is this workcell's display reference, not a manufacturer calibration.
+Update it if the indicator datum or fixtures change; opening/reconnecting never
+auto-zeros the mapping.
 Only finite numeric readings whose decoded unit is `mm` are used. No zeroing or
 calibration command is sent to the indicator; displayed raw readings are retained.
 
@@ -71,6 +73,25 @@ and load calibration are outside this page.
 After `qm100t:model-ready`, `window.qm100tModel` exposes `limits`, `getGapMm()`
 and `setGapMm(mm)` for calibration tooling. The setter returns false for invalid
 or out-of-range input. Refresh the page after changing the calibration module.
+
+## Full workcell entry
+
+Open **Device Bridge → Serial Communication Bridge → Qmesys QM100T →
+전체 모델 · 로봇 + UTM**. The standalone 3D model also links to this view.
+The module-owned page `/serial/modules/qm_indicator/views/workcell` embeds the
+local read-only MoveIt workcell viewer at `http://127.0.0.1:8878/` and preserves
+`profile_id`. Shared navigation discovers it from the QM module descriptor.
+Use **Refresh modules** if AX4LAB was running before the new view was installed;
+no device session restart is needed.
+
+The workcell viewer runs from the actual `rebot-vr-moveit` workspace with
+`python3 tools/workcell_preview.py` (after `tools/export_workcell_preview.py`
+has generated its local assets). Unlike the bundled UTM-only view, this full
+workcell requires that local viewer service and the robot assets. It does not
+start hardware processes. Without robot feedback the arms display SRDF home;
+fresh robot feedback supplies joint coordinates. The QM source uses the same
+existing AX4LAB serial profile. **시리얼 위치 보정** allows per-profile local
+overrides, release to manual control, and restore of the installed reference.
 
 ## Assets
 

@@ -170,6 +170,7 @@ def test_model_preview_reads_only_catalog_and_profile_store(tmp_path, monkeypatc
     app=FastAPI();app.include_router(create_router(service))
     with TestClient(app,base_url='http://127.0.0.1',client=('127.0.0.1',123)) as c:
         assert c.get('/serial/modules/qm_indicator/views/model').status_code == 200
+        assert c.get('/serial/modules/qm_indicator/views/workcell').status_code == 200
         assets='/api/serial/modules/qm_indicator/views/model/assets/'
         assert c.get(assets+'serial-page.mjs').status_code == 200
         assert c.get(assets+'vendor/three.module.js').status_code == 200
