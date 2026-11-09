@@ -30,7 +30,7 @@ from workspaces.design.service import DesignService
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE = 'metamaterial_unit_cell_designer'
-CHROMIUM = '/home/jin/.cache/ms-playwright/chromium-1243/chrome-linux-arm64/chrome'
+CHROMIUM = os.environ.get('AX4LAB_TEST_CHROMIUM') or None
 
 
 @contextmanager
