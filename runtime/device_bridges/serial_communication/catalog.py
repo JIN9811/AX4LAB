@@ -58,6 +58,17 @@ def _validate_serial_descriptor(d):
     for channel in d['channels']:
         if not isinstance(channel,dict) or not ID.fullmatch(str(channel.get('key',''))) or not isinstance(channel.get('label'),str):
             raise ValueError('Invalid channel metadata')
+    views = d.get('views', [])
+    if not isinstance(views, list):
+        raise ValueError('Invalid view metadata')
+    view_ids = set()
+    for view in views:
+        if (not isinstance(view, dict) or set(view) != {'id', 'label'}
+                or not ID.fullmatch(str(view.get('id', '')))
+                or not isinstance(view.get('label'), str) or not view['label'].strip()
+                or view['id'] in view_ids):
+            raise ValueError('Invalid or duplicate view metadata')
+        view_ids.add(view['id'])
     d['__provider_file__'] = 'protocol.py'
     return d
 
@@ -73,10 +84,16 @@ class ModuleCatalog:
 
     def refresh(self):
         records, errors = discover_modules(self.root, _validate_serial_descriptor)
-        found = {
-            record['id']: DeviceModule(record['root'], record['descriptor'])
-            for record in records
-        }
+        found = {}
+        for record in records:
+            try:
+                for view in record['descriptor'].get('views', []):
+                    entry = contained(record['root'], 'views/'+view['id']+'/index.html')
+                    if not entry.is_file():
+                        raise ValueError('Missing view entry: '+view['id'])
+                found[record['id']] = DeviceModule(record['root'], record['descriptor'])
+            except (ValueError, OSError) as exc:
+                errors.append({'module':record['id'], 'message':str(exc)})
         with self._lock:
             self._modules, self.errors = found, errors
         return self.list()
@@ -94,6 +111,19 @@ class ModuleCatalog:
     def icon(self, identity):
         m = self.get(identity)
         return contained(m.root, m.descriptor.get('icon','icon.svg'))
+
+    def view_file(self, identity, view_id, asset='index.html'):
+        m = self.get(identity)
+        if view_id not in {view['id'] for view in m.descriptor.get('views', [])}:
+            raise SerialError('not_found', 'Module view unavailable')
+        try:
+            root = contained(m.root, 'views/'+view_id)
+            path = contained(root, asset)
+            if not path.is_file():
+                raise ValueError('Missing view asset')
+            return path
+        except (ValueError, OSError) as exc:
+            raise SerialError('not_found', 'Module view asset unavailable') from exc
 
     def protocol(self, identity, variant=None):
         with self._lock:

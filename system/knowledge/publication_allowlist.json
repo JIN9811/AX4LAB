@@ -1071,7 +1071,7 @@
       "sha256": "bd17d799d53f1953b7f6df1fe054ffc15cba81fd61f4949ec20c5beda96e0031",
       "review": "Published historical UI concept/icon asset, byte-identical to ae09f3c before relocation and visually reviewed. Archived for preservation, not current GUI acceptance or private runtime evidence."
     },
-    "system/retained-history/\uac1c\uc120\uc548/reference_assets/bambulab_device_screen_20260614.png": {
+    "system/retained-history/개선안/reference_assets/bambulab_device_screen_20260614.png": {
       "sha256": "80ba052185fa4d2525bc0aa30e5c24e7805059c2ba66a1a85e0af4309f8b9f07",
       "review": "Published historical UI concept/icon asset, byte-identical to ae09f3c before relocation and visually reviewed. Archived for preservation, not current GUI acceptance or private runtime evidence."
     },
@@ -1236,6 +1236,34 @@
     "system/maintenance/portable_installation_evidence.md": {
       "sha256": "d15b5c001993b89a851b9b3c5e493626e6d47b499b95a992bbcdb57ef7f1bb13",
       "review": "2026-10-24 full text review: sanitized offline software validation narrative and commands only; explicitly retains failed, skipped and incomplete tests plus hardware/Windows limitations. No raw logs, credentials or private experiment files. This approval does not re-certify historical results."
+    },
+    "runtime/device_bridges/serial_communication/modules/qm_indicator/views/model/exports/textures/indicator.png": {
+      "sha256": "cba966a5f102ee35b2fa6b086959555f92264ba75a4585c8af59ef33a08ae897",
+      "review": "Visually reviewed generated model label: synthetic indicator preview or BONGSHIN DSCK product specifications, no serial numbers, people, telemetry, screenshots or private source images. Export copy is byte-identical to the viewer texture."
+    },
+    "runtime/device_bridges/serial_communication/modules/qm_indicator/views/model/exports/textures/loadcell.png": {
+      "sha256": "ac6ca3ba44a189ee33e30cd439116195265191d162e4741715d2b8aa019285fe",
+      "review": "Visually reviewed generated model label: synthetic indicator preview or BONGSHIN DSCK product specifications, no serial numbers, people, telemetry, screenshots or private source images. Export copy is byte-identical to the viewer texture."
+    },
+    "runtime/device_bridges/serial_communication/modules/qm_indicator/views/model/exports/utm.glb.gz": {
+      "sha256": "228ee2efd8738da0a75110ef59f53d25e5ae7fd73165922765d2f5fb55a118e0",
+      "review": "Generated UTM model geometry/kinematics only, losslessly gzip-compressed for distribution; decompressed content reviewed for local paths and credential patterns. GLB/USD geometry matches the operator-requested finalized model; embedded/static labels are synthetic. No reference photos, manuals, live telemetry or private profiles. Emergency-stop CC BY 3.0 attribution retained."
+    },
+    "runtime/device_bridges/serial_communication/modules/qm_indicator/views/model/exports/utm.usdc.gz": {
+      "sha256": "2c5966a9afc90b37c194e68f395346a89da52030e83dacc8f36f6ea37a8b171c",
+      "review": "Generated UTM model geometry/kinematics only, losslessly gzip-compressed for distribution; decompressed content reviewed for local paths and credential patterns. GLB/USD geometry matches the operator-requested finalized model; embedded/static labels are synthetic. No reference photos, manuals, live telemetry or private profiles. Emergency-stop CC BY 3.0 attribution retained."
+    },
+    "runtime/device_bridges/serial_communication/modules/qm_indicator/views/model/scene.json.gz": {
+      "sha256": "2f1a1b0306a3971842377d9f95fa27c429b132eb7fe1d0fb7ccc91b0cb5bd27b",
+      "review": "Generated UTM model geometry/kinematics only, losslessly gzip-compressed for distribution; decompressed content reviewed for local paths and credential patterns. GLB/USD geometry matches the operator-requested finalized model; embedded/static labels are synthetic. No reference photos, manuals, live telemetry or private profiles. Emergency-stop CC BY 3.0 attribution retained."
+    },
+    "runtime/device_bridges/serial_communication/modules/qm_indicator/views/model/textures/indicator.png": {
+      "sha256": "cba966a5f102ee35b2fa6b086959555f92264ba75a4585c8af59ef33a08ae897",
+      "review": "Visually reviewed generated model label: synthetic indicator preview or BONGSHIN DSCK product specifications, no serial numbers, people, telemetry, screenshots or private source images. Export copy is byte-identical to the viewer texture."
+    },
+    "runtime/device_bridges/serial_communication/modules/qm_indicator/views/model/textures/loadcell.png": {
+      "sha256": "ac6ca3ba44a189ee33e30cd439116195265191d162e4741715d2b8aa019285fe",
+      "review": "Visually reviewed generated model label: synthetic indicator preview or BONGSHIN DSCK product specifications, no serial numbers, people, telemetry, screenshots or private source images. Export copy is byte-identical to the viewer texture."
     }
   },
   "relocation_assets": [],

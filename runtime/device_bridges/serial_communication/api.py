@@ -81,6 +81,19 @@ def create_router(service, templates=None):
             raise HTTPException(404)
         return templates.TemplateResponse(request=request, name='serial.html', context={})
 
+    @router.get('/serial/modules/{module_id}/views/{view_id}', include_in_schema=False)
+    def module_view(module_id: str, view_id: str, profile_id: str = ''):
+        def op(s):
+            page = s.catalog.view_file(module_id, view_id)
+            if profile_id and s.store.get(profile_id)['module_id'] != module_id:
+                raise HTTPException(422, 'Select a profile belonging to this module')
+            return FileResponse(page, media_type='text/html')
+        return call(op)
+
+    @router.get('/api/serial/modules/{module_id}/views/{view_id}/assets/{asset:path}')
+    def module_view_asset(module_id: str, view_id: str, asset: str):
+        return call(lambda s: FileResponse(s.catalog.view_file(module_id, view_id, asset)))
+
     @router.get('/api/serial/modules')
     def modules():
         return call(lambda s: {'modules':s.catalog.list(), 'errors':s.catalog.errors})

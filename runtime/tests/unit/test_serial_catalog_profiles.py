@@ -102,3 +102,47 @@ def test_failed_atomic_set_preserves_previous_config(tmp_path,monkeypatch):
     with pytest.raises(SerialError,match='not saved'):
         store.update(p['id'],{'name':'B'},1)
     assert store.path.read_bytes()==previous
+
+
+def test_views_are_discovered_for_an_arbitrary_module_and_removed_with_it(tmp_path):
+    from device_bridges.serial_communication.catalog import ModuleCatalog
+    from device_bridges.serial_communication.errors import SerialError
+    import yaml
+    folder=tmp_path/'third_device'
+    shutil.copytree(catalog().get('cas_mwii_plus').root,folder)
+    p=folder/'module.yaml';descriptor=yaml.safe_load(p.read_text())
+    descriptor.update(id='third_device',views=[{'id':'inspection','label':'Inspect'}])
+    p.write_text(yaml.safe_dump(descriptor))
+    (folder/'views/inspection').mkdir(parents=True)
+    (folder/'views/inspection/index.html').write_text('<h1>Inspection</h1>')
+    (folder/'protocol.py').write_text('raise RuntimeError("no import")')
+    c=ModuleCatalog(tmp_path)
+    assert c.list()[0]['views'] == [{'id':'inspection','label':'Inspect'}]
+    assert c.view_file('third_device','inspection').read_text() == '<h1>Inspection</h1>'
+    with pytest.raises(SerialError):
+        c.view_file('third_device','inspection','../../protocol.py')
+    outside=tmp_path/'outside.txt';outside.write_text('outside')
+    (folder/'views/inspection/outside.txt').symlink_to(outside)
+    with pytest.raises(SerialError):
+        c.view_file('third_device','inspection','outside.txt')
+    shutil.rmtree(folder);c.refresh()
+    with pytest.raises(SerialError):
+        c.view_file('third_device','inspection')
+
+
+@pytest.mark.parametrize('views',[
+    [{'id':'../escape','label':'Bad'}],
+    [{'id':'model','label':'Model'},{'id':'model','label':'Duplicate'}],
+    [{'id':'model','label':'Model','entry':'https://example.org'}],
+    [{'id':'model','label':'Missing entry'}],
+])
+def test_invalid_view_metadata_is_isolated(tmp_path,views):
+    from device_bridges.serial_communication.catalog import ModuleCatalog
+    import yaml
+    source=catalog().get('cas_mwii_plus').root
+    shutil.copytree(source,tmp_path/'valid');shutil.copytree(source,tmp_path/'invalid')
+    p=tmp_path/'invalid/module.yaml';d=yaml.safe_load(p.read_text())
+    d.update(id='invalid',views=views);p.write_text(yaml.safe_dump(d))
+    c=ModuleCatalog(tmp_path)
+    assert [m['id'] for m in c.list()] == ['cas_mwii_plus']
+    assert len(c.errors) == 1

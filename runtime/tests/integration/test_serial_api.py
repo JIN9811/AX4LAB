@@ -136,3 +136,45 @@ def test_remote_peer_is_denied(tmp_path):
     app=FastAPI();app.include_router(create_router(lambda:None))
     c=TestClient(app,base_url='http://127.0.0.1',client=('192.168.0.3',123))
     assert c.get('/api/serial/modules').status_code==403
+
+
+def test_qm_model_preview_and_selected_profile_do_not_connect(client):
+    preview = client.get('/serial/modules/qm_indicator/views/model')
+    assert preview.status_code == 200
+    assert 'data-module-id="qm_indicator"' in preview.text
+    p = client.post('/api/serial/profiles', json={'module_id':'qm_indicator'}).json()
+    page = client.get('/serial/modules/qm_indicator/views/model', params={'profile_id':p['id']})
+    assert page.status_code == 200
+    assert 'serial-page.mjs' in page.text
+    status = client.get('/api/serial/profiles/'+p['id']+'/status').json()
+    assert status['state'] == 'disconnected'
+    assert status['rx_bytes'] == status['tx_bytes'] == 0
+    assert client.get('/api/serial/profiles/'+p['id']+'/latest').json()['measurement'] is None
+
+
+def test_qm_model_rejects_wrong_missing_and_remote_profiles(client):
+    p = client.post('/api/serial/profiles', json={'module_id':'cas_mwii_plus'}).json()
+    assert client.get('/serial/modules/qm_indicator/views/model', params={'profile_id':p['id']}).status_code == 422
+    assert client.get('/serial/modules/qm_indicator/views/model', params={'profile_id':'missing'}).status_code == 404
+    assert client.get('/serial/modules/qm_indicator/views/model', headers={'host':'example.org'}).status_code == 403
+
+
+def test_model_preview_reads_only_catalog_and_profile_store(tmp_path, monkeypatch):
+    from device_bridges.serial_communication.api import create_router
+    from device_bridges.serial_communication.service import SerialService
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Preview attempted device I/O')
+    service=SerialService(tmp_path/'profiles.json',tmp_path/'logs',
+                          port_provider=forbidden,transport_factory=forbidden)
+    monkeypatch.setattr(service.catalog, 'protocol', forbidden)
+    app=FastAPI();app.include_router(create_router(service))
+    with TestClient(app,base_url='http://127.0.0.1',client=('127.0.0.1',123)) as c:
+        assert c.get('/serial/modules/qm_indicator/views/model').status_code == 200
+        assets='/api/serial/modules/qm_indicator/views/model/assets/'
+        assert c.get(assets+'serial-page.mjs').status_code == 200
+        assert c.get(assets+'vendor/three.module.js').status_code == 200
+        assert c.get(assets+'%2e%2e/%2e%2e/protocol.py').status_code == 404
+        assert c.get('/serial/modules/cas_mwii_plus/views/model').status_code == 404
+        assert c.get(assets+'scene.json',headers={'origin':'https://example.org'}).status_code == 403
+    assert not (tmp_path/'profiles.json').exists()
+    assert service.sessions == {}

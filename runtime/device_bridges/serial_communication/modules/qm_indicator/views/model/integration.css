@@ -1,0 +1,10 @@
+.back-link{color:#286e59;text-decoration:none;border:1px solid #d9e2df;padding:7px 11px;border-radius:6px;white-space:nowrap}
+.back-link:hover{background:#edf5f0}.back-link:focus-visible{outline:3px solid #54bcb2;outline-offset:3px}
+.serial-source .row{align-items:flex-start;gap:8px}.serial-source .row>span{color:#7b6a3d;font-size:10px;white-space:nowrap}
+.serial-source p{color:#7a8a80;font-size:11px;margin:10px 0 0}
+.serial-readouts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin:12px 0 0}
+.serial-readouts div{background:#f3f6f3;padding:8px 6px;border-radius:5px;min-width:0}
+.serial-readouts dt{font-size:10px;color:#7a8a80}.serial-readouts dd{margin:3px 0 0;font-size:12px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.serial-source[data-stale=true] .serial-readouts dd{color:#89968e}
+@media(max-width:1000px){.headright>span:first-of-type{display:none}}
+@media(max-width:760px){.headright{gap:8px}.back-link{font-size:11px;padding:6px}.headright .status{display:none}}

@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>QM100T · UTM Model · AX4LAB</title>
+  <base href="/api/serial/modules/qm_indicator/views/model/assets/">
+  <link rel="stylesheet" href="./integration.css">
+  <link rel="icon" href="data:,">
+  <script type="importmap">{"imports":{"three":"./vendor/three.module.js"}}</script>
+  <style>
+    *{box-sizing:border-box}body{margin:0;color:#233a3f;font:14px/1.5 system-ui,-apple-system,"Noto Sans KR",sans-serif;background:#f1f4f3}button,input{font:inherit}button{cursor:pointer}button:focus-visible,input:focus-visible{outline:3px solid #54bcb2;outline-offset:3px}button{color:inherit;border:1px solid #d9e2df;border-radius:7px;background:#fff;padding:8px 12px;transition:background .15s}button:hover{background:#edf5f2}header{height:76px;border-bottom:1px solid #d9e2df;background:#fff;display:flex;align-items:center;justify-content:space-between;padding:0 30px;gap:20px}.brand{display:flex;align-items:center;gap:15px}.mark{width:36px;height:36px;background:#1f6a60;color:#fff;display:grid;place-items:center;border-radius:9px;font-weight:750;font-size:19px}.brand strong{display:block;font-size:17px;letter-spacing:.04em}.brand small{color:#738680;font-size:11px;letter-spacing:.15em}.headright{display:flex;gap:18px;align-items:center;font-size:12px;color:#71837d}.status{background:#e6f2eb;color:#34745b;padding:6px 11px;border-radius:30px}.status:before{content:"";display:inline-block;border-radius:50%;width:6px;height:6px;background:#54a97a;margin-right:7px}main{display:grid;grid-template-columns:minmax(0,1fr) 330px;height:calc(100dvh - 76px);min-height:550px}.viewport{position:relative;overflow:hidden;background:radial-gradient(ellipse at 50% 35%,#fbfcfb 15%,#e9eeeb 100%)}#scene{width:100%;height:100%;display:block;touch-action:none}.viewtitle{position:absolute;left:28px;top:24px;pointer-events:none}.viewtitle h1{margin:0 0 2px;font-size:26px;letter-spacing:-.04em;font-weight:650}.viewtitle p{margin:0;color:#7b8c84;font-size:12px}.toolbar{position:absolute;left:28px;bottom:30px;display:flex;gap:6px;background:#ffffffc9;padding:5px;border:1px solid #dce4df;border-radius:10px;backdrop-filter:blur(8px)}.toolbar{max-width:calc(100% - 40px);overflow-x:auto}.toolbar button{flex-shrink:0;border-color:transparent;background:transparent;padding:7px 12px;font-size:12px}.toolbar button.active{background:#e0ece5;color:#236a58}.orbit-tip{position:absolute;right:25px;bottom:85px;color:#85958b;font-size:11px;pointer-events:none}.badge{position:absolute;transform:translate(10px,-50%);pointer-events:none;border-left:2px solid #317c67;padding:5px 9px;background:#fffffff0;box-shadow:0 3px 14px #183f2810;font-size:11px;white-space:nowrap;border-radius:0 4px 4px 0}.badge.gap{color:#1c7b64;border-color:#1c7b64;font-weight:650}.badge.fixed{border-color:#9ca9a2;color:#63756b}.sidebar{background:#fff;border-left:1px solid #d9e2df;padding:24px;overflow:auto}.eyebrow{font-size:10px;letter-spacing:.13em;color:#7c8d83;font-weight:650}.controltitle{display:flex;align-items:center;justify-content:space-between;margin:6px 0 15px;font-size:16px;font-weight:650}.axis{background:#f1f5f2;color:#72857a;font-size:10px;letter-spacing:.04em;padding:3px 7px;border-radius:4px}.numberrow{display:flex;align-items:baseline;gap:7px}.numberrow input{width:170px;padding:0;border:0;outline:none;font-size:48px;font-weight:550;letter-spacing:-.06em;color:#226955;background:transparent;font-variant-numeric:tabular-nums}.numberrow input::-webkit-inner-spin-button{opacity:.3;width:12px}.unit{color:#71867a;font-size:14px}input[type=range]{width:100%;accent-color:#2e7a62;margin:22px 0 4px;cursor:pointer}.range-labels{display:flex;justify-content:space-between;color:#89968e;font-size:11px}.presets{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:18px 0 12px}.presets button{font-size:11px;padding:7px 2px}.primary{background:#286e59;border-color:#286e59;color:white;width:100%;padding:12px;display:flex;justify-content:center;gap:8px;font-weight:550}.primary:hover{background:#1e5d4b}.subnote{font-size:10px;color:#8e9b93;margin:8px 0 0;text-align:center}.divider{height:1px;background:#e4eae5;margin:24px 0 19px}.row{display:flex;align-items:center;justify-content:space-between;font-size:12px;margin:12px 0;gap:12px}.row strong{font-weight:550;font-variant-numeric:tabular-nums}.muted{color:#7a8a80}.toggle{display:flex;align-items:center;justify-content:space-between;font-size:12px;cursor:pointer;padding:8px 0}.toggle input{accent-color:#286e59;cursor:pointer;width:16px;height:16px}.downloads{display:flex;gap:6px;margin:13px 0}.downloads a{text-decoration:none;border:1px solid #d9e2df;color:#3d6657;border-radius:6px;flex:1;text-align:center;padding:7px;font-size:11px}.downloads a:hover{background:#edf5f0}details{font-size:11px;color:#7e8b82}summary{cursor:pointer;color:#627a6b}details p{margin:8px 0}.sourcepill{font-size:9px;display:inline-block;background:#eff3f0;padding:1px 4px;border-radius:3px;margin-left:4px;color:#78877e}.info{padding:10px 12px;border-radius:7px;background:#f3f6f3;font-size:11px;color:#839087;line-height:1.7;margin-top:14px}.loading{position:absolute;inset:0;display:grid;place-items:center;color:#4f7564;background:#eef3eee8;z-index:5}.error{max-width:500px;padding:30px;color:#a02f24}footer{font-size:10px;color:#9aa59e;margin-top:20px}.mobileonly{display:none}
+    @media(max-width:760px){header{padding:0 18px;height:64px}.headright>span:first-child{display:none}main{display:flex;flex-direction:column;height:auto;min-height:0}.viewport{height:65dvh;min-height:410px}.sidebar{border-left:0;border-top:1px solid #d9e2df;padding:22px;overflow:visible}.viewtitle{left:18px;top:16px}.viewtitle h1{font-size:21px}.toolbar{left:14px;bottom:14px}.orbit-tip{display:none}.badge{font-size:9px}.numberrow input{font-size:43px}.divider{margin:18px 0}.headright{gap:0}.downloads a{padding:10px}.presets button{padding:10px}}
+  </style>
+</head>
+<body data-module-id="qm_indicator">
+<header><div class="brand"><span class="mark">A</span><div><strong>AX4LAB</strong><small>EQUIPMENT MODELS</small></div></div><div class="headright"><a id="backSerial" class="back-link" href="/serial?module_id=qm_indicator">← QM100T 통신</a><span>QMESYS · QM100T FAMILY</span><span class="status">가상 모델</span></div></header>
+<main>
+  <section class="viewport" aria-label="UTM 3차원 모델">
+    <canvas id="scene" aria-label="마우스로 회전하고 확대할 수 있는 UTM 모델"></canvas>
+    <div class="viewtitle"><h1>Universal Testing Machine</h1><p>실측 사진 · 제조사 도면 기반 재구성</p></div>
+    <div id="gapLabel" class="badge gap">간격 110.0 mm</div><div id="fixedLabel" class="badge fixed">하부 압축판 · 고정</div>
+    <nav class="toolbar" aria-label="카메라 시점"><button data-view="iso" class="active">3D</button><button data-view="front">정면</button><button data-view="rear">후면</button><button data-view="side">측면</button><button data-view="work">작업부 확대</button><button data-view="indicator">인디케이터 뒤</button><button data-view="emergency">비상정지</button></nav>
+    <div class="orbit-tip">드래그 회전 · 휠 확대 · 우클릭 이동</div>
+    <div id="loading" class="loading">UTM 모델 불러오는 중…</div>
+  </section>
+  <aside class="sidebar">
+    <section class="serial-source" aria-label="시리얼 데이터 연결">
+      <div class="eyebrow">QM100T · SERIAL DATA</div>
+      <div class="row"><strong id="serialSourceState" role="status">수신 상태 확인 중…</strong><span id="calibrationState">캘리브레이션 대기</span></div>
+      <dl class="serial-readouts"><div><dt>Load</dt><dd id="serialLoad">—</dd></div><div><dt>DISP1</dt><dd id="serialDisp1">—</dd></div><div><dt>DISP2</dt><dd id="serialDisp2">—</dd></div></dl>
+      <p id="serialSourceNote">기존 통신 세션의 수신값을 표시합니다. 캘리브레이션 후 모델 위치를 연결할 수 있습니다.</p>
+    </section>
+    <div class="divider"></div>
+    <div class="eyebrow">CROSSHEAD POSITION</div><div class="controltitle">압축판 간격<span class="axis">Z AXIS</span></div>
+    <div class="numberrow"><input id="gapInput" type="number" min="0" max="740" step="0.1" value="110" aria-label="압축판 간격 mm"><span class="unit">mm</span></div>
+    <input id="gapSlider" type="range" min="0" max="740" step="0.1" value="110" aria-label="압축판 간격 슬라이더">
+    <div class="range-labels"><span>0 · 접촉</span><span id="maxGapLabel">740 mm</span></div>
+    <div class="presets"><button data-gap="0">접촉</button><button data-gap="110">기본 간격</button><button data-gap="450">크게 열기</button></div>
+    <button id="play" class="primary" aria-pressed="false"><span id="playIcon">▷</span><span id="playText">움직임 재생</span></button><p class="subnote">가속된 동작 미리보기</p>
+    <div class="divider"></div><div class="eyebrow">POSITION READOUT</div>
+    <div class="row"><span class="muted">위 압축판 접촉면</span><strong id="upperReadout">—</strong></div>
+    <div class="row"><span class="muted">아래 압축판 접촉면</span><strong id="lowerReadout">—</strong></div>
+    <div class="row"><span class="muted">가운데 가로보 윗면</span><strong id="crossheadReadout">—</strong></div>
+    <div class="muted" style="font-size:10px">높이는 모델 바닥 기준</div>
+    <div class="divider"></div><div class="eyebrow">DISPLAY</div>
+    <label class="toggle">가동부 강조<input id="highlight" type="checkbox"></label>
+    <label class="toggle">프레임 · 외장 표시<input id="showFrame" type="checkbox" checked></label>
+    <label class="toggle">간격 · 기준 표시<input id="showLabels" type="checkbox" checked></label>
+    <div class="divider"></div><div class="eyebrow">MODEL FILES</div>
+    <div class="downloads"><a href="exports/utm.usdc.gz" download>USD (.gz)</a><a href="exports/utm.glb.gz" download>GLB (.gz)</a></div>
+    <details><summary>치수와 모델 범위</summary><p>베이스 폭 × 깊이 × 전체 높이<br><span id="bodyDimensions">—</span> mm <span class="sourcepill">사용자 실측</span><br>베이스판 윗면 <span id="deckSurfaceHeight">—</span> mm <span class="sourcepill">바닥 기준</span><br>앞 여유 / 기둥 깊이 / 뒤 여유<br><span id="frameDepthDimensions">—</span> cm <span class="sourcepill">사용자 실측 근사</span><br>왼 기둥 / 안쪽 간격 / 오른 기둥<br><span id="frameWidthDimensions">—</span> mm <span class="sourcepill">사용자 실측</span><br>DSCK Ø118 × 46 mm <span class="sourcepill">제조사 도면</span><br><span id="platenDimensions">압축판 치수</span> <span class="sourcepill">사진 근사</span></p><p>치수·판독 오차와 확인되지 않은 항목은 <a href="parameters.json" target="_blank">치수 파일</a>에 기록했습니다. <a href="measurements/photo-measurements.json" target="_blank">사진 판독 근거</a> · <a href="measurements/peripheral-measurements.json" target="_blank">외장 판독 근거</a>. <span id="previewRange">0–740</span> mm는 미리보기 범위입니다. 실제 리미트 스위치 위치는 미측정입니다.</p></details>
+    <div class="info">가운데 가로보 · 로드셀 · 위 압축판이 함께 이동합니다. 아래 압축판은 고정됩니다.</div>
+    <footer id="modelStatus">모델 준비 중</footer><footer>비상정지 CAD: Henrique Enzweiler · <a href="assets/emergency-stop/ATTRIBUTION.md" target="_blank">FreeCAD-library / CC BY 3.0</a></footer>
+  </aside>
+</main>
+<script type="module" src="./viewer.js"></script>
+<script type="module" src="./serial-page.mjs"></script>
+</body></html>

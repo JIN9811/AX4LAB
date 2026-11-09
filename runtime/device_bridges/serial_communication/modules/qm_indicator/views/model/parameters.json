@@ -1,0 +1,486 @@
+{
+  "model": "AX4LAB QMESYS QM100T family — photo reconstruction",
+  "units": "mm",
+  "sources": {
+    "manual": {
+      "path": "Indicator Manual.pdf (local reference; not redistributed)",
+      "pages": [
+        7,
+        11,
+        12,
+        13
+      ],
+      "use": "structural context only; no manual exterior dimensions drive this model"
+    },
+    "load_cell": {
+      "manufacturer": "BONGSHIN",
+      "series": "DSCK",
+      "capacity_label_reading_kgf": 1000,
+      "identification": "photo 30590; faint nameplate reading",
+      "drawing": "https://cdn.komachine.com/media/product-catalog/bongshin-loadcell_21224_mqogvk-WMzywB2.pdf"
+    },
+    "photos": "User attachments 30614.jpg through 30583.jpg",
+    "emergency_stop_asset": {
+      "creator": "Henrique Enzweiler",
+      "license": "CC-BY-3.0",
+      "manifest": "assets/emergency-stop/manifest.json",
+      "description": "existing community CAD cap and collar; generic substitute, exact photographed manufacturer unknown"
+    }
+  },
+  "dimensions": {
+    "body_width": {
+      "value": 920,
+      "source": "2026-11-09 user: base width 92 cm, excludes protruding indicator"
+    },
+    "frame_width": {
+      "value": 882,
+      "source": "2026-11-09 user cumulative horizontal measurements from frame left edge: 0, 205, 677, 882 mm; frame centred on 920 mm base (19 mm margin each side assumed)"
+    },
+    "body_depth": {
+      "value": 750,
+      "source": "2026-11-09 user approximate measurement: front margin 120 + column depth 320 + rear margin 310 mm; overrides manual 600 mm"
+    },
+    "body_height": {
+      "value": 1910,
+      "source": "2026-11-09 user: overall height 191 cm; floor to highest projection, including top screw heads"
+    },
+    "top_screw_projection": {
+      "value": 40,
+      "source": "photo 30606: 45.4/585*472=36.6 mm; rounded40. Right assembly gives a comparable envelope. Includes visible nut+washer stack above top surface, not thread length.",
+      "uncertainty_mm": 8,
+      "evidence": "measurements/peripheral-measurements.json",
+      "measurement_id": "top_screw_projection"
+    },
+    "column_clearance": {
+      "value": 472,
+      "source": "2026-11-09 user cumulative horizontal measurements: right inner edge 677 minus left inner edge 205 mm; each column width 205 mm"
+    },
+    "column_depth": {
+      "value": 320,
+      "source": "2026-11-09 user approximate measurement: middle of front/column/rear 12/32/31 cm; overrides manual 220 mm"
+    },
+    "deck_height": {
+      "value": 531,
+      "source": "2026-11-09 user: black base plate height 531 mm; interpreted as floor to top surface"
+    },
+    "deck_thickness": {
+      "value": 40,
+      "source": "photo ['30614', '30613']: Black exposed fascia spans approximately531 to491 mm above floor =>40 mm. This is exterior fascia thickness, not verified solid structural plate thickness.",
+      "uncertainty_mm": 5,
+      "evidence": "measurements/peripheral-measurements.json",
+      "measurement_id": "deck_thickness"
+    },
+    "caster_height": {
+      "value": 85,
+      "source": "photo ['30614', '30613']: Visible envelope approx79mm in30614 and90mm in30613. Recommend85±20mm. Wheel/mount plane differs from tape plane; upper mounting interface hidden. Existing75mm lies within uncertainty.",
+      "uncertainty_mm": 20,
+      "evidence": "measurements/peripheral-measurements.json",
+      "measurement_id": "caster_height"
+    },
+    "top_beam_thickness": {
+      "value": 50,
+      "source": "photo 30606: 59/585*472=47.6 mm, rounded50. Horizontal-to-vertical scale assumption imperfect in oblique image; comparable front plane.",
+      "uncertainty_mm": 7,
+      "evidence": "measurements/peripheral-measurements.json",
+      "measurement_id": "top_beam_thickness"
+    },
+    "crosshead_thickness": {
+      "value": 50,
+      "source": "photo 30599: caliper zero coincides with approximately 50 mm tick",
+      "uncertainty_mm": 1,
+      "measurement_id": "crosshead_thickness",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "crosshead_depth": {
+      "value": 320,
+      "source": "unresolved photo-constrained display approximation: Crosshead spans approximately column depth but back edge is partly occluded.320 should be user-depth-linked design assumption unless parent has independent ruler data.",
+      "measurement_status": "user_geometry_reference_or_parent_measurement"
+    },
+    "platen_diameter": {
+      "value": 148,
+      "source": "photo 30597: caliper vernier zero between 147 and 149 mm",
+      "uncertainty_mm": 2,
+      "measurement_id": "platen_diameter",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "platen_thickness": {
+      "value": 23,
+      "source": "photo 30598: caliper vernier zero approximately 23 mm",
+      "uncertainty_mm": 1,
+      "measurement_id": "platen_thickness",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "lower_fixture_height": {
+      "value": 114,
+      "source": "photo 30602: depth rod zero near 114 mm; cross-checked 30603",
+      "uncertainty_mm": 3,
+      "measurement_id": "lower_fixture_height",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "lower_flange_diameter": {
+      "value": 100,
+      "source": "photo 30597: local flange/platen width ratio, rounded",
+      "uncertainty_mm": 8,
+      "measurement_id": "lower_flange_diameter",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "lower_flange_height": {
+      "value": 20,
+      "source": "photo 30593: front flange vertical rim / local flange width with tilt allowance",
+      "uncertainty_mm": 3,
+      "measurement_id": "lower_flange_height",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "fixture_shaft_diameter": {
+      "value": 52,
+      "source": "photo 30593: lower shaft/platen silhouette ratio",
+      "uncertainty_mm": 4,
+      "measurement_id": "fixture_shaft_diameter",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "fixture_collar_diameter": {
+      "value": 62,
+      "source": "photo 30593: lower collar/platen silhouette ratio",
+      "uncertainty_mm": 4,
+      "measurement_id": "fixture_collar_diameter",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "fixture_collar_height": {
+      "value": 20,
+      "source": "photo 30593: collar axial silhouette length / local platen scale",
+      "uncertainty_mm": 4,
+      "measurement_id": "fixture_collar_height",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "crosshead_adapter_diameter": {
+      "value": 82,
+      "source": "photo 30600: caliper zero approximately 2 mm past 80",
+      "uncertainty_mm": 1,
+      "measurement_id": "crosshead_adapter_diameter",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "crosshead_adapter_height": {
+      "value": 60,
+      "source": "photo 30601: depth rod reading approximately 60 mm",
+      "uncertainty_mm": 2,
+      "measurement_id": "crosshead_adapter_height",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "top_adapter_height": {
+      "value": 74,
+      "source": "2026-11-09 user correction: fixed upper tensile holder BODY should be similar in size to the crosshead holder (photo-caliper body diameter82 x height60 mm). Keep photographed mounting flange100 and total height74; body length54. Socket49 and radial hole18 matched approximately to lower holder.",
+      "measurement_status": "user-guided size match; upper holder dimensions are not directly measured",
+      "superseded_photo_estimate": {
+        "value": 74,
+        "source": "photo 30587: whole attachment axial silhouette / flange diameter",
+        "uncertainty_mm": 10,
+        "measurement_id": "top_adapter_height",
+        "evidence": "measurements/photo-measurements.json"
+      }
+    },
+    "loadcell_diameter": {
+      "value": 118,
+      "source": "BONGSHIN DSCK drawing A; 1–5t"
+    },
+    "loadcell_height": {
+      "value": 46,
+      "source": "BONGSHIN DSCK drawing B; 1–5t"
+    },
+    "loadcell_pcd": {
+      "value": 100,
+      "source": "BONGSHIN DSCK drawing E; 1–5t"
+    },
+    "loadcell_hole_diameter": {
+      "value": 9,
+      "source": "BONGSHIN DSCK drawing H; 1–5t"
+    },
+    "upper_connector_height": {
+      "value": 58,
+      "source": "photo 30590: whole exposed connector between cell and shaft / platen scale",
+      "uncertainty_mm": 7,
+      "measurement_id": "upper_connector_height",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "upper_shaft_height": {
+      "value": 68,
+      "source": "photo 30591: upper shaft silhouette height / local platen scale",
+      "uncertainty_mm": 8,
+      "measurement_id": "upper_shaft_height",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "indicator_width": {
+      "value": 180,
+      "source": "photo 30608: Approximate ruler reading difference 320-140=180 mm. Ruler is not exactly coplanar or parallel with cabinet horizontal edges.",
+      "uncertainty_mm": 8,
+      "evidence": "measurements/peripheral-measurements.json",
+      "measurement_id": "indicator_width"
+    },
+    "indicator_height": {
+      "value": 260,
+      "source": "photo 30609: Top≈26.2 cm, bottom≈0.2 cm =>260 mm; follow sloping cabinet edges to ruler rather than use same image y.",
+      "uncertainty_mm": 8,
+      "evidence": "measurements/peripheral-measurements.json",
+      "measurement_id": "indicator_height"
+    },
+    "indicator_depth": {
+      "value": 60,
+      "source": "photo 30610: 230.63px/187.60px*50=61.5 mm, rounded60; front begins slightly before ruler zero.",
+      "uncertainty_mm": 4,
+      "evidence": "measurements/peripheral-measurements.json",
+      "measurement_id": "indicator_depth"
+    },
+    "indicator_center_height": {
+      "value": 1220,
+      "source": "photo 30584: Homography maps cabinet center to localz687.7; floorz1218.7, rounded1220. Cabinet is outside reference plane so out-of-plane parallax dominates uncertainty; rectified cabinet apparentheight275 vs ruler260 is consistency check.",
+      "uncertainty_mm": 80,
+      "evidence": "measurements/peripheral-measurements.json",
+      "measurement_id": "indicator_center_z"
+    },
+    "indicator_column_clearance": {
+      "value": 75,
+      "source": "unresolved photo-constrained display approximation: Articulated mount and cabinet are at different depths. Frontal photo projection overlaps column edge; cannot equate projected gap with physical minimum clearance. 30610 ruler is along cabinet thickness, not column-to-cabinet gap.",
+      "measurement_status": "not_reliably_measurable_from_supplied_views"
+    },
+    "indicator_arm_elbow_offset": {
+      "value": 70,
+      "source": "unresolved photo-constrained display approximation: 30611 visibly establishes two articulated links and cylindrical pivots but center axes are partly occluded and project to different planes. A rough link envelope70-100mm is plausible; no defensible single70mm measurement without model field definition and pivot-axis view.",
+      "measurement_status": "not_reliably_measurable_as_defined"
+    },
+    "frame_y_offset": {
+      "value": -95,
+      "source": "derived from user approximate front/rear margins (120 - 310)/2 mm; -Y is front; columns, beams and loading axis move together"
+    },
+    "bellows_depth": {
+      "value": 300,
+      "source": "photo30583 constrains visible bellows depth to280–320; midpoint300 used",
+      "measurement_status": "photo_bound_only",
+      "uncertainty_mm": 20
+    },
+    "bellows_relief": {
+      "value": 12,
+      "source": "unresolved photo-constrained display approximation: Single oblique views do not separate fold lateral relief from depth/profile and perspective; cannot turn guessed12 into a measured value.",
+      "measurement_status": "unobservable_exact_dimension"
+    },
+    "upper_adapter_clearance": {
+      "value": 30,
+      "source": "chosen visual clearance at maximum preview gap; not a hardware limit"
+    },
+    "upper_platen_diameter": {
+      "value": 150,
+      "source": "photo 30591: paired platen widths corrected by local inner-column spans",
+      "uncertainty_mm": 10,
+      "measurement_id": "upper_platen_diameter",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "upper_platen_thickness": {
+      "value": 24,
+      "source": "photo 30591: upper sidewall thickness / upper platen width; cross-check30590",
+      "uncertainty_mm": 3,
+      "measurement_id": "upper_platen_thickness",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "upper_shaft_diameter": {
+      "value": 60,
+      "source": "photo 30591: upper shaft/platen width ratio",
+      "uncertainty_mm": 3,
+      "measurement_id": "upper_shaft_diameter",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "upper_collar_diameter": {
+      "value": 68,
+      "source": "photo 30591: upper collar/platen silhouette ratio",
+      "uncertainty_mm": 4,
+      "measurement_id": "upper_collar_diameter",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "upper_collar_height": {
+      "value": 24,
+      "source": "photo 30591: collar axial silhouette length / upper platen scale",
+      "uncertainty_mm": 3,
+      "measurement_id": "upper_collar_height",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "upper_connector_neck_height": {
+      "value": 14,
+      "source": "photo 30590: exposed neck silhouette / platen scale",
+      "uncertainty_mm": 3,
+      "measurement_id": "upper_connector_neck_height",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "upper_connector_neck_diameter": {
+      "value": 42,
+      "source": "photo 30590: neck width / platen scale",
+      "uncertainty_mm": 4,
+      "measurement_id": "upper_connector_neck_diameter",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "upper_connector_nut_height": {
+      "value": 22,
+      "source": "photo 30590: hex connector axial length / platen scale",
+      "uncertainty_mm": 4,
+      "measurement_id": "upper_connector_nut_height",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "upper_connector_nut_diameter": {
+      "value": 60,
+      "source": "photo 30590: hex connector silhouette / platen scale",
+      "uncertainty_mm": 5,
+      "measurement_id": "upper_connector_nut_diameter",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "upper_connector_spigot_diameter": {
+      "value": 48,
+      "source": "photo 30590: upper connector boss width / platen scale",
+      "uncertainty_mm": 5,
+      "measurement_id": "upper_connector_spigot_diameter",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "lower_pin_diameter": {
+      "value": 18,
+      "source": "photo 30593: ribbed pull-pin outer height / platen scale",
+      "uncertainty_mm": 2,
+      "measurement_id": "lower_pin_diameter",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "lower_pin_projection": {
+      "value": 22,
+      "source": "photo 30593: visible knob length beyond shaft / platen scale",
+      "uncertainty_mm": 4,
+      "measurement_id": "lower_pin_projection",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "upper_pin_diameter": {
+      "value": 22,
+      "source": "photo 30592: ribbed pull-pin outer height / upper platen scale",
+      "uncertainty_mm": 3,
+      "measurement_id": "upper_pin_diameter",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "upper_pin_projection": {
+      "value": 26,
+      "source": "photo 30592: visible pull-pin length beyond shaft / upper platen scale",
+      "uncertainty_mm": 4,
+      "measurement_id": "upper_pin_projection",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "lower_cross_bore_diameter": {
+      "value": 16,
+      "source": "photo 30593: front radial hole vertical span / platen scale",
+      "uncertainty_mm": 2,
+      "measurement_id": "lower_cross_bore_diameter",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "upper_cross_bore_diameter": {
+      "value": 20,
+      "source": "photo 30592: shaft radial hole vertical span / platen scale",
+      "uncertainty_mm": 3,
+      "measurement_id": "upper_cross_bore_diameter",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "collar_hole_diameter": {
+      "value": 10,
+      "source": "photo 30592: collar hole vertical span / platen scale",
+      "uncertainty_mm": 2,
+      "measurement_id": "collar_hole_diameter",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "lower_bolt_pcd": {
+      "value": 78,
+      "source": "photo30593/30591 constrain four-hole pattern; display placement78; precise PCD unresolved",
+      "uncertainty_mm": 8,
+      "measurement_id": "lower_bolt_pcd",
+      "evidence": "measurements/photo-measurements.json",
+      "measurement_status": "unresolved_photo_constraint"
+    },
+    "crosshead_adapter_socket_diameter": {
+      "value": 49,
+      "source": "photo 30600: socket/outer width on same top plane",
+      "uncertainty_mm": 4,
+      "measurement_id": "crosshead_adapter_socket_diameter",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "crosshead_adapter_hole_diameter": {
+      "value": 18,
+      "source": "photo 30589: radial bore vertical span / local adapter width",
+      "uncertainty_mm": 3,
+      "measurement_id": "crosshead_adapter_hole_diameter",
+      "evidence": "measurements/photo-measurements.json"
+    },
+    "top_adapter_flange_diameter": {
+      "value": 100,
+      "source": "2026-11-09 user correction: fixed upper tensile holder BODY should be similar in size to the crosshead holder (photo-caliper body diameter82 x height60 mm). Keep photographed mounting flange100 and total height74; body length54. Socket49 and radial hole18 matched approximately to lower holder.",
+      "measurement_status": "user-guided size match; upper holder dimensions are not directly measured",
+      "superseded_photo_estimate": {
+        "value": 100,
+        "source": "photo 30587: matching flange silhouette and four-bolt layout compared with lower fixture",
+        "uncertainty_mm": 12,
+        "measurement_id": "top_adapter_flange_diameter",
+        "evidence": "measurements/photo-measurements.json"
+      }
+    },
+    "top_adapter_shaft_diameter": {
+      "value": 82,
+      "source": "2026-11-09 user correction: fixed upper tensile holder BODY should be similar in size to the crosshead holder (photo-caliper body diameter82 x height60 mm). Keep photographed mounting flange100 and total height74; body length54. Socket49 and radial hole18 matched approximately to lower holder.",
+      "measurement_status": "user-guided size match; upper holder dimensions are not directly measured",
+      "superseded_photo_estimate": {
+        "value": 58,
+        "source": "photo 30587: socket/flange width ratio",
+        "uncertainty_mm": 7,
+        "measurement_id": "top_adapter_shaft_diameter",
+        "evidence": "measurements/photo-measurements.json"
+      }
+    },
+    "top_adapter_socket_diameter": {
+      "value": 49,
+      "source": "2026-11-09 user correction: fixed upper tensile holder BODY should be similar in size to the crosshead holder (photo-caliper body diameter82 x height60 mm). Keep photographed mounting flange100 and total height74; body length54. Socket49 and radial hole18 matched approximately to lower holder.",
+      "measurement_status": "user-guided size match; upper holder dimensions are not directly measured",
+      "superseded_photo_estimate": {
+        "value": 36,
+        "source": "photo 30587: visible bore/flange ratio",
+        "uncertainty_mm": 5,
+        "measurement_id": "top_adapter_socket_diameter",
+        "evidence": "measurements/photo-measurements.json"
+      }
+    },
+    "top_adapter_hole_diameter": {
+      "value": 18,
+      "source": "2026-11-09 user correction: fixed upper tensile holder BODY should be similar in size to the crosshead holder (photo-caliper body diameter82 x height60 mm). Keep photographed mounting flange100 and total height74; body length54. Socket49 and radial hole18 matched approximately to lower holder.",
+      "measurement_status": "user-guided size match; upper holder dimensions are not directly measured",
+      "superseded_photo_estimate": {
+        "value": 14,
+        "source": "photo 30587: radial hole height / flange scale",
+        "uncertainty_mm": 3,
+        "measurement_id": "top_adapter_hole_diameter",
+        "evidence": "measurements/photo-measurements.json"
+      }
+    }
+  },
+  "preview": {
+    "default_gap_mm": 110,
+    "min_gap_mm": 0,
+    "max_gap_mm": 740,
+    "animation_seconds": 8,
+    "animation_max_gap_mm": 450,
+    "limits_status": "preview-only geometry bounds; actual limit switch positions unmeasured"
+  },
+  "notes": [
+    "No hardware or serial connection.",
+    "No calibrated force, stiffness, mass or material compression simulation.",
+    "The manual's 1100 mm available test distance is not used as travel stroke.",
+    "Photo dimensions are approximate; inspect and edit before using for calibrated placement.",
+    "Unobservable mounting offsets, exact bolt PCD, bellows relief and hidden construction remain explicitly unresolved display approximations; see measurement_status fields.",
+    "User correction: fixed upper tensile holder body diameter82 x length54 mm matches the approximate body size of the crosshead holder82 x60; flange100 and total height74 retained; not a new direct measurement.",
+    "User request: no exterior front/right stickers; rear load-cell nameplate and indicator control graphics retained.",
+    "Latest user clarification: the ENTIRE upper surface is one black plate across the full882mm frame width, including both column tops. White casings have no white top face exposed. The deeper centre beam remains between columns. Previous open-column-top interpretation was incorrect."
+  ],
+  "rendering_assumptions": {
+    "platen_chamfer_mm": 0.8,
+    "side_groove_depth_mm": 0.7,
+    "contact_scribe_width_mm": 0.25,
+    "hidden_fixture_socket_depth": "unobservable: not a manufacturing bore",
+    "small_thread_pitch": "unobservable: omitted",
+    "bolt_thread_diameter": "unobservable: clearance holes are display approximations",
+    "top_plate_thickness_mm": 2,
+    "top_plate_thickness_status": "Unmeasured display thickness only; central combined beam+plate thickness remains50mm. Overall height1910mm unchanged."
+  }
+}

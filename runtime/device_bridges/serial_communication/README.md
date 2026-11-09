@@ -61,6 +61,27 @@ Modules are trusted, locally installed Python code—not browser uploads. Scan d
 not import protocols. Duplicate IDs and malformed descriptors are excluded and
 reported without breaking valid modules. Paths cannot escape the module folder.
 
+### Module-owned views
+
+An optional `views: [{id: model, label: 3D model}]` declaration adds navigation
+links to that module's toolbar without device-name branches in the shared shell.
+Each view owns `views/<view-id>/index.html` and its local dependencies under the
+device module folder. No script, import, URL or arbitrary entry path is accepted
+in the descriptor; the installed view code uses this fixed convention.
+
+The generic host serves `/serial/modules/<module-id>/views/<view-id>` and the
+contained assets at `/api/serial/modules/<module-id>/views/<view-id>/assets/<path>`.
+Both inherit loopback/same-origin checks. Optional `profile_id` must belong to
+that module. Missing/invalid views are isolated on discovery, and a removed
+module's views disappear on catalog refresh. Views do not import protocol code.
+Adding a deployed view also requires explicit wheel/sdist entries in
+`runtime/distribution-files.json`, preserving the positive packaging contract.
+
+QM100T's `views/model/` contains its measured scene, viewer, vendor licenses and
+`calibration.mjs`. The calibration function returns `null` until supplied by the
+operator. The view reads the existing latest-measurement API only. See
+[model integration](../../../docs/gui/qm100t_model.md).
+
 ### Included protocols
 
 | Module | Defaults | Receive/request contract |

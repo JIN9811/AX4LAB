@@ -66,6 +66,13 @@
     $('serial-events').textContent='';$('event-gap').textContent='';$('serial-activity').textContent='';$('raw-events').open=false;
     const params=new URLSearchParams();if(state.module)params.set('module_id',state.module.id);if(id)params.set('profile_id',id);
     history.replaceState(null,'','/serial?'+params);
+    const views=$('serial-view-links');views.replaceChildren();
+    for (const view of state.module?.views||[]) {
+      const link=el('a',view.label+' ↗','btn');
+      link.href='/serial/modules/'+encodeURIComponent(state.module.id)+'/views/'+encodeURIComponent(view.id)
+        +(id?'?profile_id='+encodeURIComponent(id):'');
+      views.append(link);
+    }
     fields();renderStatus({state:'disconnected',receive_state:'no_data'},false);values(null);controls();tick();
   }
   function fields(){

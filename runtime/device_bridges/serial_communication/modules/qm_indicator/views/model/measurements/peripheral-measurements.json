@@ -1,0 +1,384 @@
+{
+  "scope": "Peripheral dimensions only; no model or parameter edits. All pixel anchors refer to original image sizes, origin upper left. Uncertainty is approximate visual/perspective tolerance, not statistical 95% confidence.",
+  "method": "Manual ruler reading and calibrated image ratios. Uncorrected out-of-plane perspective is explicitly included in uncertainty. Photo ruler markings are approximate; no EXIF/camera calibration available.",
+  "sources": {
+    "30608": "30608.jpg",
+    "30609": "30609.jpg",
+    "30610": "30610.jpg",
+    "30611": "30611.jpg",
+    "30584": "30584.jpg",
+    "30583": "30583.jpg",
+    "30606": "30606.jpg",
+    "30613": "30613.jpg",
+    "30614": "30614.jpg",
+    "30607": "30607.jpg"
+  },
+  "user_dimensions_preserved_mm": {
+    "base_width": 920,
+    "base_depth": 750,
+    "overall_height": 1910,
+    "deck_top_z": 531,
+    "frame_outer_width": 882,
+    "column_width": 205,
+    "frame_inner_gap": 472,
+    "column_depth": 320,
+    "front_margin": 120,
+    "rear_margin": 310
+  },
+  "measurements": [
+    {
+      "field": "indicator_width",
+      "recommended_mm": 180,
+      "uncertainty_mm": 8,
+      "evidence": "direct_ruler_photo",
+      "photo": "30608",
+      "pixel_endpoints": [
+        [
+          482,
+          299
+        ],
+        [
+          1064,
+          206
+        ]
+      ],
+      "reference": {
+        "type": "ruler centimeter markings",
+        "reading_left_mm_approx": 140,
+        "reading_right_mm_approx": 320,
+        "reference_tick_endpoints_approx": [
+          [
+            480,
+            298
+          ],
+          [
+            1073,
+            205
+          ]
+        ]
+      },
+      "calculation": "Approximate ruler reading difference 320-140=180 mm. Ruler is not exactly coplanar or parallel with cabinet horizontal edges.",
+      "replaces_guess_mm": 200
+    },
+    {
+      "field": "indicator_height",
+      "recommended_mm": 260,
+      "uncertainty_mm": 8,
+      "evidence": "direct_ruler_photo",
+      "photo": "30609",
+      "pixel_endpoints": [
+        [
+          408,
+          309
+        ],
+        [
+          466,
+          961
+        ]
+      ],
+      "reference": {
+        "type": "ruler centimeter markings",
+        "reading_top_mm_approx": 262,
+        "reading_bottom_mm_approx": 2,
+        "reference_ticks_mm": [
+          250,
+          50
+        ],
+        "reference_tick_endpoints_approx": [
+          [
+            418,
+            349
+          ],
+          [
+            461,
+            881
+          ]
+        ]
+      },
+      "calculation": "Top≈26.2 cm, bottom≈0.2 cm =>260 mm; follow sloping cabinet edges to ruler rather than use same image y.",
+      "replaces_guess_mm": 280
+    },
+    {
+      "field": "indicator_depth",
+      "recommended_mm": 60,
+      "uncertainty_mm": 4,
+      "evidence": "direct_ruler_photo",
+      "photo": "30610",
+      "pixel_endpoints": [
+        [
+          285,
+          792
+        ],
+        [
+          515,
+          809
+        ]
+      ],
+      "reference": {
+        "dimension_mm": 50,
+        "pixel_endpoints": [
+          [
+            290,
+            792
+          ],
+          [
+            477,
+            807
+          ]
+        ]
+      },
+      "calculation": "230.63px/187.60px*50=61.5 mm, rounded60; front begins slightly before ruler zero.",
+      "replaces_guess_mm": 50
+    },
+    {
+      "field": "deck_thickness",
+      "recommended_mm": 40,
+      "uncertainty_mm": 5,
+      "evidence": "direct_ruler_photo_visible_fascia",
+      "photos": [
+        "30614",
+        "30613"
+      ],
+      "pixel_endpoints_30614": [
+        [
+          642,
+          182
+        ],
+        [
+          645,
+          267
+        ]
+      ],
+      "reference": {
+        "photo": "30614",
+        "ruler_top_mm_approx": 531,
+        "ruler_bottom_mm_approx": 491,
+        "reference_ticks_mm": [
+          500,
+          400
+        ],
+        "pixel_endpoints": [
+          [
+            635,
+            251
+          ],
+          [
+            642,
+            449
+          ]
+        ]
+      },
+      "calculation": "Black exposed fascia spans approximately531 to491 mm above floor =>40 mm. This is exterior fascia thickness, not verified solid structural plate thickness.",
+      "replaces_guess_mm": 30
+    },
+    {
+      "field": "top_beam_thickness",
+      "recommended_mm": 50,
+      "uncertainty_mm": 7,
+      "evidence": "photo_ratio",
+      "photo": "30606",
+      "pixel_endpoints": [
+        [
+          742,
+          388
+        ],
+        [
+          742,
+          447
+        ]
+      ],
+      "reference": {
+        "dimension_mm": 472,
+        "pixel_endpoints": [
+          [
+            450,
+            387
+          ],
+          [
+            1035,
+            387
+          ]
+        ],
+        "name": "user-confirmed inner gap"
+      },
+      "calculation": "59/585*472=47.6 mm, rounded50. Horizontal-to-vertical scale assumption imperfect in oblique image; comparable front plane.",
+      "replaces_guess_mm": 40
+    },
+    {
+      "field": "top_screw_projection",
+      "recommended_mm": 40,
+      "uncertainty_mm": 8,
+      "evidence": "photo_ratio",
+      "photo": "30606",
+      "pixel_endpoints": [
+        [
+          388,
+          323
+        ],
+        [
+          394,
+          368
+        ]
+      ],
+      "reference": {
+        "dimension_mm": 472,
+        "pixel_endpoints": [
+          [
+            450,
+            387
+          ],
+          [
+            1035,
+            387
+          ]
+        ],
+        "name": "user-confirmed inner gap"
+      },
+      "calculation": "45.4/585*472=36.6 mm; rounded40. Right assembly gives a comparable envelope. Includes visible nut+washer stack above top surface, not thread length.",
+      "replaces_guess_mm": 18
+    },
+    {
+      "field": "caster_height",
+      "recommended_mm": 85,
+      "uncertainty_mm": 20,
+      "evidence": "photo_ratio_low_confidence",
+      "photos": [
+        "30614",
+        "30613"
+      ],
+      "pixel_endpoints_30614": [
+        [
+          812,
+          829
+        ],
+        [
+          813,
+          900
+        ]
+      ],
+      "pixel_endpoints_30613": [
+        [
+          896,
+          855
+        ],
+        [
+          906,
+          935
+        ]
+      ],
+      "reference": {
+        "photo": "30614",
+        "dimension_mm": 100,
+        "pixel_endpoints": [
+          [
+            655,
+            840
+          ],
+          [
+            665,
+            930
+          ]
+        ],
+        "name": "local tape0-100mm interval"
+      },
+      "calculation": "Visible envelope approx79mm in30614 and90mm in30613. Recommend85±20mm. Wheel/mount plane differs from tape plane; upper mounting interface hidden. Existing75mm lies within uncertainty.",
+      "replaces_guess_mm": 75
+    },
+    {
+      "field": "indicator_center_z",
+      "recommended_mm": 1220,
+      "uncertainty_mm": 80,
+      "evidence": "photo_plane_homography_low_confidence",
+      "photo": "30584",
+      "pixel_center": [
+        844,
+        652
+      ],
+      "reference": {
+        "quad_pixels": [
+          [
+            764,
+            130
+          ],
+          [
+            892,
+            155
+          ],
+          [
+            719,
+            974
+          ],
+          [
+            639,
+            1015
+          ]
+        ],
+        "quad_local_x_z_mm": [
+          [
+            0,
+            1340
+          ],
+          [
+            205,
+            1340
+          ],
+          [
+            205,
+            0
+          ],
+          [
+            0,
+            0
+          ]
+        ],
+        "base_z_mm": 531,
+        "name": "right column front face; approximate1340height derived1910-40nut-531deck"
+      },
+      "calculation": "Homography maps cabinet center to localz687.7; floorz1218.7, rounded1220. Cabinet is outside reference plane so out-of-plane parallax dominates uncertainty; rectified cabinet apparentheight275 vs ruler260 is consistency check.",
+      "replaces_guess_mm": 1100
+    }
+  ],
+  "limited_or_unobservable": [
+    {
+      "field": "indicator_column_clearance",
+      "current_guess_mm": 75,
+      "status": "not_reliably_measurable_from_supplied_views",
+      "reason": "Articulated mount and cabinet are at different depths. Frontal photo projection overlaps column edge; cannot equate projected gap with physical minimum clearance. 30610 ruler is along cabinet thickness, not column-to-cabinet gap."
+    },
+    {
+      "field": "indicator_elbow_offset",
+      "current_guess_mm": 70,
+      "status": "not_reliably_measurable_as_defined",
+      "reason": "30611 visibly establishes two articulated links and cylindrical pivots but center axes are partly occluded and project to different planes. A rough link envelope70-100mm is plausible; no defensible single70mm measurement without model field definition and pivot-axis view."
+    },
+    {
+      "field": "bellows_depth",
+      "current_guess_mm": 305,
+      "status": "weak_photo_bound_only",
+      "photo": "30583",
+      "rough_range_mm": [
+        280,
+        320
+      ],
+      "reason": "Bellows occupy nearly entire320mm column depth. Border occlusion and folds preclude reliable exact endpoints;305 is plausible but is not directly measured."
+    },
+    {
+      "field": "bellows_relief",
+      "current_guess_mm": 12,
+      "status": "unobservable_exact_dimension",
+      "reason": "Single oblique views do not separate fold lateral relief from depth/profile and perspective; cannot turn guessed12 into a measured value."
+    },
+    {
+      "field": "crosshead_depth",
+      "current_guess_mm": 320,
+      "status": "user_geometry_reference_or_parent_measurement",
+      "reason": "Crosshead spans approximately column depth but back edge is partly occluded.320 should be user-depth-linked design assumption unless parent has independent ruler data."
+    }
+  ],
+  "visual_model_suggestions": [
+    "Use actual white rectangular enclosure180x260x60; green/yellow front face and visibly articulated white/black arm.",
+    "Visible top cap fastener assemblies need about40mm external envelope, not18mm.",
+    "Treat deck40mm as exposed black fascia; do not imply entire plate is solid40mm.",
+    "Do not label mount clearance, elbow offset, bellows relief as measured. Retain unresolved flags or provide visual bounds."
+  ]
+}

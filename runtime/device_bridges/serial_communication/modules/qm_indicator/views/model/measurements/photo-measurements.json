@@ -1,0 +1,1100 @@
+{
+  "version": 1,
+  "units": "mm",
+  "coordinate_convention": "original image pixels: x right, y down; endpoints are manual visual readings, not detected edges",
+  "method": "Caliper tick interpolation and local silhouette ratios. Rounded nominal sizes include blur, parallax and cross-view disagreement; photo-derived sizes are not certified metrology. No hidden thread pitches/depths are measured.",
+  "measurements": {
+    "platen_diameter": {
+      "value_mm": 148,
+      "uncertainty_mm": 2,
+      "photo": "30597.jpg",
+      "method": "caliper vernier zero between 147 and 149 mm",
+      "anchors_px": {
+        "140_tick": [
+          874,
+          446
+        ],
+        "150_tick": [
+          910,
+          448
+        ],
+        "vernier_zero": [
+          900,
+          459
+        ]
+      },
+      "reference": "main caliper scale",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    },
+    "platen_thickness": {
+      "value_mm": 23,
+      "uncertainty_mm": 1,
+      "photo": "30598.jpg",
+      "method": "caliper vernier zero approximately 23 mm",
+      "anchors_px": {
+        "20_tick": [
+          560,
+          481
+        ],
+        "30_tick": [
+          560,
+          438
+        ],
+        "vernier_zero": [
+          569,
+          469
+        ]
+      },
+      "reference": "main caliper scale",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    },
+    "crosshead_thickness": {
+      "value_mm": 50,
+      "uncertainty_mm": 1,
+      "photo": "30599.jpg",
+      "method": "caliper zero coincides with approximately 50 mm tick",
+      "anchors_px": {
+        "40_tick": [
+          968,
+          542
+        ],
+        "50_tick": [
+          966,
+          577
+        ],
+        "vernier_zero": [
+          950,
+          577
+        ]
+      },
+      "reference": "main caliper scale",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    },
+    "crosshead_adapter_diameter": {
+      "value_mm": 82,
+      "uncertainty_mm": 1,
+      "photo": "30600.jpg",
+      "method": "caliper zero approximately 2 mm past 80",
+      "anchors_px": {
+        "80_tick": [
+          910,
+          642
+        ],
+        "90_tick": [
+          912,
+          683
+        ],
+        "vernier_zero": [
+          901,
+          650
+        ]
+      },
+      "reference": "main caliper scale",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    },
+    "crosshead_adapter_height": {
+      "value_mm": 60,
+      "uncertainty_mm": 2,
+      "photo": "30601.jpg",
+      "method": "depth rod reading approximately 60 mm",
+      "anchors_px": {
+        "60_tick": [
+          465,
+          624
+        ],
+        "70_tick": [
+          465,
+          659
+        ],
+        "vernier_zero": [
+          454,
+          624
+        ]
+      },
+      "reference": "main caliper scale",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    },
+    "lower_fixture_height": {
+      "value_mm": 114,
+      "uncertainty_mm": 3,
+      "photo": "30602.jpg",
+      "method": "depth rod zero near 114 mm; cross-checked 30603",
+      "anchors_px": {
+        "110_tick": [
+          515,
+          505
+        ],
+        "120_tick": [
+          515,
+          540
+        ],
+        "vernier_zero": [
+          505,
+          519
+        ]
+      },
+      "reference": "main caliper scale",
+      "limitations": "30603 repeats about 114 mm; hand placement/rod contact adds uncertainty."
+    },
+    "lower_flange_diameter": {
+      "value_mm": 100,
+      "uncertainty_mm": 8,
+      "photo": "30597.jpg",
+      "method": "local flange/platen width ratio, rounded",
+      "anchors_px": {
+        "reference": [
+          [
+            423,
+            494
+          ],
+          [
+            891,
+            494
+          ]
+        ],
+        "target": [
+          [
+            498,
+            744
+          ],
+          [
+            813,
+            744
+          ]
+        ]
+      },
+      "reference": "platen_diameter=148; 315/468*148=99.6",
+      "limitations": "30593 gives about 95 mm; 30591 gives about 109 mm due perspective. 100±8 covers approximate multi-view spread."
+    },
+    "lower_flange_height": {
+      "value_mm": 20,
+      "uncertainty_mm": 3,
+      "photo": "30593.jpg",
+      "method": "front flange vertical rim / local flange width with tilt allowance",
+      "anchors_px": {
+        "reference": [
+          [
+            418,
+            544
+          ],
+          [
+            795,
+            544
+          ]
+        ],
+        "target": [
+          [
+            610,
+            592
+          ],
+          [
+            610,
+            661
+          ]
+        ]
+      },
+      "reference": "lower_flange_diameter=100; 69/377*100=18.3 projected; about 20 after tilt allowance",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    },
+    "fixture_shaft_diameter": {
+      "value_mm": 52,
+      "uncertainty_mm": 4,
+      "photo": "30593.jpg",
+      "method": "lower shaft/platen silhouette ratio",
+      "anchors_px": {
+        "reference": [
+          [
+            332,
+            220
+          ],
+          [
+            921,
+            220
+          ]
+        ],
+        "target": [
+          [
+            521,
+            430
+          ],
+          [
+            714,
+            430
+          ]
+        ]
+      },
+      "reference": "platen_diameter=148; 193/589*148=48.5; 30591 ratio 108/307*148=52.1",
+      "limitations": "Rounded to52 using clearer straight-view30591; 30593 perspective is oblique."
+    },
+    "fixture_collar_diameter": {
+      "value_mm": 62,
+      "uncertainty_mm": 4,
+      "photo": "30593.jpg",
+      "method": "lower collar/platen silhouette ratio",
+      "anchors_px": {
+        "reference": [
+          [
+            332,
+            220
+          ],
+          [
+            921,
+            220
+          ]
+        ],
+        "target": [
+          [
+            506,
+            340
+          ],
+          [
+            746,
+            340
+          ]
+        ]
+      },
+      "reference": "platen_diameter=148; 240/589*148=60.3",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    },
+    "fixture_collar_height": {
+      "value_mm": 20,
+      "uncertainty_mm": 4,
+      "photo": "30593.jpg",
+      "method": "collar axial silhouette length / local platen scale",
+      "anchors_px": {
+        "reference": [
+          [
+            332,
+            220
+          ],
+          [
+            921,
+            220
+          ]
+        ],
+        "target": [
+          [
+            508,
+            289
+          ],
+          [
+            508,
+            372
+          ]
+        ]
+      },
+      "reference": "platen_diameter=148; 83/589*148=20.9",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    },
+    "upper_platen_diameter": {
+      "value_mm": 150,
+      "uncertainty_mm": 10,
+      "photo": "30591.jpg",
+      "method": "paired platen widths corrected by local inner-column spans",
+      "anchors_px": {
+        "lower": [
+          [
+            503,
+            551
+          ],
+          [
+            810,
+            551
+          ]
+        ],
+        "upper": [
+          [
+            490,
+            325
+          ],
+          [
+            819,
+            325
+          ]
+        ],
+        "column_lower": [
+          [
+            302,
+            551
+          ],
+          [
+            920,
+            551
+          ]
+        ],
+        "column_upper": [
+          [
+            286,
+            325
+          ],
+          [
+            935,
+            325
+          ]
+        ]
+      },
+      "reference": "lower148 * (329/307) * (618/649) =151.0",
+      "limitations": "Only lower platen has a caliper reading. Upper remains a perspective-corrected photo measurement, ±10 mm."
+    },
+    "upper_platen_thickness": {
+      "value_mm": 24,
+      "uncertainty_mm": 3,
+      "photo": "30591.jpg",
+      "method": "upper sidewall thickness / upper platen width; cross-check30590",
+      "anchors_px": {
+        "reference": [
+          [
+            490,
+            325
+          ],
+          [
+            819,
+            325
+          ]
+        ],
+        "target": [
+          [
+            493,
+            300
+          ],
+          [
+            493,
+            355
+          ]
+        ]
+      },
+      "reference": "upper_platen_diameter=150;55/329*150=25.1; rear30590≈21–24",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    },
+    "upper_shaft_diameter": {
+      "value_mm": 60,
+      "uncertainty_mm": 3,
+      "photo": "30591.jpg",
+      "method": "upper shaft/platen width ratio",
+      "anchors_px": {
+        "reference": [
+          [
+            490,
+            325
+          ],
+          [
+            819,
+            325
+          ]
+        ],
+        "target": [
+          [
+            590,
+            161
+          ],
+          [
+            721,
+            161
+          ]
+        ]
+      },
+      "reference": "upper_platen_diameter=150;131/329*150=59.7",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    },
+    "upper_shaft_height": {
+      "value_mm": 68,
+      "uncertainty_mm": 8,
+      "photo": "30591.jpg",
+      "method": "upper shaft silhouette height / local platen scale",
+      "anchors_px": {
+        "reference": [
+          [
+            490,
+            325
+          ],
+          [
+            819,
+            325
+          ]
+        ],
+        "target": [
+          [
+            591,
+            87
+          ],
+          [
+            591,
+            237
+          ]
+        ]
+      },
+      "reference": "upper_platen_diameter=150;150/329*150=68.4",
+      "limitations": "30590≈61 mm and30592≈73 mm; rounded68 with cross-view uncertainty."
+    },
+    "upper_collar_diameter": {
+      "value_mm": 68,
+      "uncertainty_mm": 4,
+      "photo": "30591.jpg",
+      "method": "upper collar/platen silhouette ratio",
+      "anchors_px": {
+        "reference": [
+          [
+            490,
+            325
+          ],
+          [
+            819,
+            325
+          ]
+        ],
+        "target": [
+          [
+            578,
+            265
+          ],
+          [
+            728,
+            265
+          ]
+        ]
+      },
+      "reference": "upper_platen_diameter=150;150/329*150=68.4",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    },
+    "upper_collar_height": {
+      "value_mm": 24,
+      "uncertainty_mm": 3,
+      "photo": "30591.jpg",
+      "method": "collar axial silhouette length / upper platen scale",
+      "anchors_px": {
+        "reference": [
+          [
+            490,
+            325
+          ],
+          [
+            819,
+            325
+          ]
+        ],
+        "target": [
+          [
+            579,
+            241
+          ],
+          [
+            579,
+            291
+          ]
+        ]
+      },
+      "reference": "upper_platen_diameter=150;50/329*150=22.8",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    },
+    "upper_connector_height": {
+      "value_mm": 58,
+      "uncertainty_mm": 7,
+      "photo": "30590.jpg",
+      "method": "whole exposed connector between cell and shaft / platen scale",
+      "anchors_px": {
+        "reference": [
+          [
+            500,
+            680
+          ],
+          [
+            776,
+            680
+          ]
+        ],
+        "target": [
+          [
+            639,
+            384
+          ],
+          [
+            639,
+            491
+          ]
+        ]
+      },
+      "reference": "upper_platen_diameter=150;107/276*150=58.2",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    },
+    "upper_connector_neck_height": {
+      "value_mm": 14,
+      "uncertainty_mm": 3,
+      "photo": "30590.jpg",
+      "method": "exposed neck silhouette / platen scale",
+      "anchors_px": {
+        "reference": [
+          [
+            500,
+            680
+          ],
+          [
+            776,
+            680
+          ]
+        ],
+        "target": [
+          [
+            639,
+            466
+          ],
+          [
+            639,
+            491
+          ]
+        ]
+      },
+      "reference": "upper_platen_diameter=150;25/276*150=13.6",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    },
+    "upper_connector_neck_diameter": {
+      "value_mm": 42,
+      "uncertainty_mm": 4,
+      "photo": "30590.jpg",
+      "method": "neck width / platen scale",
+      "anchors_px": {
+        "reference": [
+          [
+            500,
+            680
+          ],
+          [
+            776,
+            680
+          ]
+        ],
+        "target": [
+          [
+            600,
+            479
+          ],
+          [
+            678,
+            479
+          ]
+        ]
+      },
+      "reference": "upper_platen_diameter=150;78/276*150=42.4",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    },
+    "upper_connector_nut_height": {
+      "value_mm": 22,
+      "uncertainty_mm": 4,
+      "photo": "30590.jpg",
+      "method": "hex connector axial length / platen scale",
+      "anchors_px": {
+        "reference": [
+          [
+            500,
+            680
+          ],
+          [
+            776,
+            680
+          ]
+        ],
+        "target": [
+          [
+            639,
+            425
+          ],
+          [
+            639,
+            466
+          ]
+        ]
+      },
+      "reference": "upper_platen_diameter=150;41/276*150=22.3",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    },
+    "upper_connector_nut_diameter": {
+      "value_mm": 60,
+      "uncertainty_mm": 5,
+      "photo": "30590.jpg",
+      "method": "hex connector silhouette / platen scale",
+      "anchors_px": {
+        "reference": [
+          [
+            500,
+            680
+          ],
+          [
+            776,
+            680
+          ]
+        ],
+        "target": [
+          [
+            583,
+            444
+          ],
+          [
+            695,
+            444
+          ]
+        ]
+      },
+      "reference": "upper_platen_diameter=150;112/276*150=60.9; visible across-corners envelope",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    },
+    "upper_connector_spigot_diameter": {
+      "value_mm": 48,
+      "uncertainty_mm": 5,
+      "photo": "30590.jpg",
+      "method": "upper connector boss width / platen scale",
+      "anchors_px": {
+        "reference": [
+          [
+            500,
+            680
+          ],
+          [
+            776,
+            680
+          ]
+        ],
+        "target": [
+          [
+            599,
+            403
+          ],
+          [
+            691,
+            403
+          ]
+        ]
+      },
+      "reference": "upper_platen_diameter=150;92/276*150=50.0",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    },
+    "lower_pin_diameter": {
+      "value_mm": 18,
+      "uncertainty_mm": 2,
+      "photo": "30593.jpg",
+      "method": "ribbed pull-pin outer height / platen scale",
+      "anchors_px": {
+        "reference": [
+          [
+            332,
+            220
+          ],
+          [
+            921,
+            220
+          ]
+        ],
+        "target": [
+          [
+            761,
+            389
+          ],
+          [
+            761,
+            460
+          ]
+        ]
+      },
+      "reference": "platen148;71/589*148=17.8",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    },
+    "lower_pin_projection": {
+      "value_mm": 22,
+      "uncertainty_mm": 4,
+      "photo": "30593.jpg",
+      "method": "visible knob length beyond shaft / platen scale",
+      "anchors_px": {
+        "reference": [
+          [
+            332,
+            220
+          ],
+          [
+            921,
+            220
+          ]
+        ],
+        "target": [
+          [
+            712,
+            425
+          ],
+          [
+            795,
+            425
+          ]
+        ]
+      },
+      "reference": "platen148;83/589*148=20.9",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    },
+    "upper_pin_diameter": {
+      "value_mm": 22,
+      "uncertainty_mm": 3,
+      "photo": "30592.jpg",
+      "method": "ribbed pull-pin outer height / upper platen scale",
+      "anchors_px": {
+        "reference": [
+          [
+            431,
+            426
+          ],
+          [
+            875,
+            426
+          ]
+        ],
+        "target": [
+          [
+            813,
+            196
+          ],
+          [
+            813,
+            263
+          ]
+        ]
+      },
+      "reference": "upper150;67/444*150=22.6",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    },
+    "upper_pin_projection": {
+      "value_mm": 26,
+      "uncertainty_mm": 4,
+      "photo": "30592.jpg",
+      "method": "visible pull-pin length beyond shaft / upper platen scale",
+      "anchors_px": {
+        "reference": [
+          [
+            431,
+            426
+          ],
+          [
+            875,
+            426
+          ]
+        ],
+        "target": [
+          [
+            773,
+            225
+          ],
+          [
+            850,
+            225
+          ]
+        ]
+      },
+      "reference": "upper150;77/444*150=26.0",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    },
+    "lower_cross_bore_diameter": {
+      "value_mm": 16,
+      "uncertainty_mm": 2,
+      "photo": "30593.jpg",
+      "method": "front radial hole vertical span / platen scale",
+      "anchors_px": {
+        "reference": [
+          [
+            332,
+            220
+          ],
+          [
+            921,
+            220
+          ]
+        ],
+        "target": [
+          [
+            634,
+            422
+          ],
+          [
+            634,
+            482
+          ]
+        ]
+      },
+      "reference": "platen148;60/589*148=15.1",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    },
+    "upper_cross_bore_diameter": {
+      "value_mm": 20,
+      "uncertainty_mm": 3,
+      "photo": "30592.jpg",
+      "method": "shaft radial hole vertical span / platen scale",
+      "anchors_px": {
+        "reference": [
+          [
+            431,
+            426
+          ],
+          [
+            875,
+            426
+          ]
+        ],
+        "target": [
+          [
+            705,
+            179
+          ],
+          [
+            705,
+            245
+          ]
+        ]
+      },
+      "reference": "upper150;66/444*150=22.3",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    },
+    "collar_hole_diameter": {
+      "value_mm": 10,
+      "uncertainty_mm": 2,
+      "photo": "30592.jpg",
+      "method": "collar hole vertical span / platen scale",
+      "anchors_px": {
+        "reference": [
+          [
+            431,
+            426
+          ],
+          [
+            875,
+            426
+          ]
+        ],
+        "target": [
+          [
+            591,
+            297
+          ],
+          [
+            591,
+            332
+          ]
+        ]
+      },
+      "reference": "upper150;35/444*150=11.8; lower30593≈10",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    },
+    "lower_bolt_pcd": {
+      "value_mm": 78,
+      "uncertainty_mm": 8,
+      "photo": "30593.jpg",
+      "method": "photo-constrained display approximation only",
+      "anchors_px": {
+        "visible_front_bolt_centers": [
+          [
+            500,
+            548
+          ],
+          [
+            742,
+            548
+          ]
+        ]
+      },
+      "reference": "flange silhouette and four-bolt layout",
+      "limitations": "Insufficient coplanar metric calibration to recover PCD;78 is retained display placement, not a measured value."
+    },
+    "crosshead_adapter_socket_diameter": {
+      "value_mm": 49,
+      "uncertainty_mm": 4,
+      "photo": "30600.jpg",
+      "method": "socket/outer width on same top plane",
+      "anchors_px": {
+        "reference": [
+          [
+            568,
+            481
+          ],
+          [
+            901,
+            481
+          ]
+        ],
+        "target": [
+          [
+            624,
+            481
+          ],
+          [
+            829,
+            481
+          ]
+        ]
+      },
+      "reference": "adapter82;205/333*82=50.5",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    },
+    "crosshead_adapter_hole_diameter": {
+      "value_mm": 18,
+      "uncertainty_mm": 3,
+      "photo": "30589.jpg",
+      "method": "radial bore vertical span / local adapter width",
+      "anchors_px": {
+        "reference": [
+          [
+            264,
+            365
+          ],
+          [
+            494,
+            365
+          ]
+        ],
+        "target": [
+          [
+            425,
+            439
+          ],
+          [
+            425,
+            487
+          ]
+        ]
+      },
+      "reference": "adapter82;48/230*82=17.1",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    },
+    "top_adapter_height": {
+      "value_mm": 74,
+      "uncertainty_mm": 10,
+      "photo": "30587.jpg",
+      "method": "whole attachment axial silhouette / flange diameter",
+      "anchors_px": {
+        "reference": [
+          [
+            519,
+            405
+          ],
+          [
+            782,
+            405
+          ]
+        ],
+        "target": [
+          [
+            648,
+            309
+          ],
+          [
+            648,
+            503
+          ]
+        ]
+      },
+      "reference": "top flange photo-inferred100;194/263*100=73.8",
+      "limitations": "Absolute scale transferred from similar lower flange; low confidence, ±10mm."
+    },
+    "top_adapter_flange_diameter": {
+      "value_mm": 100,
+      "uncertainty_mm": 12,
+      "photo": "30587.jpg",
+      "method": "matching flange silhouette and four-bolt layout compared with lower fixture",
+      "anchors_px": {
+        "target": [
+          [
+            519,
+            405
+          ],
+          [
+            782,
+            405
+          ]
+        ]
+      },
+      "reference": "lower flange100±8; same attachment family",
+      "limitations": "No shared ruler plane; this is a photo-constrained envelope, not independently measured nominal diameter."
+    },
+    "top_adapter_shaft_diameter": {
+      "value_mm": 58,
+      "uncertainty_mm": 7,
+      "photo": "30587.jpg",
+      "method": "socket/flange width ratio",
+      "anchors_px": {
+        "reference": [
+          [
+            519,
+            405
+          ],
+          [
+            782,
+            405
+          ]
+        ],
+        "target": [
+          [
+            579,
+            470
+          ],
+          [
+            732,
+            470
+          ]
+        ]
+      },
+      "reference": "top flange100;153/263*100=58.2",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    },
+    "top_adapter_socket_diameter": {
+      "value_mm": 36,
+      "uncertainty_mm": 5,
+      "photo": "30587.jpg",
+      "method": "visible bore/flange ratio",
+      "anchors_px": {
+        "reference": [
+          [
+            519,
+            405
+          ],
+          [
+            782,
+            405
+          ]
+        ],
+        "target": [
+          [
+            606,
+            515
+          ],
+          [
+            700,
+            515
+          ]
+        ]
+      },
+      "reference": "top flange100;94/263*100=35.7",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    },
+    "top_adapter_hole_diameter": {
+      "value_mm": 14,
+      "uncertainty_mm": 3,
+      "photo": "30587.jpg",
+      "method": "radial hole height / flange scale",
+      "anchors_px": {
+        "reference": [
+          [
+            519,
+            405
+          ],
+          [
+            782,
+            405
+          ]
+        ],
+        "target": [
+          [
+            650,
+            429
+          ],
+          [
+            650,
+            463
+          ]
+        ]
+      },
+      "reference": "top flange100;34/263*100=12.9",
+      "limitations": "Perspective, edge selection and image resolution limit accuracy."
+    }
+  }
+}

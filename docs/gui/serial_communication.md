@@ -55,5 +55,13 @@ control UTM motion, zero/tare the scale, or replace the UTM CSV collection stage
 Qm displacement channels are not yet calibrated absolute platen height.
 Only the selected measurement request is transmitted (CAS: `P`); UTM is passive.
 
+## QM100T model
+
+Select **3D model** in the Qmesys QM100T toolbar to open its measured UTM model.
+The selected profile is carried into the page and back to communication. The
+page reads existing serial measurements without opening a port. Calibration is
+left to the operator: serial values do not move the preview by default.
+See [QM100T model and calibration hook](qm100t_model.md).
+
 For dependency installation, module extension, protocol sources and API contracts,
 see the [serial module reference](../../runtime/device_bridges/serial_communication/README.md).

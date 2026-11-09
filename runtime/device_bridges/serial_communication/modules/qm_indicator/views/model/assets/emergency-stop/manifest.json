@@ -1,0 +1,74 @@
+{
+  "title": "Emergency stop mushroom head push-button - 22 mm (cap and collar excerpt)",
+  "creator": "Henrique Enzweiler",
+  "license": "CC-BY-3.0",
+  "license_url": "https://creativecommons.org/licenses/by/3.0/",
+  "source_url": "https://github.com/FreeCAD/FreeCAD-library/blob/e6cb89e6bbde7fa807b2fcf753e6f7227f40395b/Electrical%20Parts/Push%20buttons/Emergency%20stop%20mushroom%20head%20push-button%20-%2022%20mm.FCStd",
+  "units": "millimeters",
+  "origin": "Center of black collar rear mounting face",
+  "axis": "Positive Z points out of the machine panel toward the operator; X/Y lie in the panel plane.",
+  "source_transform": {
+    "x": "source_x - 17.5",
+    "y": "-(source_z + 13.5)",
+    "z": "source_y - 56.5"
+  },
+  "adaptations": "Tessellated original BRep at 0.08 mm chordal / 0.15 rad angular tolerance; extracted original red cap and dark collar faces; omitted source yellow enclosure and electrical housing; rigidly transformed axes and origin. Original visible cap/collar shape is unscaled. Planar disks were added only at hidden circular material-interface openings to make each extracted component watertight.",
+  "parts": [
+    {
+      "name": "red_cap",
+      "file": "red_cap.npz",
+      "stl": "red_cap.stl",
+      "color_rgb_float": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "bounds_mm": [
+        [
+          -20.00000000000001,
+          -20.0,
+          12.0
+        ],
+        [
+          19.999999999999986,
+          20.0,
+          24.020410288672892
+        ]
+      ],
+      "vertices": 1976,
+      "triangles": 3948,
+      "hidden_capping_triangles_added": 84
+    },
+    {
+      "name": "dark_collar",
+      "file": "dark_collar.npz",
+      "stl": "dark_collar.stl",
+      "color_rgb_float": [
+        0.25098039215686274,
+        0.25098039215686274,
+        0.25098039215686274
+      ],
+      "bounds_mm": [
+        [
+          -15.00000000000001,
+          -14.999999999999998,
+          -7.105427357601002e-15
+        ],
+        [
+          14.999999999999986,
+          15.0,
+          12.0
+        ]
+      ],
+      "vertices": 5626,
+      "triangles": 11248,
+      "hidden_capping_triangles_added": 168
+    }
+  ],
+  "deviations_from_photo": [
+    "Generic community CAD geometry, not an identified manufacturer match to the photographed UTM.",
+    "No white twist-release markings or fine perimeter grip ribs are modeled.",
+    "Photo has a yellow rectangular upper/lower protective guard; this source instead has a yellow enclosure, omitted from extracted button.",
+    "40 mm cap diameter and 24.0204 mm outward projection are source CAD dimensions, not measurements of the photographed machine."
+  ]
+}

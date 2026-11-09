@@ -6,7 +6,7 @@
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/styles.css">
   <link rel="stylesheet" href="/static/serial_workspace.css?v=4">
-  <script src="/static/serial_workspace.js?v=4" defer></script>
+  <script src="/static/serial_workspace.js?v=5" defer></script>
 </head>
 <body>
 <main class="page equipment-setup-page serial-page">
@@ -22,6 +22,7 @@
   <section id="serial-device" hidden>
     <div class="panel serial-toolbar">
       <button id="back-catalog" class="btn">← Devices</button><h2 id="device-title"></h2>
+      <div id="serial-view-links" class="button-row"></div>
       <label>Profile<select id="profile-select"></select></label>
       <input id="profile-name" aria-label="Profile name" placeholder="Profile name" maxlength="100">
       <button id="new-profile" class="btn">New</button><button id="delete-profile" class="btn danger">Delete</button>
