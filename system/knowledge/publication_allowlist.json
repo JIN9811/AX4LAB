@@ -1246,15 +1246,15 @@
       "review": "Visually reviewed generated model label: synthetic indicator preview or BONGSHIN DSCK product specifications, no serial numbers, people, telemetry, screenshots or private source images. Export copy is byte-identical to the viewer texture."
     },
     "runtime/device_bridges/serial_communication/modules/qm_indicator/views/model/exports/utm.glb.gz": {
-      "sha256": "2abf46a69ff08659d4780660ff5ddb4946511568645b37b9df9b144ac162e0ed",
+      "sha256": "9d611be23a3ab4f6eb334a9cbaf37367bd19bcb43dbb1194bcccc1bff2cf6286",
       "review": "Generated UTM model geometry/kinematics only, losslessly gzip-compressed for distribution; decompressed content reviewed for local paths and credential patterns. GLB/USD geometry matches the operator-requested finalized model; embedded/static labels are synthetic. No reference photos, manuals, live telemetry or private profiles. Emergency-stop CC BY 3.0 attribution retained."
     },
     "runtime/device_bridges/serial_communication/modules/qm_indicator/views/model/exports/utm.usdc.gz": {
-      "sha256": "145e60fd97e812ce1d7e1a6aaa602d881e0353680c129a99afdab38dda8bbfb6",
+      "sha256": "be31beed22fd0c3c910b7f774e57a4b4d4f78b8f7db75ce485fac907b445e478",
       "review": "Generated UTM model geometry/kinematics only, losslessly gzip-compressed for distribution; decompressed content reviewed for local paths and credential patterns. GLB/USD geometry matches the operator-requested finalized model; embedded/static labels are synthetic. No reference photos, manuals, live telemetry or private profiles. Emergency-stop CC BY 3.0 attribution retained."
     },
     "runtime/device_bridges/serial_communication/modules/qm_indicator/views/model/scene.json.gz": {
-      "sha256": "9ed306156e6c2e9178bab0c82d643ba1c6e6dac8010b6eb1a371a83e66ab7ba3",
+      "sha256": "7691011edb7ce6306ea79305a07891784850bd6547c3c0c9eca56820a3d865f5",
       "review": "Generated UTM model geometry/kinematics only, losslessly gzip-compressed for distribution; decompressed content reviewed for local paths and credential patterns. GLB/USD geometry matches the operator-requested finalized model; embedded/static labels are synthetic. No reference photos, manuals, live telemetry or private profiles. Emergency-stop CC BY 3.0 attribution retained."
     },
     "runtime/device_bridges/serial_communication/modules/qm_indicator/views/model/textures/indicator.png": {

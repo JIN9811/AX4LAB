@@ -237,13 +237,13 @@
       "measurement_id": "indicator_center_z"
     },
     "indicator_column_clearance": {
-      "value": 75.44695574496927,
-      "source": "Derived from115/70mm links rising20/15mm,90/75mm elbow/wrist rear offsets and30mm wall swivel offset. Elbow knuckles stack42mm apart; mount and panel share the same fore-aft plane.",
+      "value": 85.44695574496927,
+      "source": "Derived from115/70mm links rising20/15mm,90/75mm elbow/wrist rear offsets and40mm wall swivel offset. Elbow centres stack32mm apart; mount and panel share the same fore-aft plane.",
       "measurement_status": "derived_display_geometry"
     },
     "indicator_arm_elbow_offset": {
-      "value": 98.7386354243376,
-      "source": "Derived from115/70mm links rising20/15mm,90/75mm elbow/wrist rear offsets and30mm wall swivel offset. Elbow knuckles stack42mm apart; mount and panel share the same fore-aft plane.",
+      "value": 108.7386354243376,
+      "source": "Derived from115/70mm links rising20/15mm,90/75mm elbow/wrist rear offsets and40mm wall swivel offset. Elbow centres stack32mm apart; mount and panel share the same fore-aft plane.",
       "measurement_status": "derived_display_geometry"
     },
     "frame_y_offset": {
@@ -489,13 +489,13 @@
       "measurement_status": "photo_constrained_user_adjustment"
     },
     "indicator_elbow_stack_height": {
-      "value": 42,
-      "source": "Photo30611 and latest user correction: a wall-side swivel supports the long first arm; the short second arm connects to a separate upper knuckle stacked coaxially above the first-arm knuckle.42mm centre separation and30mm wall pivot stand-off are photo-constrained display approximations, not directly measured.",
+      "value": 32,
+      "source": "Rechecked close-up30618: the lower central barrel is shorter than the upper housing.32mm centre separation gives31mm lower barrel; photo-ratio reconstruction, not a direct measured dimension.",
       "measurement_status": "photo_constrained_user_adjustment"
     },
     "indicator_wall_pivot_offset": {
-      "value": 30,
-      "source": "Photo30611 and latest user correction: a wall-side swivel supports the long first arm; the short second arm connects to a separate upper knuckle stacked coaxially above the first-arm knuckle.42mm centre separation and30mm wall pivot stand-off are photo-constrained display approximations, not directly measured.",
+      "value": 40,
+      "source": "User correction: the first body-side swivel overlaps the wall shoe. Move its axis10mm outward, from30 to40mm off the column face, leaving nominal10mm between the12mm shoe and18mm-radius swivel; extend the shelf accordingly. Visual clearance adjustment, not measured.",
       "measurement_status": "photo_constrained_user_adjustment"
     }
   },
@@ -527,7 +527,7 @@
     "bolt_thread_diameter": "unobservable: clearance holes are display approximations",
     "top_plate_thickness_mm": 2,
     "top_plate_thickness_status": "Unmeasured display thickness only; central combined beam+plate thickness remains50mm. Overall height1910mm unchanged.",
-    "indicator_end_joint": "New close-ups30618/30620: small white terminal swivel integrated with cast upper arm, open top socket, short black U-shaped tilt yoke and circular rear-plate hub. Swivel diameter28 x height40mm; hidden pivot dimensions remain visual approximations.",
+    "indicator_end_joint": "Close-up30618/30620: small white terminal swivel integrated with cast upper arm, open top socket, short black U-shaped tilt yoke and circular rear-plate hub. Swivel diameter28 x height30mm; hidden pivot dimensions remain visual approximations.",
     "indicator_arm_shells": "New close-ups30618/30619/30620: curved tapered white castings, black teardrop top covers and black underside cover; two superposed central knuckles; concave-sided broad mounting plate. Reconstructed silhouette, not a manufacturing CAD drawing."
   }
 }
