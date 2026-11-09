@@ -43,6 +43,7 @@ function applyCalibration(snapshot) {
 
 async function refresh() {
   if (stopped) return;
+  const started=performance.now();
   if (!document.hidden) {
     controller=new AbortController();
     const timeout=setTimeout(()=>controller?.abort(),5000);
@@ -54,7 +55,8 @@ async function refresh() {
         state:'unavailable',stale:true,age_s:null,measurement:null,error:error.message});
     } finally {clearTimeout(timeout);controller=null;}
   }
-  if (!stopped && profileId) timer=setTimeout(refresh,500);
+  // 10 Hz start-to-start without overlapping requests or a catch-up burst.
+  if (!stopped && profileId) timer=setTimeout(refresh,Math.max(0,100-(performance.now()-started)));
 }
 
 window.addEventListener('pagehide',()=>{stopped=true;clearTimeout(timer);controller?.abort();});
