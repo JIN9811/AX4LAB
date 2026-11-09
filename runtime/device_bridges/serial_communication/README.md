@@ -80,6 +80,10 @@ Adding a deployed view also requires explicit wheel/sdist entries in
 QM100T's `views/model/` contains its measured scene, viewer, vendor licenses and
 `calibration.mjs`. The installed reference maps |DISP2|=677.8 mm to the operator's
 30 mm compression gap. The view reads the existing latest-measurement API only.
+The model display targets 10 Hz with one read in flight. Normal successful
+profile/status/latest/events GETs are omitted from terminal access logs;
+HTTP failures and explicit device actions remain visible. This does not disable
+the in-page raw-event inspector or user-started recordings.
 The module-owned `views/workcell/` entry embeds the local MoveIt workcell viewer
 at port 8878, preserving the selected profile. See
 [model integration](../../../docs/gui/qm100t_model.md).

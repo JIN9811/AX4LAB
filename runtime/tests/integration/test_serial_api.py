@@ -3,6 +3,48 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from fastapi.templating import Jinja2Templates
+import io
+import logging
+from types import SimpleNamespace
+
+
+def test_serial_polling_is_quiet_but_commands_and_failures_remain_visible(tmp_path):
+    from device_bridges.serial_communication.host import install_serial_workspace
+
+    logger = logging.getLogger('uvicorn.access')
+    previous = (logger.handlers[:], logger.filters[:], logger.level, logger.propagate)
+    output = io.StringIO()
+    logger.handlers = [logging.StreamHandler(output)]
+    logger.filters = []
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    try:
+        paths = SimpleNamespace(memory_root=tmp_path/'memory', log_root=tmp_path/'logs')
+        install_serial_workspace(FastAPI(), paths, None)
+        install_serial_workspace(FastAPI(), paths, None)
+        for method, path, status in [
+            ('GET', '/api/serial/profiles', 200),
+            ('GET', '/api/serial/profiles/device/latest', 200),
+            ('GET', '/api/serial/profiles/device/status', 200),
+            ('GET', '/api/serial/profiles/device/events?after=12', 200),
+        ]:
+            logger.info('%s - "%s %s HTTP/%s" %d', '127.0.0.1', method, path, '1.1', status)
+        assert output.getvalue() == ''
+        for method, path, status in [
+            ('GET', '/api/serial/profiles/device/latest', 500),
+            ('GET', '/api/serial/profiles/device/latest', 403),
+            ('POST', '/api/serial/profiles/device/connect', 200),
+            ('POST', '/api/serial/profiles/device/disconnect', 200),
+            ('GET', '/api/unrelated/status', 200),
+        ]:
+            logger.info('%s - "%s %s HTTP/%s" %d', '127.0.0.1', method, path, '1.1', status)
+            assert path in output.getvalue()
+            output.seek(0); output.truncate()
+        logger.info('Unexpected access log format')
+        assert 'Unexpected access log format' in output.getvalue()
+        assert len(logger.filters) == 1
+    finally:
+        logger.handlers, logger.filters, logger.level, logger.propagate = previous
 
 
 @pytest.fixture
