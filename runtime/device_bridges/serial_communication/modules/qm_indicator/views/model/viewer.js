@@ -107,7 +107,8 @@ async function init() {
       const dims=model.provenance.dimensions;
       const x=(dims.frame_width.value/2+dims.indicator_column_clearance.value+dims.indicator_width.value/2)/1000;
       const z=dims.indicator_center_height.value/1000;
-      controls.target.set(x-.045,frameY+.045,z-.025);camera.position.set(x+.48,frameY+.65,z+.24);
+      const mountY=frameY+(dims.indicator_mount_y_offset?.value??70)/1000;
+      controls.target.set(x-.045,mountY-.025,z-.025);camera.position.set(x+.48,mountY+.58,z+.24);
     } else if(view==='work') {
       const center=contactZ+Math.min(gap,.45)/2+.050;
       controls.target.set(0,frameY,center);camera.position.set(.46,frameY-.68,center+.32);
