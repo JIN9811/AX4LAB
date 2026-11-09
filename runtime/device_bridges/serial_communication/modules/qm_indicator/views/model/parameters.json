@@ -210,7 +210,7 @@
     },
     "indicator_width": {
       "value": 180,
-      "source": "photo 30608: Approximate ruler reading difference 320-140=180 mm. Ruler is not exactly coplanar or parallel with cabinet horizontal edges.",
+      "source": "Photo30608 frontal ruler: enclosure edges intersect approximately14cm and32cm marks;320-140=180mm. Rechecked after user request to preserve the front-measured span independently of the folded arm. Ruler/face perspective prevents exact mount stand-off measurement.",
       "uncertainty_mm": 8,
       "evidence": "measurements/peripheral-measurements.json",
       "measurement_id": "indicator_width"
@@ -237,13 +237,13 @@
       "measurement_id": "indicator_center_z"
     },
     "indicator_column_clearance": {
-      "value": 87.26491972961941,
-      "source": "Derived X projection from70/115mm articulated links with40mm rearward reach each and12mm wall shoe; panel/mount centres share Y and Z.",
+      "value": 99.44450527558871,
+      "source": "Derived from115/70mm links rising20/15mm,65/50mm elbow/wrist rear offsets and30mm wall swivel offset. Elbow knuckles are stacked42mm apart; mount and panel share the same fore-aft plane.",
       "measurement_status": "derived_display_geometry"
     },
     "indicator_arm_elbow_offset": {
-      "value": 69.44562646538029,
-      "source": "Derived X projection from70/115mm articulated links with40mm rearward reach each and12mm wall shoe; panel/mount centres share Y and Z.",
+      "value": 122.73618495495704,
+      "source": "Derived from115/70mm links rising20/15mm,65/50mm elbow/wrist rear offsets and30mm wall swivel offset. Elbow knuckles are stacked42mm apart; mount and panel share the same fore-aft plane.",
       "measurement_status": "derived_display_geometry"
     },
     "frame_y_offset": {
@@ -459,18 +459,43 @@
       "source": "2026-11-09 user correction: reverse the fore/aft indicator mounting offset about the right column centre. Previous +70 mm display offset becomes -70 mm; magnitude remains approximate, not newly measured."
     },
     "indicator_arm_inner_length": {
-      "value": 70,
-      "source": "2026-11-09 user photo correction: lengthen both articulated links and align wall-mount/panel centres in depth and height. Inner/outer links increased about20%; rear pivot reach retained. Display reconstruction, not a direct ruler measurement.",
+      "value": 115,
+      "source": "Latest user photo clarification: first link is longer and slopes slightly upward, second is shorter and also slopes upward.115/70mm lengths with20/15mm rise reproduce this proportion; inferred display geometry, not direct ruler measurements.",
       "measurement_status": "photo_constrained_user_adjustment"
     },
     "indicator_arm_outer_length": {
-      "value": 115,
-      "source": "2026-11-09 user photo correction: lengthen both articulated links and align wall-mount/panel centres in depth and height. Inner/outer links increased about20%; rear pivot reach retained. Display reconstruction, not a direct ruler measurement.",
+      "value": 70,
+      "source": "Latest user photo clarification: first link is longer and slopes slightly upward, second is shorter and also slopes upward.115/70mm lengths with20/15mm rise reproduce this proportion; inferred display geometry, not direct ruler measurements.",
       "measurement_status": "photo_constrained_user_adjustment"
     },
     "indicator_rear_pivot_offset": {
-      "value": 80,
-      "source": "2026-11-09 user photo correction: lengthen both articulated links and align wall-mount/panel centres in depth and height. Inner/outer links increased about20%; rear pivot reach retained. Display reconstruction, not a direct ruler measurement.",
+      "value": 50,
+      "source": "Photo30611 and user correction: wrist50mm behind the common wall-mount/panel centre plane; shorter rear pivot neck permits a distinct folded return link. Display reconstruction, not a direct ruler measurement.",
+      "measurement_status": "photo_constrained_user_adjustment"
+    },
+    "indicator_elbow_rear_offset": {
+      "value": 65,
+      "source": "Photo30611 and user correction: monitor-arm dogleg, first link goes rearward and second returns forward. Elbow65mm behind the mount, wrist50mm behind it. Display pose inferred from appearance, not a direct measurement.",
+      "measurement_status": "photo_constrained_user_adjustment"
+    },
+    "indicator_arm_inner_rise": {
+      "value": 20,
+      "source": "Latest user photo clarification: first link is longer and slopes slightly upward, second is shorter and also slopes upward.115/70mm lengths with20/15mm rise reproduce this proportion; inferred display geometry, not direct ruler measurements.",
+      "measurement_status": "photo_constrained_user_adjustment"
+    },
+    "indicator_arm_outer_rise": {
+      "value": 15,
+      "source": "Latest user photo clarification: first link is longer and slopes slightly upward, second is shorter and also slopes upward.115/70mm lengths with20/15mm rise reproduce this proportion; inferred display geometry, not direct ruler measurements.",
+      "measurement_status": "photo_constrained_user_adjustment"
+    },
+    "indicator_elbow_stack_height": {
+      "value": 42,
+      "source": "Photo30611 and latest user correction: a wall-side swivel supports the long first arm; the short second arm connects to a separate upper knuckle stacked coaxially above the first-arm knuckle.42mm centre separation and30mm wall pivot stand-off are photo-constrained display approximations, not directly measured.",
+      "measurement_status": "photo_constrained_user_adjustment"
+    },
+    "indicator_wall_pivot_offset": {
+      "value": 30,
+      "source": "Photo30611 and latest user correction: a wall-side swivel supports the long first arm; the short second arm connects to a separate upper knuckle stacked coaxially above the first-arm knuckle.42mm centre separation and30mm wall pivot stand-off are photo-constrained display approximations, not directly measured.",
       "measurement_status": "photo_constrained_user_adjustment"
     }
   },
@@ -501,6 +526,7 @@
     "small_thread_pitch": "unobservable: omitted",
     "bolt_thread_diameter": "unobservable: clearance holes are display approximations",
     "top_plate_thickness_mm": 2,
-    "top_plate_thickness_status": "Unmeasured display thickness only; central combined beam+plate thickness remains50mm. Overall height1910mm unchanged."
+    "top_plate_thickness_status": "Unmeasured display thickness only; central combined beam+plate thickness remains50mm. Overall height1910mm unchanged.",
+    "indicator_end_joint": "Photo30611 and user: white vertical terminal swivel with open top socket, black rear bracket with transverse tilt hinge. Swivel diameter34 x height54mm and small hinge dimensions are display approximations, not direct measurements."
   }
 }
