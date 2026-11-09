@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readSerialSnapshot, calibratedGapMm} from '../../device_bridges/serial_communication/modules/qm_indicator/views/model/serial-bridge.mjs';
-import {measurementToGapMm} from '../../device_bridges/serial_communication/modules/qm_indicator/views/model/calibration.mjs';
+import {measurementToGapMm, gapFromDownwardDisplacementMm} from '../../device_bridges/serial_communication/modules/qm_indicator/views/model/calibration.mjs';
 
 const sample = {
   state:'connected', stale:false, age_s:0.1,
@@ -52,4 +52,22 @@ test('operator function receives the original measurement and snapshot without a
     assert.equal(snapshot,sample);
     return 123.4;
   },limits),123.4);
+});
+
+test('absolute displacement increases downward and decreases the compression gap', () => {
+  for (const sign of [-1, 1]) {
+    assert.equal(gapFromDownwardDisplacementMm(sign * 677.8, 677.8, 30), 30);
+    assert.equal(gapFromDownwardDisplacementMm(sign * 687.8, 677.8, 30), 20);
+    assert.equal(gapFromDownwardDisplacementMm(sign * 667.8, 677.8, 30), 40);
+    assert.equal(gapFromDownwardDisplacementMm(sign * 707.8, 677.8, 30), 0);
+  }
+  // Beyond contact must be rejected by the existing range gate, never clamped.
+  assert.equal(gapFromDownwardDisplacementMm(708.8, 677.8, 30), -1);
+  for (const value of [null, undefined, '677.8', NaN, Infinity]) {
+    assert.equal(gapFromDownwardDisplacementMm(value, 677.8, 30), null);
+    assert.equal(gapFromDownwardDisplacementMm(677.8, value, 30), null);
+    assert.equal(gapFromDownwardDisplacementMm(677.8, 677.8, value), null);
+  }
+  assert.equal(gapFromDownwardDisplacementMm(677.8, -677.8, 30), null);
+  assert.equal(gapFromDownwardDisplacementMm(677.8, 677.8, -30), null);
 });

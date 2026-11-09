@@ -37,6 +37,7 @@ def test_qm_model_deployment_is_complete_and_preserves_corrected_geometry():
     assert 'CabinetBadge' not in names
     assert 'CabinetWarranty' not in names
     assert scene['kinematics']['frame_y_offset'] == -.095
+    assert scene['kinematics']['default_gap'] == .030
     for part in scene['parts']:
         if part.get('texture'):
             assert (assets/part['texture']).is_file()

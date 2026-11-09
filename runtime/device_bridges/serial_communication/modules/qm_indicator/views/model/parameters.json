@@ -456,7 +456,8 @@
     }
   },
   "preview": {
-    "default_gap_mm": 110,
+    "default_gap_mm": 30,
+    "default_gap_source": "2026-11-09 user: current physical gap between the compression platen contact surfaces is 30 mm; independent of instrument displacement datum.",
     "min_gap_mm": 0,
     "max_gap_mm": 740,
     "animation_seconds": 8,

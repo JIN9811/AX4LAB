@@ -11,6 +11,7 @@ crosshead. Indicator cable/connectors and exterior front/right stickers are
 omitted as requested. Base width/depth are 920/750 mm, deck height 531 mm,
 overall height 1910 mm, column widths/clearance 205/472/205 mm. Frame depth
 placement is front 120 / column 320 / rear 310 mm.
+The initial compression platen contact gap is 30 mm, as measured by the operator.
 
 ## Serial data path
 
@@ -38,16 +39,27 @@ Network errors clear the current sample. The latest snapshot is available as
 Edit `runtime/device_bridges/serial_communication/modules/qm_indicator/views/model/calibration.mjs`:
 
 ```js
-export function measurementToGapMm(measurement, snapshot) {
-  return null; // Replace only after measuring the instrument-to-gap mapping.
-}
+export const calibration = Object.freeze({
+  channel: 'disp1',          // Confirm the instrument's displacement channel.
+  referenceAbsMm: null,     // Absolute displacement at the reference pose.
+  referenceGapMm: 30,       // Measured compression gap at that same pose.
+});
 ```
 
 Return the **physical distance between the two platen contact surfaces in mm**.
-`null` leaves the manual model position unchanged. No zero, sign, channel choice
-or scale is provided: the operator performs calibration. Instrument DISP is not
-an absolute gap. The default function always returns `null`, so serial data
-cannot move the preview until the function is explicitly changed.
+`null` leaves the manual model position unchanged. The operator specified that
+absolute displacement increases downward, with an instrument datum associated
+with the upper tensile fixture. The prepared mapping is therefore:
+
+`gap_mm = referenceGapMm - (abs(displacement_mm) - referenceAbsMm)`
+
+The reference remains unset, so serial data cannot move the preview yet. Confirm
+the channel and measure displacement and compression gap at the same pose before
+setting `referenceAbsMm`. The mentioned 677.8 mm was tentative and is not applied.
+If confirmed at a 30 mm gap, the result would be `707.8 - abs(displacement_mm)`;
+a 10 mm increase in absolute displacement then reduces the gap to 20 mm.
+Only finite numeric readings whose decoded unit is `mm` are used. No zeroing or
+calibration command is sent to the indicator; displayed raw readings are retained.
 
 Only connected, non-stale samples marked valid with a valid checksum reach the
 function. Its result must be a finite number inside the model's 0–740 mm range;
@@ -83,4 +95,4 @@ manual PDF, live readings or local profile files are included.
 Third-party credits travel with the bundle: Three.js (MIT, `vendor/THREE-LICENSE.txt`)
 and the emergency-stop cap/collar by Henrique Enzweiler from FreeCAD-library
 (CC BY 3.0, `assets/emergency-stop/ATTRIBUTION.md`). The source model was finalized
-on 2026-11-09; this integration changes navigation and the serial seam only.
+on 2026-11-09; the current 30 mm pose is retained in the viewer and exports.

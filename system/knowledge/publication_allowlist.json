@@ -1238,28 +1238,28 @@
       "review": "2026-10-24 full text review: sanitized offline software validation narrative and commands only; explicitly retains failed, skipped and incomplete tests plus hardware/Windows limitations. No raw logs, credentials or private experiment files. This approval does not re-certify historical results."
     },
     "runtime/device_bridges/serial_communication/modules/qm_indicator/views/model/exports/textures/indicator.png": {
-      "sha256": "cba966a5f102ee35b2fa6b086959555f92264ba75a4585c8af59ef33a08ae897",
-      "review": "Visually reviewed generated model label: synthetic indicator preview or BONGSHIN DSCK product specifications, no serial numbers, people, telemetry, screenshots or private source images. Export copy is byte-identical to the viewer texture."
+      "sha256": "2e817a99abe9347645365ff64a4547fd1a480556037419b29438dfb6a1fa9d6f",
+      "review": "Visually reviewed generated indicator: schematic model preview with 30.00 mm gap, no serial numbers, people, telemetry, screenshots or private source images. Export copy is byte-identical to the viewer texture."
     },
     "runtime/device_bridges/serial_communication/modules/qm_indicator/views/model/exports/textures/loadcell.png": {
       "sha256": "ac6ca3ba44a189ee33e30cd439116195265191d162e4741715d2b8aa019285fe",
       "review": "Visually reviewed generated model label: synthetic indicator preview or BONGSHIN DSCK product specifications, no serial numbers, people, telemetry, screenshots or private source images. Export copy is byte-identical to the viewer texture."
     },
     "runtime/device_bridges/serial_communication/modules/qm_indicator/views/model/exports/utm.glb.gz": {
-      "sha256": "228ee2efd8738da0a75110ef59f53d25e5ae7fd73165922765d2f5fb55a118e0",
+      "sha256": "e43ceaabec0548fe4b93a6baca79a5ace9de0851b0416e05d3974d5d4eaf7886",
       "review": "Generated UTM model geometry/kinematics only, losslessly gzip-compressed for distribution; decompressed content reviewed for local paths and credential patterns. GLB/USD geometry matches the operator-requested finalized model; embedded/static labels are synthetic. No reference photos, manuals, live telemetry or private profiles. Emergency-stop CC BY 3.0 attribution retained."
     },
     "runtime/device_bridges/serial_communication/modules/qm_indicator/views/model/exports/utm.usdc.gz": {
-      "sha256": "2c5966a9afc90b37c194e68f395346a89da52030e83dacc8f36f6ea37a8b171c",
+      "sha256": "4e278911c32a58427b4799ea3e47d62266db746d8a3505b82c6c23ed97bd9a9d",
       "review": "Generated UTM model geometry/kinematics only, losslessly gzip-compressed for distribution; decompressed content reviewed for local paths and credential patterns. GLB/USD geometry matches the operator-requested finalized model; embedded/static labels are synthetic. No reference photos, manuals, live telemetry or private profiles. Emergency-stop CC BY 3.0 attribution retained."
     },
     "runtime/device_bridges/serial_communication/modules/qm_indicator/views/model/scene.json.gz": {
-      "sha256": "2f1a1b0306a3971842377d9f95fa27c429b132eb7fe1d0fb7ccc91b0cb5bd27b",
+      "sha256": "a447a94b5cc1d1ec503d9dde4f07922f96c36c7d52a075f162d70bd8a4a6a3e7",
       "review": "Generated UTM model geometry/kinematics only, losslessly gzip-compressed for distribution; decompressed content reviewed for local paths and credential patterns. GLB/USD geometry matches the operator-requested finalized model; embedded/static labels are synthetic. No reference photos, manuals, live telemetry or private profiles. Emergency-stop CC BY 3.0 attribution retained."
     },
     "runtime/device_bridges/serial_communication/modules/qm_indicator/views/model/textures/indicator.png": {
-      "sha256": "cba966a5f102ee35b2fa6b086959555f92264ba75a4585c8af59ef33a08ae897",
-      "review": "Visually reviewed generated model label: synthetic indicator preview or BONGSHIN DSCK product specifications, no serial numbers, people, telemetry, screenshots or private source images. Export copy is byte-identical to the viewer texture."
+      "sha256": "2e817a99abe9347645365ff64a4547fd1a480556037419b29438dfb6a1fa9d6f",
+      "review": "Visually reviewed generated indicator: schematic model preview with 30.00 mm gap, no serial numbers, people, telemetry, screenshots or private source images. Export copy is byte-identical to the viewer texture."
     },
     "runtime/device_bridges/serial_communication/modules/qm_indicator/views/model/textures/loadcell.png": {
       "sha256": "ac6ca3ba44a189ee33e30cd439116195265191d162e4741715d2b8aa019285fe",

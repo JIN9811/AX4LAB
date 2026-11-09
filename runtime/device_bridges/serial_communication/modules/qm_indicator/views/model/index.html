@@ -18,7 +18,7 @@
   <section class="viewport" aria-label="UTM 3차원 모델">
     <canvas id="scene" aria-label="마우스로 회전하고 확대할 수 있는 UTM 모델"></canvas>
     <div class="viewtitle"><h1>Universal Testing Machine</h1><p>실측 사진 · 제조사 도면 기반 재구성</p></div>
-    <div id="gapLabel" class="badge gap">간격 110.0 mm</div><div id="fixedLabel" class="badge fixed">하부 압축판 · 고정</div>
+    <div id="gapLabel" class="badge gap">간격 30.0 mm</div><div id="fixedLabel" class="badge fixed">하부 압축판 · 고정</div>
     <nav class="toolbar" aria-label="카메라 시점"><button data-view="iso" class="active">3D</button><button data-view="front">정면</button><button data-view="rear">후면</button><button data-view="side">측면</button><button data-view="work">작업부 확대</button><button data-view="indicator">인디케이터 뒤</button><button data-view="emergency">비상정지</button></nav>
     <div class="orbit-tip">드래그 회전 · 휠 확대 · 우클릭 이동</div>
     <div id="loading" class="loading">UTM 모델 불러오는 중…</div>
@@ -32,10 +32,10 @@
     </section>
     <div class="divider"></div>
     <div class="eyebrow">CROSSHEAD POSITION</div><div class="controltitle">압축판 간격<span class="axis">Z AXIS</span></div>
-    <div class="numberrow"><input id="gapInput" type="number" min="0" max="740" step="0.1" value="110" aria-label="압축판 간격 mm"><span class="unit">mm</span></div>
-    <input id="gapSlider" type="range" min="0" max="740" step="0.1" value="110" aria-label="압축판 간격 슬라이더">
+    <div class="numberrow"><input id="gapInput" type="number" min="0" max="740" step="0.1" value="30" aria-label="압축판 간격 mm"><span class="unit">mm</span></div>
+    <input id="gapSlider" type="range" min="0" max="740" step="0.1" value="30" aria-label="압축판 간격 슬라이더">
     <div class="range-labels"><span>0 · 접촉</span><span id="maxGapLabel">740 mm</span></div>
-    <div class="presets"><button data-gap="0">접촉</button><button data-gap="110">기본 간격</button><button data-gap="450">크게 열기</button></div>
+    <div class="presets"><button data-gap="0">접촉</button><button data-gap="30">기본 간격</button><button data-gap="450">크게 열기</button></div>
     <button id="play" class="primary" aria-pressed="false"><span id="playIcon">▷</span><span id="playText">움직임 재생</span></button><p class="subnote">가속된 동작 미리보기</p>
     <div class="divider"></div><div class="eyebrow">POSITION READOUT</div>
     <div class="row"><span class="muted">위 압축판 접촉면</span><strong id="upperReadout">—</strong></div>

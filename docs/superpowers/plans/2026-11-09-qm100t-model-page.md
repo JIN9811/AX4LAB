@@ -2,8 +2,10 @@
 
 User scope: add the completed measured UTM model under Device Bridge → Serial
 Communication → Qmesys QM100T, prepare the serial data path only, commit and push.
-The operator will supply calibration; no displacement offset, sign or scale is
-chosen here. Existing model geometry and manual movement must be preserved.
+The operator supplies calibration. Later clarification specifies a 30 mm current
+compression gap and absolute displacement increasing downward. Prepare that
+mapping but leave its unconfirmed reference unset. Existing model geometry and
+manual movement must be preserved.
 
 1. Add a QM-only model link and `/serial/modules/qm_indicator/views/model` page. Preserve the selected
    profile in both directions; allow a manual preview without a profile. Reject
@@ -34,7 +36,7 @@ generic module/view routes and metadata-rendered links. No device-name branches
 in the shared shell, no descriptors containing executable code or external URLs,
 no provider imports during discovery, and no files escaping the view directory.
 
-Validation: serial suite 52 passed; JavaScript calibration/data-path suite 5
+Validation: serial suite 52 passed; JavaScript calibration/data-path suite 6
 passed; independent module/geometry review found no remaining important defect.
 Browser navigation, profile-preserving return, CAS isolation, 0/450 mm movement,
 and disconnected/manual state verified on a hardware-disabled local server using
@@ -52,3 +54,13 @@ The development checkout's group-write modes otherwise cause an existing wheel
 permission assertion failure. Publication size checks require lossless gzip for
 the scene and GLB/USD; decoded bytes remain unchanged. Generated textures were
 visually reviewed and exact asset hashes are registered for publication.
+
+Follow-up: the standalone model and bundled scene/GLB/USD now start at the
+operator's 30 mm compression gap. Standalone geometry/export tests: 12 passed.
+The optional calibration helper uses absolute downward displacement; reference
+677.8 mm remains tentative and unset. Synthetic samples verify both signs,
+direction, contact and invalid-reference rejection.
+
+The outgoing publication check found an existing UI audit's hard-coded personal
+Chromium path. It now uses Playwright's default browser, with an optional
+AX4LAB_TEST_CHROMIUM environment override; no unrelated application behavior changes.
